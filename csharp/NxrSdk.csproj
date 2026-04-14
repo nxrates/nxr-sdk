@@ -9,7 +9,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>12</LangVersion>
-    <Description>C# SDK for NX Rates -- MITCH wire format codec, REST, and WebSocket streaming.</Description>
+    <Description>C# SDK for NX Rates -- REST and WebSocket streaming client.</Description>
   </PropertyGroup>
+
+  <!-- MITCH wire format codec: https://github.com/nxrates/mitch/tree/main/impl/csharp -->
+  <ItemGroup>
+    <PackageReference Include="NxrMitch" Version="0.2.*" />
+  </ItemGroup>
 
 </Project>

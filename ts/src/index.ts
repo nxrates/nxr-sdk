@@ -26,25 +26,27 @@
  * @see {@link https://github.com/nxrates/mitch MITCH Protocol Spec}
  */
 
-// MITCH wire types and constants
+// Re-export MITCH wire types from the codec package
 export {
   // Type codes
-  MSG_TRADE, MSG_ORDER, MSG_TICK, MSG_INDEX, MSG_BAR, MSG_ORDER_BOOK,
-  // Wire codes (v2)
-  WIRE_TRADE, WIRE_ORDER, WIRE_TICK, WIRE_INDEX, WIRE_ORDER_BOOK, WIRE_BAR,
-  // Body sizes
+  MessageType,
+  // Wire codes
+  WireCode,
+  // Size constants
   SIZE_HEADER, SIZE_TRADE, SIZE_ORDER, SIZE_TICK, SIZE_INDEX, SIZE_BAR, SIZE_ORDER_BOOK,
   // Timestamp codec
   EPOCH_2010_US, fromEpochUs, toEpochUs, fromEpochMs, toEpochMs, readU48, writeU48,
+  // Wire code mapping
+  wireToAscii, asciiToWire,
   // Header
-  readHeader, writeHeader, wireCodeToMsgType, msgTypeToWireCode,
-  // Body readers (for raw MITCH frames: file I/O, UDP, mmap)
+  packHeader, unpackHeader, headerMsgType, headerProviderId, createHeader,
+  // Body readers
   readIndex, readTick, readTrade,
   // Derived helpers
   mid, spreadUbp, spreadBps, ciToPrice,
   // Types
   type MitchHeader, type Index, type Tick, type Trade,
-} from './mitch.js';
+} from '@nxrates/mitch';
 
 // Zero-copy WS batch decoder
 export {

@@ -11,7 +11,7 @@
     <packaging>jar</packaging>
 
     <name>NX Rates SDK</name>
-    <description>Java SDK for NX Rates — MITCH wire format codec and REST/WebSocket client</description>
+    <description>Java SDK for NX Rates — REST/WebSocket client (depends on io.mitch codec)</description>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
@@ -21,6 +21,13 @@
     </properties>
 
     <dependencies>
+        <!-- MITCH wire format codec: https://github.com/nxrates/mitch/tree/main/impl/java -->
+        <dependency>
+            <groupId>io.mitch</groupId>
+            <artifactId>mitch</artifactId>
+            <version>0.2.0</version>
+        </dependency>
+
         <!-- WebSocket client API (jakarta) -->
         <dependency>
             <groupId>jakarta.websocket</groupId>

@@ -1,6 +1,6 @@
-"""NX Rates SDK — MITCH wire types, REST + WebSocket client."""
+"""NX Rates SDK — REST + WebSocket client, re-exports MITCH wire types."""
 
-from nxr.mitch import (
+from mitch import (
     EPOCH_2010_US,
     MitchHeader,
     Tick,

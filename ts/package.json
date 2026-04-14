@@ -1,0 +1,39 @@
+{
+  "name": "@nxr/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "NX Rates client SDK — zero-copy binary WebSocket, REST, MITCH wire types",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./mitch": {
+      "import": "./dist/mitch.js",
+      "types": "./dist/mitch.d.ts"
+    },
+    "./decode": {
+      "import": "./dist/decode.js",
+      "types": "./dist/decode.d.ts"
+    },
+    "./client": {
+      "import": "./dist/client.js",
+      "types": "./dist/client.d.ts"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nxrates/nxr-sdk"
+  }
+}

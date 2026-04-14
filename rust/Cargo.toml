@@ -1,0 +1,21 @@
+[package]
+name = "nxr-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "NX Rates consumer SDK — subscribe to live market data via REST, WebSocket, UDP multicast, or shared-memory ring buffers"
+repository = "https://github.com/nxrates/nxr-sdk"
+keywords = ["finance", "market-data", "mitch", "hft"]
+
+[dependencies]
+mitch = { git = "https://github.com/nxrates/mitch.git", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["net", "rt", "macros", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+futures-util = "0.3"
+tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }

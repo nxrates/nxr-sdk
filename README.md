@@ -2,39 +2,37 @@
 
 Official multi-language SDK for [NX Rates](https://nxrates.io) market data.
 
-Subscribe to real-time FX/crypto index prices via REST, WebSocket, UDP multicast, or shared-memory ring buffers. All binary framing uses the [MITCH](https://github.com/nxrates/mitch) wire protocol (little-endian, packed structs).
+Subscribe to real-time FX/crypto index prices via REST, WebSocket, UDP multicast, or shared-memory ring buffers.
+
+MITCH wire types (structs, pack/unpack, timestamps) live in the [mitch](https://github.com/nxrates/mitch) repo. This SDK provides **client/transport** code that depends on and re-exports those types.
 
 ## Languages
 
 | Language | Path | Runtime / Deps | Install |
 |----------|------|----------------|---------|
-| **TypeScript** | [`ts/`](ts/) | Bun / Node 18+ | `bun add nxr-sdk` |
+| **TypeScript** | [`ts/`](ts/) | Bun / Node 18+ | `bun add @nxr/sdk` |
 | **Python** | [`python/`](python/) | 3.11+, aiohttp, websockets | `pip install nxr-sdk` |
 | **Go** | [`go/`](go/) | 1.22+, gorilla/websocket | `go get github.com/nxrates/nxr-sdk/go` |
 | **Rust** | [`rust/`](rust/) | tokio, reqwest, tungstenite | `cargo add nxr-sdk` |
 | **C#** | [`csharp/`](csharp/) | .NET 8+ | `dotnet add package NxrSdk` |
 | **Java** | [`java/`](java/) | 17+, Maven | `<artifactId>nxr-sdk</artifactId>` |
-| **C** | [`c/`](c/) | C99, header-only | `#include "mitch.h"` |
-| **C++** | [`cpp/`](cpp/) | C++17, header-only | `#include "mitch.hpp"` |
-| **Zig** | [`zig/`](zig/) | 0.13+ | `@import("mitch.zig")` |
 
-## Wire protocol
+C, C++, and Zig codec implementations are in [`mitch/impl/`](https://github.com/nxrates/mitch/tree/main/impl) (header-only, no client needed).
 
-All SDKs implement the same MITCH v2 binary format:
+## Architecture
 
 ```
-MitchHeader (16B)
-  [0..1]  type_provider  u16 LE  — [3:0]=wire_code, [15:4]=provider_id
-  [2..7]  timestamp      u48 LE  — 16us ticks since 2010-01-01
-  [8]     count          u8      — batch entry count
-  [9]     flags          u8      — [1:0]=version
-  [10..11] sequence      u16 LE  — gap detection
-  [12..15] reserved      4B
+mitch repo (codec)          nxr-sdk repo (client)
+├─ impl/rust/               ├─ rust/      → depends on mitch crate
+├─ impl/go/                 ├─ go/        → imports mitch Go module
+├─ impl/typescript/         ├─ ts/        → depends on @nxrates/mitch
+├─ impl/python/             ├─ python/    → depends on nxr-mitch
+├─ impl/java/               ├─ java/      → depends on io.mitch
+├─ impl/csharp/             ├─ csharp/    → references NxrMitch
+├─ impl/c/                  └─ (no client — codec-only)
+├─ impl/cpp/
+└─ impl/zig/
 ```
-
-Body types: Trade (24B), Tick (32B), Order (32B), Index (40B), Bar (128B), OrderBook (2072B).
-
-Timestamps encode as 48-bit ticks (16us resolution) offset from `2010-01-01T00:00:00Z` (epoch = 1,262,304,000,000,000 us).
 
 ## Transports
 
@@ -60,7 +58,7 @@ Binary frames on `wss://ws.nxrates.io/v1/stream`:
 
 ```
 WS Header (8B)
-  [0]    type     u8     — 'i' (index) or 's' (tick)
+  [0]    type     u8     — 1 (index) or 2 (tick)
   [1]    pad      u8
   [2..3] count    u16 LE — number of records
   [4..7] reserved 4B
@@ -74,31 +72,34 @@ Body: count x stride f64 values
 
 **TypeScript**
 ```ts
-import { NxrClient } from "nxr-sdk";
+import { NxrClient, IndexBatch } from "@nxr/sdk";
 
-const nxr = new NxrClient("https://api.nxrates.io");
-const symbols = await nxr.symbols();
-nxr.stream("wss://ws.nxrates.io/v1/stream", {
-  onIndex: (rows) => console.log(rows),
+const nxr = new NxrClient("http://nxr-svc:40004");
+const btc = await nxr.resolve("BTC/USDT");
+
+nxr.onIndex((batch: IndexBatch) => {
+  for (let i = 0; i < batch.count; i++) {
+    console.log(`ticker=${batch.ticker(i)} mid=${batch.mid(i)}`);
+  }
 });
+nxr.connect();
 ```
 
 **Python**
 ```python
 from nxr import NxrClient
 
-async with NxrClient("https://api.nxrates.io") as nxr:
-    symbols = await nxr.symbols()
-    async for msg in nxr.stream("wss://ws.nxrates.io/v1/stream"):
-        print(msg)
+client = NxrClient("http://localhost:40000")
+symbols = await client.symbols()
+await client.stream(on_index=lambda recs: print(recs))
 ```
 
 **Go**
 ```go
-client := nxr.NewClient("https://api.nxrates.io")
-symbols, _ := client.Symbols()
-client.Stream("wss://ws.nxrates.io/v1/stream", func(idx nxr.WsIndex) {
-    fmt.Printf("ticker=%d mid=%.2f\n", idx.Ticker, idx.Mid)
+client := nxr.NewClient("http://localhost:40000")
+symbols, _ := client.Symbols(ctx)
+client.Stream(ctx, func(idx []nxr.WsIndex) {
+    fmt.Printf("ticker=%.0f mid=%.2f\n", idx[0].Ticker, idx[0].Mid)
 }, nil)
 ```
 
@@ -110,18 +111,6 @@ let mut ws = nxr_sdk::WsStream::connect("wss://ws.nxrates.io/v1/stream").await?;
 while let Some(msg) = ws.recv().await {
     println!("{:?}", msg);
 }
-```
-
-## C / C++ / Zig
-
-These are header-only MITCH codec libraries (no network client). Use them to pack/unpack binary frames in your own transport layer, or link against the Rust FFI shared library (`libmitch.so`).
-
-```c
-#include "mitch.h"
-
-MitchHeader h;
-mitch_header_init(&h, 'i', 101, ts, 1);
-// send h + body over UDP / shared memory / etc.
 ```
 
 ## License

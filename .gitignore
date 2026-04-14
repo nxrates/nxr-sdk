@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+target/
+vendor/
+bin/
+obj/
+.gradle/
+build/
+
+# Build artifacts
+dist/
+*.so
+*.dylib
+*.dll
+*.exe
+*.o
+*.a
+*.class
+*.jar
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Package locks (bun only)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Env
+.env
+.env.*

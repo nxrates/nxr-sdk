@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>NxrSdk</PackageId>
+    <RootNamespace>NxRates.Sdk</RootNamespace>
+    <AssemblyName>NxrSdk</AssemblyName>
+    <OutputType>Library</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12</LangVersion>
+    <Description>C# SDK for NX Rates -- MITCH wire format codec, REST, and WebSocket streaming.</Description>
+  </PropertyGroup>
+
+</Project>

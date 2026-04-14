@@ -1,0 +1,65 @@
+/**
+ * @nxr/sdk — NX Rates client SDK for TypeScript/JavaScript.
+ *
+ * Zero-copy binary WebSocket decoding, REST client, MITCH wire types.
+ *
+ * ## Quick start
+ *
+ * ```ts
+ * import { NxrClient, IndexBatch } from '@nxr/sdk';
+ *
+ * const nxr = new NxrClient('http://nxr-svc:40004');
+ * const btc = await nxr.resolve('BTC/USDT');
+ *
+ * // Zero-copy hot path
+ * nxr.onIndex((batch: IndexBatch) => {
+ *   for (let i = 0; i < batch.count; i++) {
+ *     if (batch.ticker(i) === btc) {
+ *       console.log(`BTC mid=${batch.mid(i)} ci=${batch.ci(i)}`);
+ *     }
+ *   }
+ * });
+ *
+ * nxr.connect();
+ * ```
+ *
+ * @see {@link https://github.com/nxrates/mitch MITCH Protocol Spec}
+ */
+
+// MITCH wire types and constants
+export {
+  // Type codes
+  MSG_TRADE, MSG_ORDER, MSG_TICK, MSG_INDEX, MSG_BAR, MSG_ORDER_BOOK,
+  // Wire codes (v2)
+  WIRE_TRADE, WIRE_ORDER, WIRE_TICK, WIRE_INDEX, WIRE_ORDER_BOOK, WIRE_BAR,
+  // Body sizes
+  SIZE_HEADER, SIZE_TRADE, SIZE_ORDER, SIZE_TICK, SIZE_INDEX, SIZE_BAR, SIZE_ORDER_BOOK,
+  // Timestamp codec
+  EPOCH_2010_US, fromEpochUs, toEpochUs, fromEpochMs, toEpochMs, readU48, writeU48,
+  // Header
+  readHeader, writeHeader, wireCodeToMsgType, msgTypeToWireCode,
+  // Body readers (for raw MITCH frames: file I/O, UDP, mmap)
+  readIndex, readTick, readTrade,
+  // Derived helpers
+  mid, spreadUbp, spreadBps, ciToPrice,
+  // Types
+  type MitchHeader, type Index, type Tick, type Trade,
+} from './mitch.js';
+
+// Zero-copy WS batch decoder
+export {
+  // Constants
+  WS_MSG_INDEX, WS_MSG_TICK, WS_HEADER_BYTES, INDEX_STRIDE, TICK_STRIDE,
+  // Batch classes
+  IndexBatch, TickBatch,
+  // Dispatch
+  decodeFrame, readWsHeader,
+  // Types
+  type WsIndex, type WsTick, type WsFrameHeader, type DecodedFrame,
+} from './decode.js';
+
+// High-level client
+export {
+  NxrClient,
+  type TickerResponse, type WsState,
+} from './client.js';

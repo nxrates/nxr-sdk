@@ -3,19 +3,44 @@ name = "nxr-sdk"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "NX Rates consumer SDK — subscribe to live market data via REST, WebSocket, UDP multicast, or shared-memory ring buffers"
+description = "NX Rates SDK - MITCH types, IPC primitives, aggregation, resolution, config, and consumer client (REST/WebSocket/UDP multicast)"
 repository = "https://github.com/nxrates/nxr-sdk"
 keywords = ["finance", "market-data", "mitch", "hft"]
 
 [dependencies]
+# Canonical MITCH protocol crate. When nxr-sdk is embedded in the nx-rates
+# monorepo, this git URL is overridden via a workspace-level [patch] section
+# pointing at the local path (nx-rates/mitch/impl/rust).
 mitch = { git = "https://github.com/nxrates/mitch.git", features = ["bytemuck"] }
+
+# Zero-copy memory types
 bytemuck = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["net", "rt", "macros", "time"] }
-reqwest = { version = "0.12", features = ["json"] }
+
+# Async runtime (consumer-side needs net + rt + macros + time + sync for UDP/WS)
+tokio = { version = "1.52", features = ["net", "rt", "rt-multi-thread", "macros", "time", "sync", "io-util"] }
+
+# HTTP / REST client
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-webpki-roots"] }
+
+# Serde / JSON
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Error handling
 anyhow = "1"
+
+# Async utilities
+futures-util = { version = "0.3", features = ["sink"] }
+
+# Logging
 tracing = "0.1"
-futures-util = "0.3"
-tungstenite = { version = "0.24", features = ["native-tls"] }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Concurrent maps (aggregator / ticker resolution)
+dashmap = "6"
+
+# Compression helpers (gzip exchange frames)
+flate2 = "1"

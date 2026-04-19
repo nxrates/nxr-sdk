@@ -52,9 +52,11 @@
 
 pub mod agg;
 pub mod bar_builder;
+pub mod bars;
 pub mod client;
 pub mod compress;
 pub mod config;
+pub mod features;
 pub mod ipc;
 pub mod logging;
 pub mod providers;
@@ -116,4 +118,19 @@ pub use client::{
     NxrClient, WsStream, MulticastStream,
     WsMessage, WsIndex, WsTick, TickerResponse,
     DEFAULT_MCAST_ADDR, DEFAULT_MCAST_PORT,
+};
+
+// ---- Adaptive bars + Renko features ----
+
+pub use bars::{
+    MtfParkinsonCalculator, RenkoBar, RenkoConfig, RenkoFeatureExtractor, RenkoGenerator,
+    VolConfig, VolSource, compute_renko_features, grid_step_for_brick, renko_feature_names,
+    snap_to_25_grid, snap_to_grid,
+};
+
+// ---- ML feature engineering ----
+
+pub use features::{
+    Candle, MIN_BARS, N_CORE_FEATURES, N_FEATURES_WITH_TIME, compute_all_features,
+    compute_labels, compute_lookbacks, feature_names,
 };

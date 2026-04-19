@@ -29,7 +29,7 @@ mitch repo (codec)          nxr-sdk repo (client)
 ├─ impl/python/             ├─ python/    → depends on nxr-mitch
 ├─ impl/java/               ├─ java/      → depends on io.mitch
 ├─ impl/csharp/             ├─ csharp/    → references NxrMitch
-├─ impl/c/                  └─ (no client — codec-only)
+├─ impl/c/                  └─ (no client - codec-only)
 ├─ impl/cpp/
 └─ impl/zig/
 ```
@@ -58,9 +58,9 @@ Binary frames on `wss://ws.nxrates.io/v1/stream`:
 
 ```
 WS Header (8B)
-  [0]    type     u8     — 1 (index) or 2 (tick)
+  [0]    type     u8      1 (index) or 2 (tick)
   [1]    pad      u8
-  [2..3] count    u16 LE — number of records
+  [2..3] count    u16 LE  number of records
   [4..7] reserved 4B
 
 Body: count x stride f64 values
@@ -115,4 +115,4 @@ while let Some(msg) = ws.recv().await {
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

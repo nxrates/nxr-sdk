@@ -15,7 +15,7 @@ import java.util.function.Consumer;
 
 /**
  * NX Rates REST + WebSocket client.
- * Uses only {@code java.net.http} — no external HTTP or JSON libraries.
+ * Uses only {@code java.net.http} - no external HTTP or JSON libraries.
  */
 public class NxrClient implements AutoCloseable {
 

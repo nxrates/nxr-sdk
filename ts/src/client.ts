@@ -1,5 +1,5 @@
 /**
- * NxrClient — REST + WebSocket client for NX Rates.
+ * NxrClient - REST + WebSocket client for NX Rates.
  *
  * Transport-agnostic: works in browsers, Node.js, Deno, Bun.
  * Uses the Fetch API (universal) and WebSocket (universal).
@@ -102,7 +102,7 @@ export class NxrClient {
     return map.get(symbol);
   }
 
-  /** Health check — returns true if NXR is up. */
+  /** Health check - returns true if NXR is up. */
   async isHealthy(): Promise<boolean> {
     try {
       const r = await fetch(`${this.restBase}/health`);

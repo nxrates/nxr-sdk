@@ -5,7 +5,7 @@ package nxr
 
 import mitch "github.com/nxrates/mitch/impl/go"
 
-// Type aliases for MITCH wire types — use these or import mitch directly.
+// Type aliases for MITCH wire types - use these or import mitch directly.
 type (
 	MitchHeader = mitch.Header
 	Tick        = mitch.Tick

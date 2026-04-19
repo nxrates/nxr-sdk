@@ -1,7 +1,7 @@
 [project]
 name = "nxr-sdk"
 version = "0.1.0"
-description = "NX Rates client SDK — MITCH wire types, REST + WebSocket"
+description = "NX Rates client SDK - MITCH wire types, REST + WebSocket"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = ["nxr-mitch>=0.2.0", "aiohttp>=3.9", "websockets>=12.0"]

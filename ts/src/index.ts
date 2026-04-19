@@ -1,5 +1,5 @@
 /**
- * @nxr/sdk — NX Rates client SDK for TypeScript/JavaScript.
+ * @nxr/sdk - NX Rates client SDK for TypeScript/JavaScript.
  *
  * Zero-copy binary WebSocket decoding, REST client, MITCH wire types.
  *

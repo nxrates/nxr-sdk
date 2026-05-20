@@ -355,11 +355,6 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
     Err(MitchError::InvalidData(format!("Unable to resolve ticker: {}", original)))
 }
 
-/// Resolve asset by name across all asset classes.
-pub fn resolve_asset(name: &str, min_confidence: f64) -> Option<AssetMatch> {
-    RESOLVER.find(name, min_confidence, None)
-}
-
 /// Resolve asset within a specific asset class.
 pub fn resolve_asset_in_class(name: &str, min_confidence: f64, asset_class: AssetClass) -> Option<AssetMatch> {
     RESOLVER.find(name, min_confidence, Some(asset_class))
@@ -368,10 +363,4 @@ pub fn resolve_asset_in_class(name: &str, min_confidence: f64, asset_class: Asse
 /// Get asset by exact class and class_id.
 pub fn get_asset_by_id(asset_class: AssetClass, class_id: u16) -> Option<Asset> {
     RESOLVER.by_id.get(&(asset_class, class_id)).cloned()
-}
-
-/// Get asset by global 32-bit packed ID.
-pub fn get_asset_by_global_id(global_id: u32) -> Option<Asset> {
-    let (class, id) = mitch::ticker::unpack_asset(global_id);
-    get_asset_by_id(class, id)
 }

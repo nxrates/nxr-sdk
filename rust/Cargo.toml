@@ -37,10 +37,24 @@ futures-util = { version = "0.3", features = ["sink"] }
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Concurrent maps (aggregator / ticker resolution)
 dashmap = "6"
 
 # Compression helpers (gzip exchange frames)
 flate2 = "1"
+
+# Raw socket options for UDP multicast burst tuning (SO_RCVBUF).
+socket2 = { version = "0.5", features = ["all"] }
+
+# setrlimit(RLIMIT_AS) + sysctl hw.memsize for the shared memory-cap helper
+# (memory::apply_safe_cap). Every binary that ingests the tick cache calls it
+# at startup so a runaway process cannot OOM the host.
+libc = "0.2"
+
+# Prometheus metrics: shared across all nxr services (core, fx, crypto) so
+# every binary exposes /metrics on its own port without copy-pasted axum setup.
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
+axum = "0.8"

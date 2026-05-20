@@ -2,7 +2,7 @@
 
 Official multi-language SDK for [NX Rates](https://nxrates.io) market data.
 
-Subscribe to real-time FX/crypto index prices via REST, WebSocket, UDP multicast, or shared-memory ring buffers.
+Subscribe to real-time FX/crypto index prices via REST, WebSocket, or UDP multicast.
 
 MITCH wire types (structs, pack/unpack, timestamps) live in the [mitch](https://github.com/nxrates/mitch) repo. This SDK provides **client/transport** code that depends on and re-exports those types.
 
@@ -41,7 +41,6 @@ mitch repo (codec)          nxr-sdk repo (client)
 | REST | ~10ms | JSON | Metadata, snapshots, health |
 | WebSocket | ~1ms | Binary f64 frames | Real-time streaming over internet |
 | UDP multicast | ~5us | Raw MITCH | Cross-host LAN |
-| MmapRing | ~100ns | Raw MITCH | Same-host shared memory |
 
 ### REST endpoints
 
@@ -64,8 +63,8 @@ WS Header (8B)
   [4..7] reserved 4B
 
 Body: count x stride f64 values
-  Index stride = 9: ts_ms, ticker, mid, bid, ask, ci, confidence, accepted, rejected
-  Tick  stride = 6: ts_ms, ticker, provider_id, bid, ask, flags
+  Index stride = 9: epoch_ms, ticker, mid, bid, ask, ci, confidence, accepted, rejected
+  Tick  stride = 6: epoch_ms, ticker, provider_id, bid, ask, flags
 ```
 
 ## Quick start

@@ -4,8 +4,8 @@
  * The WS server encodes messages as:
  *   [8B header][count * stride f64 values]
  *
- * Index STRIDE=9:  ts_ms, ticker, mid, bid, ask, ci, confidence, accepted, rejected
- * Tick  STRIDE=6:  ts_ms, ticker, provider_id, bid, ask, accepted
+ * Index STRIDE=9:  epoch_ms, ticker, mid, bid, ask, ci, confidence, accepted, rejected
+ * Tick  STRIDE=6:  epoch_ms, ticker, provider_id, bid, ask, accepted
  *
  * "Zero-copy" means the batch classes hold a Float64Array view into the
  * original ArrayBuffer -- no per-record allocation until you call get().
@@ -26,7 +26,7 @@ export const TICK_STRIDE = 6;
 // ── WS record types (materialized) ─────────────────────────────────────────
 
 export interface WsIndex {
-  ts_ms:      number;
+  epoch_ms:      number;
   ticker:     number;
   mid:        number;
   bid:        number;
@@ -38,7 +38,7 @@ export interface WsIndex {
 }
 
 export interface WsTick {
-  ts_ms:       number;
+  epoch_ms:       number;
   ticker:      number;
   provider_id: number;
   bid:         number;
@@ -113,7 +113,7 @@ export class IndexBatch implements Iterable<WsIndex> {
   get(i: number): WsIndex {
     const b = i * INDEX_STRIDE;
     return {
-      ts_ms:      this.f64[b],
+      epoch_ms:      this.f64[b],
       ticker:     this.f64[b + 1],
       mid:        this.f64[b + 2],
       bid:        this.f64[b + 3],
@@ -178,7 +178,7 @@ export class TickBatch implements Iterable<WsTick> {
   get(i: number): WsTick {
     const b = i * TICK_STRIDE;
     return {
-      ts_ms:       this.f64[b],
+      epoch_ms:       this.f64[b],
       ticker:      this.f64[b + 1],
       provider_id: this.f64[b + 2],
       bid:         this.f64[b + 3],

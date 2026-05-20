@@ -28,6 +28,17 @@ pub struct WeightsFile {
     /// volume). Falls back to `broker_defaults` when a pair is not listed.
     #[serde(default)]
     pub broker_pair_weights: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Calibrated Renko `multiplier` per ticker (output of `nxr-calibrate`).
+    /// Key = ticker_id as a decimal string (JSON object keys must be strings).
+    /// Consumed by the aggregator's renko bar emitter at hot-reload time.
+    /// Missing entries fall back to the per-ticker prior or the `config.yml`
+    /// default multiplier — never panic.
+    #[serde(default)]
+    pub renko_k_per_ticker: BTreeMap<String, f64>,
+    /// Unix-seconds timestamp of the last successful `nxr-calibrate` run.
+    /// Optional so existing weights files (pre-Phase 54) still parse cleanly.
+    #[serde(default)]
+    pub calibrated_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -13,7 +13,7 @@ pub fn decode_gzip_bytes(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Decompress a zlib/deflate frame to raw bytes.
-pub fn decode_zlib_bytes(data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decode_zlib_bytes(data: &[u8]) -> Option<Vec<u8>> {
     let mut decoder = ZlibDecoder::new(data);
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).ok()?;

@@ -24,7 +24,7 @@ _TICK_STRIDE = 6    # f64s per record
 class WsIndex:
     """One Index record from a WS binary frame (9 x f64)."""
 
-    ts_ms: float
+    epoch_ms: float
     ticker: float
     mid: float
     bid: float
@@ -39,7 +39,7 @@ class WsIndex:
 class WsTick:
     """One Tick record from a WS binary frame (6 x f64)."""
 
-    ts_ms: float
+    epoch_ms: float
     ticker: float
     provider_id: float
     bid: float

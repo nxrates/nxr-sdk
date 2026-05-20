@@ -171,7 +171,7 @@ impl TickAccumulator {
             confidence: 1,
             accepted: 1,
             rejected,
-            _pad: [0; 1],
+            flags: 0,
         };
         self.acc_bid = 0.0;
         self.acc_ask = 0.0;
@@ -180,18 +180,6 @@ impl TickAccumulator {
         self.acc_count = 0;
         self.acc_rejected = 0;
         Some(index)
-    }
-
-    /// Number of ticks buffered since last flush.
-    #[inline]
-    pub fn count(&self) -> u32 {
-        self.acc_count
-    }
-
-    /// The ticker ID this accumulator targets.
-    #[inline]
-    pub fn ticker(&self) -> u64 {
-        self.ticker
     }
 }
 

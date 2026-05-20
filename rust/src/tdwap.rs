@@ -65,6 +65,12 @@ pub fn decode_ci_ubp(encoded: u16) -> f64 {
 /// time-decay weighted average price (TDWAP) fields needed for cross-provider
 /// aggregation. No accumulator logic - forwarders aggregate raw ticks locally
 /// via `TickAccumulator` before sending to the sink.
+///
+/// All time-dependent operations accept an explicit `now: Instant`, so the
+/// same struct is used by the live path (which passes `Instant::now()`) and
+/// by backtest/replay consumers (which advance a simulated clock anchored at
+/// the first observation). Wall-clock-convenience wrappers (`new`, `update`,
+/// `inject`, `effective_weight`) call `Instant::now()` internally.
 #[derive(Debug, Clone)]
 pub struct ProviderEntry {
     /// Latest per-provider aggregate (MITCH canonical type).
@@ -80,29 +86,51 @@ pub struct ProviderEntry {
 
 impl ProviderEntry {
     /// Create from an Index (received from a forwarder or first flush).
+    #[inline]
     pub fn new(index: Index, base_weight: f64) -> Self {
+        Self::new_at(index, base_weight, Instant::now())
+    }
+
+    /// Create from an Index anchored at an explicit time (for simulated clocks).
+    pub fn new_at(index: Index, base_weight: f64, now: Instant) -> Self {
         Self {
             index,
             base_weight,
-            last_update: Instant::now(),
+            last_update: now,
             ema_ipi_secs: 5.0,
         }
     }
 
     /// Replace the stored Index and update timing.
+    #[inline]
     pub fn update(&mut self, index: Index) {
-        let ipi = self.last_update.elapsed().as_secs_f64().clamp(1e-6, 300.0);
+        self.update_at(index, Instant::now());
+    }
+
+    /// Replace the stored Index and update timing against an explicit clock.
+    pub fn update_at(&mut self, index: Index, now: Instant) {
+        let ipi = now.saturating_duration_since(self.last_update)
+            .as_secs_f64()
+            .clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
-        self.last_update = Instant::now();
+        self.last_update = now;
         self.index = index;
     }
 
     /// Directly set prices for injection/triangulation.
     /// Bypasses full Index replacement since injections produce one quote per cycle.
+    #[inline]
     pub fn inject(&mut self, bid: f64, ask: f64, vbid: u32, vask: u32) {
-        let ipi = self.last_update.elapsed().as_secs_f64().clamp(1e-6, 300.0);
+        self.inject_at(bid, ask, vbid, vask, Instant::now());
+    }
+
+    /// Injection variant with an explicit clock.
+    pub fn inject_at(&mut self, bid: f64, ask: f64, vbid: u32, vask: u32, now: Instant) {
+        let ipi = now.saturating_duration_since(self.last_update)
+            .as_secs_f64()
+            .clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
-        self.last_update = Instant::now();
+        self.last_update = now;
         self.index.bid = bid;
         self.index.ask = ask;
         self.index.vbid = vbid;
@@ -117,8 +145,14 @@ impl ProviderEntry {
     ///   - Crypto at 100 ms cadence:  ema -> 0.1 s -> half-life ~ 0.3 s (tight)
     ///   - FX at 10 s cadence:        ema -> 10 s  -> half-life ~ 30 s (lenient)
     ///   - Cold start (ema = 5 s):    half-life = 15 s (safe for both)
+    #[inline]
     pub fn effective_weight(&self, stale_threshold_secs: f64) -> f64 {
-        let age = self.last_update.elapsed().as_secs_f64();
+        self.effective_weight_at(stale_threshold_secs, Instant::now())
+    }
+
+    /// Effective-weight variant with an explicit clock.
+    pub fn effective_weight_at(&self, stale_threshold_secs: f64, now: Instant) -> f64 {
+        let age = now.saturating_duration_since(self.last_update).as_secs_f64();
         let half_life = (IPI_K * self.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
         let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
         self.base_weight * decay.max(0.001)
@@ -126,7 +160,7 @@ impl ProviderEntry {
 }
 
 /// Compute time-decay VWAP and confidence interval across providers for one ticker.
-/// Returns None only if there are no entries at all.
+/// Returns None when no entry has a non-negligible effective weight.
 ///
 /// ## Confidence interval methodology
 ///
@@ -134,6 +168,9 @@ impl ProviderEntry {
 ///
 /// 1. **Inter-provider disagreement** (sigma_disagree):
 ///    Weighted standard deviation of provider mid-prices from the VWAP mid.
+///    Computed in a single pass via Welford's algorithm (algebraically
+///    identical to deviation-around-vwap_mid because weighted-mean-of-mids
+///    equals (TDWAP_bid + TDWAP_ask) / 2).
 ///
 /// 2. **Staleness widening** (sigma_stale):
 ///    Each provider's quote grows uncertain as time passes with no update.
@@ -142,15 +179,34 @@ impl ProviderEntry {
 /// Combined: `conf_interval = sqrt(sigma_disagree^2 + sigma_stale^2)`
 ///
 /// Floor: `max(conf_interval, (ask-bid)/2)` - never tighter than the spread itself.
-pub fn compute_vwap(
+#[inline]
+pub fn compute_vwap<'a, I>(
     ticker_id: u64,
-    entries: &[&ProviderEntry],
+    entries: I,
     stale_threshold_secs: f64,
-) -> Option<Index> {
-    if entries.is_empty() {
-        return None;
-    }
+) -> Option<Index>
+where
+    I: IntoIterator<Item = &'a ProviderEntry>,
+{
+    compute_vwap_at(ticker_id, entries, stale_threshold_secs, Instant::now())
+}
 
+/// Variant of [`compute_vwap`] that uses an explicit clock instead of
+/// `Instant::now()`. Live code should prefer `compute_vwap`; replay/backtest
+/// consumers (e.g. series-factory) pass a simulated `Instant` anchored at
+/// the first tick so decay is computed against data time, not wall-clock.
+///
+/// Accepts any iterator over `&ProviderEntry` so callers can pass a slice, a
+/// `HashMap::values()`, or a `SmallVec` without cloning.
+pub fn compute_vwap_at<'a, I>(
+    ticker_id: u64,
+    entries: I,
+    stale_threshold_secs: f64,
+    now: Instant,
+) -> Option<Index>
+where
+    I: IntoIterator<Item = &'a ProviderEntry>,
+{
     let mut w_bid_sum = 0.0f64;
     let mut w_ask_sum = 0.0f64;
     let mut w_sum = 0.0f64;
@@ -158,24 +214,58 @@ pub fn compute_vwap(
     let mut total_ask_vol: u64 = 0;
     let mut accepted: u8 = 0;
     let mut rejected: u8 = 0;
+    let mut confidence_sum: u32 = 0;
 
-    // First pass: compute TDWAP of bid and TDWAP of ask independently.
-    // Each provider's NBBO is weighted by the SAME effective_weight used for mid,
-    // so Index.bid / Index.ask are time-decay weighted averages across providers,
-    // not min/max cherry-picks.
+    // Welford-style weighted variance accumulator for sigma_disagree.
+    // The weighted mean of per-provider mids equals (TDWAP_bid + TDWAP_ask) / 2,
+    // so m2 / w_sum is identical to the original two-pass formulation's
+    // `w_sq_dev_sum / w_sum`.
+    let mut mean_mid = 0.0f64;
+    let mut m2 = 0.0f64;
+
+    let mut w_stale_sq_sum = 0.0f64;
+
     for entry in entries {
         if !is_valid_tick(entry.index.bid, entry.index.ask) {
             rejected = rejected.saturating_add(1);
             continue;
         }
-        let w = entry.effective_weight(stale_threshold_secs);
-        // Skip providers whose decayed weight is effectively zero (stale or zero base).
+
+        // Inline effective-weight computation so `exp` and the age read happen once.
+        let age = now.saturating_duration_since(entry.last_update).as_secs_f64();
+        let half_life = (IPI_K * entry.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
+        let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
+        let decay_floored = decay.max(0.001);
+        let w = entry.base_weight * decay_floored;
+
+        // Confidence counts any provider with non-floored decay >= 10 percent,
+        // regardless of whether its weight contributes to TDWAP this cycle.
+        if decay >= 0.1 {
+            confidence_sum = confidence_sum.saturating_add(entry.base_weight.round() as u32);
+        }
+
         if w <= 1e-9 {
             continue;
         }
-        w_bid_sum += entry.index.bid * w;
-        w_ask_sum += entry.index.ask * w;
-        w_sum += w;
+
+        let bid = entry.index.bid;
+        let ask = entry.index.ask;
+        let mid = (bid + ask) * 0.5;
+        let half_spread = (ask - bid) * 0.5;
+
+        w_bid_sum += bid * w;
+        w_ask_sum += ask * w;
+
+        let w_new = w_sum + w;
+        let delta = mid - mean_mid;
+        mean_mid += (w / w_new) * delta;
+        m2 += w * delta * (mid - mean_mid);
+        w_sum = w_new;
+
+        let ipi = entry.ema_ipi_secs.max(1e-6);
+        let stale_unc = half_spread * (age / ipi).sqrt();
+        w_stale_sq_sum += w * stale_unc * stale_unc;
+
         total_bid_vol += entry.index.vbid as u64;
         total_ask_vol += entry.index.vask as u64;
         accepted = accepted.saturating_add(1);
@@ -187,62 +277,26 @@ pub fn compute_vwap(
 
     let tdwap_bid = w_bid_sum / w_sum;
     let tdwap_ask = w_ask_sum / w_sum;
-    let vwap_mid = (tdwap_bid + tdwap_ask) / 2.0;
+    let vwap_mid = (tdwap_bid + tdwap_ask) * 0.5;
 
-    // Second pass: compute confidence interval components
-    let mut w_sq_dev_sum = 0.0f64;
-    let mut w_stale_sq_sum = 0.0f64;
-
-    for entry in entries {
-        if !is_valid_tick(entry.index.bid, entry.index.ask) {
-            continue;
-        }
-        let w = entry.effective_weight(stale_threshold_secs);
-        if w <= 1e-9 {
-            continue;
-        }
-        let mid_i = (entry.index.bid + entry.index.ask) / 2.0;
-
-        w_sq_dev_sum += w * (mid_i - vwap_mid).powi(2);
-
-        let half_spread = (entry.index.ask - entry.index.bid) / 2.0;
-        let age = entry.last_update.elapsed().as_secs_f64();
-        let ipi = entry.ema_ipi_secs.max(1e-6);
-        let stale_unc = half_spread * (age / ipi).sqrt();
-        w_stale_sq_sum += w * stale_unc.powi(2);
-    }
-
-    let sigma_disagree = (w_sq_dev_sum / w_sum).sqrt();
-    let sigma_stale    = (w_stale_sq_sum / w_sum).sqrt();
-
-    let raw_ci = (sigma_disagree.powi(2) + sigma_stale.powi(2)).sqrt();
-    // Floor: never report CI tighter than the aggregate TDWAP half-spread.
-    let half_spread_agg = ((tdwap_ask - tdwap_bid).abs()) / 2.0;
+    let sigma_disagree_sq = m2 / w_sum;
+    let sigma_stale_sq = w_stale_sq_sum / w_sum;
+    let raw_ci = (sigma_disagree_sq + sigma_stale_sq).sqrt();
+    let half_spread_agg = (tdwap_ask - tdwap_bid).abs() * 0.5;
     let conf_interval = raw_ci.max(half_spread_agg);
 
-    // Confidence = total number of active wholesale liquidity sources.
-    // CEX exchanges count as 1 each (base_weight=1.0).
-    // FX prime brokers count as 5 each (base_weight=5.0).
-    let confidence = entries
-        .iter()
-        .filter(|e| e.effective_weight(stale_threshold_secs) >= e.base_weight * 0.1)
-        .map(|e| e.base_weight.round() as u32)
-        .sum::<u32>()
-        .min(255) as u8;
+    let confidence = confidence_sum.min(255) as u8;
 
     // Guard against crossed market: weighted ask must not be tighter than weighted bid.
-    // If crossed, fall back to mid with zero spread (spread=0, bid=ask=mid).
-    let (final_bid, final_ask) = if tdwap_bid > 0.0 && tdwap_ask > 0.0 && tdwap_ask < tdwap_bid {
+    // If crossed, collapse to mid with zero spread (bid == ask == mid).
+    let (final_bid, final_ask) = if tdwap_ask < tdwap_bid {
         (vwap_mid, vwap_mid)
     } else {
         (tdwap_bid, tdwap_ask)
     };
 
-    // CI encoding: sqrt-compressed micro basis points to avoid u16 saturation.
-    // See Index::ci field doc for the encoding / inverse formula.
     let ci = if vwap_mid > 0.0 {
-        let ci_ubp = (conf_interval / vwap_mid) * 1e8;
-        encode_ci_ubp(ci_ubp)
+        encode_ci_ubp((conf_interval / vwap_mid) * 1e8)
     } else {
         0u16
     };
@@ -258,7 +312,7 @@ pub fn compute_vwap(
         confidence,
         accepted,
         rejected,
-        _pad: [0; 1],
+        flags: 0,
     })
 }
 

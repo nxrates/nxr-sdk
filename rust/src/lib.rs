@@ -21,6 +21,7 @@ pub mod ipc;
 pub mod logging;
 pub mod memory;
 pub mod metrics;
+pub mod ohlc;
 pub mod providers;
 pub mod publisher;
 pub mod resolve;

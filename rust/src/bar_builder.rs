@@ -21,8 +21,7 @@
 use mitch::bar::Bar;
 use mitch::timestamp;
 
-/// Sqrt-compression scale for `Bar::avg_ci_ubp` (shared with `Index::ci`).
-const CI_SCALE: f64 = 16.0;
+use mitch::common::CI_SCALE;
 
 /// Single-pass accumulator for building a `mitch::Bar`.
 ///
@@ -55,11 +54,15 @@ pub struct BarAccumulator {
     bipower_sum: f64,      // Σ |r_t|·|r_{t-1}| for t ≥ 2
     max_abs_r: f64,        // max |r_t|
 
-    // Signed order-flow imbalance: Σ sign(r_t) · (vbid+vask)_t
+    // Signed order-flow imbalance: Σ sign(r_t) · (vbid+vask)_t.
+    // OFI numerator + denominator share scope (tick 2 onward).
     ofi_sum: f64,
+    ofi_total_vol: f64,
 
-    // Spread accumulator (basis points of mid)
+    // Spread accumulator (basis points of mid). Numerator skips mid<=0 ticks;
+    // denominator (`n_spread_samples`) mirrors that scope.
     sum_spread_bps: f64,
+    n_spread_samples: u32,
 
     // Quality accumulators (from Index-level inputs; zero for tick-only)
     sum_ci_ubp: f64,
@@ -75,8 +78,8 @@ impl BarAccumulator {
             first_ms: 0.0, sum_x: 0.0, sum_y: 0.0, sum_xy: 0.0, sum_xx: 0.0, last_x: 0.0,
             prev_mid: 0.0, rv_sum: 0.0,
             prev_abs_r: -1.0, bipower_sum: 0.0, max_abs_r: 0.0,
-            ofi_sum: 0.0,
-            sum_spread_bps: 0.0,
+            ofi_sum: 0.0, ofi_total_vol: 0.0,
+            sum_spread_bps: 0.0, n_spread_samples: 0,
             sum_ci_ubp: 0.0, sum_accepted: 0, sum_rejected: 0,
         }
     }
@@ -125,9 +128,11 @@ impl BarAccumulator {
         self.sum_xx += x * x;
         self.last_x = x;
 
-        // Spread (bps of mid). Guard against zero mid.
+        // Spread (bps of mid). Guard against zero mid; track sample count
+        // separately so the divisor in flush() mirrors the numerator's scope.
         if mid > 0.0 {
             self.sum_spread_bps += ((ask - bid) / mid) * 10_000.0;
+            self.n_spread_samples += 1;
         }
 
         // Return-based statistics (defined from the second tick onward).
@@ -143,8 +148,11 @@ impl BarAccumulator {
             }
             self.prev_abs_r = abs_r;
             // Signed OFI: attribute this observation's volume to the sign of r_t.
+            // OFI numerator + denominator share scope (tick 2 onward).
             let sign = if r > 0.0 { 1.0 } else if r < 0.0 { -1.0 } else { 0.0 };
-            self.ofi_sum += sign * (vbid as f64 + vask as f64);
+            let tick_vol = vbid as f64 + vask as f64;
+            self.ofi_sum += sign * tick_vol;
+            self.ofi_total_vol += tick_vol;
         }
         self.prev_mid = mid;
 
@@ -165,7 +173,6 @@ impl BarAccumulator {
         let n = self.tick_count as f64;
         let vbid = self.vbid.min(u32::MAX as u64) as u32;
         let vask = self.vask.min(u32::MAX as u64) as u32;
-        let total_vol = vbid as f64 + vask as f64;
 
         let realized_var = self.rv_sum as f32;
         // Barndorff-Nielsen & Shephard (2004) jump-robust variance.
@@ -186,10 +193,15 @@ impl BarAccumulator {
             0.0
         };
 
-        let avg_spread_bps = (self.sum_spread_bps / n) as f32;
+        // mid<=0 guard skipped from numerator; mirror in denominator.
+        let avg_spread_bps = if self.n_spread_samples > 0 {
+            (self.sum_spread_bps / self.n_spread_samples as f64) as f32
+        } else {
+            0.0
+        };
 
-        let vol_imbalance = if total_vol > 0.0 {
-            (self.ofi_sum / total_vol) as f32
+        let vol_imbalance = if self.ofi_total_vol > 0.0 {
+            (self.ofi_sum / self.ofi_total_vol) as f32
         } else {
             0.0
         };
@@ -223,6 +235,8 @@ impl BarAccumulator {
         bar.max_abs_return = max_abs_return;
         bar.avg_ci_ubp = avg_ci_ubp;
         bar.reject_rate = reject_rate;
+        // Time-bucketed bar: stamp the kind explicitly (don't rely on zero-init).
+        bar.kind = mitch::bar::BarKind::Kline as u8;
 
         self.reset();
         Some(bar)

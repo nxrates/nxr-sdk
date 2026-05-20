@@ -23,13 +23,11 @@ const IPI_ALPHA: f64 = 0.1;
 const IPI_K: f64 = 3.0;
 
 /// Scale factor for the sqrt-compressed CI u16 encoding.
-/// `encoded = round(sqrt(ci_ubp) * CI_SCALE)`; `ci_ubp = (encoded / CI_SCALE)^2`.
-/// With CI_SCALE = 16, the u16 covers ci_ubp up to ~16.77e6 (i.e. ~16.77% of mid)
-/// before saturation, far beyond the prior 65535 ubp (0.065% of mid) linear limit.
-/// This matches the log-growth pattern already used elsewhere in the SDK
-/// (see `bar_builder::log_volume`, `parkinson_sigma`) where dynamic range
-/// vastly exceeds a flat u16 capacity.
-pub const CI_SCALE: f64 = 16.0;
+///
+/// Canonical definition lives in [`mitch::common::CI_SCALE`]; re-exported here
+/// so existing `nxr_sdk::tdwap::CI_SCALE` call sites keep working without a
+/// rename. See the mitch definition for encoding semantics.
+pub use mitch::common::CI_SCALE;
 
 /// Encode a confidence interval (micro basis points of mid) into the u16 wire format.
 ///

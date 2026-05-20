@@ -1,6 +1,6 @@
 //! Process-wide memory cap, shared by every binary that streams the
 //! multi-exchange tick cache (series-factory, fetch-crypto-history,
-//! generate-renko-from-ticks, optimize-renko-stats, extract-vol).
+//! generate-renko-from-ticks, optimize-renko-stats).
 //!
 //! `apply_safe_cap()` installs a hard resource limit AND a background RSS
 //! watchdog so an allocation runaway is either translated into a clean

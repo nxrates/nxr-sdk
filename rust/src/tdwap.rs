@@ -212,7 +212,9 @@ where
     let mut total_ask_vol: u64 = 0;
     let mut accepted: u8 = 0;
     let mut rejected: u8 = 0;
-    let mut confidence_sum: u32 = 0;
+    // Count of providers with non-floored decay ≥ 0.1 — the schema-defined
+    // "active provider count" per `mitch::Index::confidence` (must be ≤ accepted).
+    let mut active_count: u32 = 0;
 
     // Welford-style weighted variance accumulator for sigma_disagree.
     // The weighted mean of per-provider mids equals (TDWAP_bid + TDWAP_ask) / 2,
@@ -236,10 +238,12 @@ where
         let decay_floored = decay.max(0.001);
         let w = entry.base_weight * decay_floored;
 
-        // Confidence counts any provider with non-floored decay >= 10 percent,
-        // regardless of whether its weight contributes to TDWAP this cycle.
+        // Active provider: any with non-floored decay >= 10 percent, regardless
+        // of whether its weight contributes to TDWAP this cycle. Count, not sum
+        // of base_weights — `Index::confidence` is documented as "active provider
+        // count" and must satisfy `confidence ≤ accepted` (see `Index::validate`).
         if decay >= 0.1 {
-            confidence_sum = confidence_sum.saturating_add(entry.base_weight.round() as u32);
+            active_count = active_count.saturating_add(1);
         }
 
         if w <= 1e-9 {
@@ -283,7 +287,13 @@ where
     let half_spread_agg = (tdwap_ask - tdwap_bid).abs() * 0.5;
     let conf_interval = raw_ci.max(half_spread_agg);
 
-    let confidence = confidence_sum.min(255) as u8;
+    // `confidence` is the active provider count, clamped to u8. `accepted` is a
+    // u8 incremented only when a provider also contributes weight to the TDWAP
+    // this cycle, so `confidence >= accepted` is possible at the unclamped level
+    // (an active-but-floored provider counts toward active but not accepted).
+    // We must therefore clamp to `accepted` to preserve the schema invariant
+    // enforced by `Index::validate`.
+    let confidence = (active_count.min(255) as u8).min(accepted);
 
     // Guard against crossed market: weighted ask must not be tighter than weighted bid.
     // If crossed, collapse to mid with zero spread (bid == ask == mid).
@@ -298,6 +308,13 @@ where
     } else {
         0u16
     };
+
+    // Regression guard: confidence must never exceed accepted (Index::validate
+    // rejects otherwise — see the 100%-error ZEC-USDT backfill incident).
+    debug_assert!(
+        confidence <= accepted,
+        "TDWAP confidence ({confidence}) > accepted ({accepted}); active_count={active_count}"
+    );
 
     Some(Index {
         ticker: ticker_id,

@@ -372,3 +372,23 @@ pub fn rollup(series: &[Ohlc], src_tf_ms: i64, dst_tf_ms: i64) -> Vec<Ohlc> {
 pub fn ohlc_ci_ubp(avg_ci_ubp: u16) -> f64 {
     decode_ci_ubp(avg_ci_ubp)
 }
+
+/// Convert a `mitch::Bar` (96B kline) into the lightweight `Ohlc` row.
+///
+/// Used by `/v1/ohlc` to read `.s10` (uniform 10s bars) as the base layer
+/// then `rollup()` to higher TFs. The Bar.kind field is ignored — caller
+/// is expected to pre-filter by kind=Kline (0).
+#[inline]
+pub fn bar_to_ohlc(b: &mitch::bar::Bar) -> Ohlc {
+    Ohlc {
+        ts: b.open_time_ms(),
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+        vbid: b.vbid as u64,
+        vask: b.vask as u64,
+        tick_count: b.tick_count,
+        avg_ci_ubp: b.avg_ci_ubp,
+    }
+}

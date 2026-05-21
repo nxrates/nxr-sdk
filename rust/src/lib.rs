@@ -26,6 +26,7 @@ pub mod providers;
 pub mod publisher;
 pub mod resolve;
 pub mod stats;
+pub mod synth;
 pub mod tdwap;
 pub mod ticker;
 pub mod transport;

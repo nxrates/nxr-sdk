@@ -1,0 +1,28 @@
+[package]
+name = "nxr_sdk_wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM accelerator for @nxrates/sdk (TypeScript). Decodes MITCH IndexRecord and Bar frames."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+# Path dep on the canonical Rust SDK; kept commented since wasm32 targets
+# may not pull in all native deps (e.g. liblzma). Implementations below use
+# the `mitch` crate's wire layout directly. Toggle on for prod when wasm32
+# build passes.
+# nxr-sdk = { path = "../../rust", default-features = false }
+mitch = { path = "../../../mitch/impl/rust", default-features = false, features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

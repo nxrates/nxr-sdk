@@ -1,14 +1,22 @@
 {
-  "name": "@nxr/sdk",
-  "version": "0.1.0",
+  "name": "@nxrates/sdk",
+  "version": "0.2.0",
   "type": "module",
-  "description": "NX Rates client SDK - zero-copy binary WebSocket, REST, MITCH wire types",
+  "description": "Official NX Rates (NXR) TypeScript SDK - MITCH binary decoders, REST/WS/multicast clients. Browser + Node.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./node": {
+      "import": "./dist/node.js",
+      "types": "./dist/node.d.ts"
+    },
+    "./browser": {
+      "import": "./dist/browser.js",
+      "types": "./dist/browser.d.ts"
     },
     "./decode": {
       "import": "./dist/decode.js",
@@ -17,22 +25,45 @@
     "./client": {
       "import": "./dist/client.js",
       "types": "./dist/client.d.ts"
+    },
+    "./mitch": {
+      "import": "./dist/mitch.js",
+      "types": "./dist/mitch.d.ts"
+    },
+    "./types": {
+      "import": "./dist/types.js",
+      "types": "./dist/types.d.ts"
     }
   },
   "files": ["dist", "src", "README.md"],
   "scripts": {
-    "build": "tsc",
-    "check": "tsc --noEmit"
+    "build": "tsc && npm run build:wasm",
+    "build:wasm": "node ./scripts/build-wasm.mjs",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "dependencies": {
-    "@nxrates/mitch": "github:nxrates/mitch#impl/typescript"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/nxrates/nxr-sdk"
-  }
+  },
+  "keywords": [
+    "nxrates",
+    "nxr",
+    "mitch",
+    "market-data",
+    "binary",
+    "decoder",
+    "multicast",
+    "fintech",
+    "trading",
+    "sdk"
+  ]
 }

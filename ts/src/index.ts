@@ -1,67 +1,99 @@
 /**
- * @nxr/sdk - NX Rates client SDK for TypeScript/JavaScript.
+ * @nxrates/sdk - official TypeScript SDK for NX Rates.
  *
- * Zero-copy binary WebSocket decoding, REST client, MITCH wire types.
+ * Cross-platform (Browser + Node + Bun + Deno) entry. Re-exports everything
+ * that is safe in any runtime: MITCH binary decoders, the REST/WS client,
+ * shared types.
  *
- * ## Quick start
+ * For Node-only features (UDP multicast subscriber) import from `@nxrates/sdk/node`.
+ * For browser-tuned bundles import from `@nxrates/sdk/browser`.
  *
+ * @example
  * ```ts
- * import { NxrClient, IndexBatch } from '@nxr/sdk';
+ * import { NxrClient, decodeIdxBatch } from '@nxrates/sdk';
  *
- * const nxr = new NxrClient('http://nxr-svc:40004');
- * const btc = await nxr.resolve('BTC/USDT');
- *
- * // Zero-copy hot path
- * nxr.onIndex((batch: IndexBatch) => {
- *   for (let i = 0; i < batch.count; i++) {
- *     if (batch.ticker(i) === btc) {
- *       console.log(`BTC mid=${batch.mid(i)} ci=${batch.ci(i)}`);
- *     }
- *   }
- * });
- *
- * nxr.connect();
+ * const nxr = new NxrClient({ baseUrl: 'http://nxr.nxrates.com' });
+ * const recs = await nxr.idxBinary('BTC/USDT', { limit: 1000 });
  * ```
- *
- * @see {@link https://github.com/nxrates/mitch MITCH Protocol Spec}
  */
 
-// Re-export MITCH wire types from the codec package
-export {
-  // Type codes
-  MessageType,
-  // Wire codes
-  WireCode,
-  // Size constants
-  SIZE_HEADER, SIZE_TRADE, SIZE_ORDER, SIZE_TICK, SIZE_INDEX, SIZE_BAR, SIZE_ORDER_BOOK,
-  // Timestamp codec
-  EPOCH_2010_US, fromEpochUs, toEpochUs, fromEpochMs, toEpochMs, readU48, writeU48,
-  // Wire code mapping
-  wireToAscii, asciiToWire,
-  // Header
-  packHeader, unpackHeader, headerMsgType, headerProviderId, createHeader,
-  // Body readers
-  readIndex, readTick, readTrade,
-  // Derived helpers
-  mid, spreadUbp, spreadBps, ciToPrice,
-  // Types
-  type MitchHeader, type Index, type Tick, type Trade,
-} from '@nxrates/mitch';
+// Types
+export type {
+  Sym,
+  IndexRecord,
+  Bar,
+  Tick,
+  Ohlc,
+  TickerSnapshot,
+  SynthTick,
+  BarKind,
+} from './types.js';
 
-// Zero-copy WS batch decoder
+// MITCH constants + low-level decoders
 export {
-  // Constants
-  WS_MSG_INDEX, WS_MSG_TICK, WS_HEADER_BYTES, INDEX_STRIDE, TICK_STRIDE,
-  // Batch classes
-  IndexBatch, TickBatch,
-  // Dispatch
-  decodeFrame, readWsHeader,
-  // Types
-  type WsIndex, type WsTick, type WsFrameHeader, type DecodedFrame,
+  MessageType,
+  WireCode,
+  SIZE_HEADER,
+  SIZE_TRADE,
+  SIZE_ORDER,
+  SIZE_TICK,
+  SIZE_INDEX,
+  SIZE_BAR,
+  SIZE_INDEX_RECORD,
+  SIZE_ORDER_BOOK,
+  EPOCH_MS_2010,
+  EPOCH_US_2010,
+  CI_SCALE,
+  readU48,
+  readHeader,
+  readIndex,
+  readTick,
+  readBar,
+  mtsToEpochMs,
+  epochMsToMts,
+  ciToUbp,
+  ciToPrice,
+  mid,
+  spreadUbp,
+  spreadBps,
+  type MitchHeader,
+  type Index as MitchIndex,
+  type Tick as MitchTick,
+  type Bar as MitchBar,
+} from './mitch.js';
+
+// High-level decoders
+export {
+  decodeIdxRecord,
+  decodeIdxBatch,
+  decodeBar,
+  decodeBarBatch,
+  decodeTick,
+  decodeFrame,
+  // legacy WS batch decoders
+  WS_MSG_INDEX,
+  WS_MSG_TICK,
+  WS_HEADER_BYTES,
+  INDEX_STRIDE,
+  TICK_STRIDE,
+  IndexBatch,
+  TickBatch,
+  decodeWsFrame,
+  readWsHeader,
+  type WsIndex,
+  type WsTick,
+  type WsFrameHeader,
+  type DecodedWsFrame,
 } from './decode.js';
 
-// High-level client
+// Client
 export {
   NxrClient,
-  type TickerResponse, type WsState,
+  type NxrClientOpts,
+  type RangeOpts,
+  type WsState,
+  type TickerResponse,
 } from './client.js';
+
+// WASM accelerator (optional)
+export { tryLoadWasm, decodeIdxBatchFast, type NxrWasmModule } from './wasm-loader.js';

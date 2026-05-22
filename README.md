@@ -49,15 +49,19 @@ Base URL: `https://api.nxrates.com`
 ```
 GET /v1/tickers              -> JSON snapshot: [{ ticker, mid, bid, ask, ci, confidence }]
 GET /v1/idx/{sym}            -> composite ticks (56B MITCH IndexRecord stream)
-GET /v1/ohlc/{sym}?tf=<s>    -> uniform OHLC bars at timeframe <s> seconds
-GET /v1/bars/{sym}/{kind}    -> kind = kline | renko (96B MITCH Bar stream)
-GET /v1/synth/tick/{sym}     -> triangulated synthetic tick (e.g. ETH-BTC)
-GET /v1/synth/ohlc/{sym}?tf= -> synthetic OHLC
+GET /v1/bars/{sym}/{kind}    -> bars; kind = kline | renko (96B MITCH Bar stream)
 GET /v1/integrity/{sym}      -> data-quality report
 GET /health  /metrics
 ```
 
-Range params on `idx` / `ohlc` / `bars`: `from`, `to` (epoch ms), `limit`, `cursor`.
+`{kind}=kline` takes `?tf=<seconds>` for the bar timeframe; `renko` is
+event-driven (no `tf`). Range params on `idx` / `bars`: `from`, `to`
+(epoch ms), `limit`, `cursor`.
+
+Any `{sym}` resolves transparently — whether the series is a directly
+aggregated TDWAP composite or a triangulated cross (e.g. `ETH-BTC`), the
+client requests it the same way and never needs to know the source. There
+is no separate "synth" endpoint: it is all aggregated MITCH data.
 
 **Symbol forms** — `{sym}` accepts any of three forms, resolved identically:
 

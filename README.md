@@ -48,9 +48,9 @@ Base URL: `https://api.nxrates.com`
 
 ```
 GET /v1/tickers              -> JSON snapshot: [{ ticker, mid, bid, ask, ci, confidence }]
-GET /v1/idx/{sym}            -> composite ticks (56B MITCH IndexRecord stream)
-GET /v1/bars/{sym}/{kind}    -> bars; kind = kline | renko (96B MITCH Bar stream)
-GET /v1/integrity/{sym}      -> data-quality report
+GET /v1/idx/{ticker}            -> composite ticks (56B MITCH IndexRecord stream)
+GET /v1/bars/{ticker}/{kind}    -> bars; kind = kline | renko (96B MITCH Bar stream)
+GET /v1/integrity/{ticker}      -> data-quality report
 GET /health  /metrics
 ```
 
@@ -58,12 +58,12 @@ GET /health  /metrics
 event-driven (no `tf`). Range params on `idx` / `bars`: `from`, `to`
 (epoch ms), `limit`, `cursor`.
 
-Any `{sym}` resolves transparently — whether the series is a directly
+Any `{ticker}` resolves transparently — whether the series is a directly
 aggregated TDWAP composite or a triangulated cross (e.g. `ETH-BTC`), the
 client requests it the same way and never needs to know the source. There
 is no separate "synth" endpoint: it is all aggregated MITCH data.
 
-**Symbol forms** — `{sym}` accepts any of three forms, resolved identically:
+**Symbol forms** — `{ticker}` accepts any of three forms, resolved identically:
 
 | Form | Example | Note |
 |------|---------|------|

@@ -1,6 +1,6 @@
 # nxr-sdk
 
-Official multi-language SDK for [NX Rates](https://nxrates.io) market data.
+Official multi-language SDK for [NX Rates](https://nxrates.com) market data.
 
 Subscribe to real-time FX/crypto index prices via REST, WebSocket, or UDP multicast.
 
@@ -10,7 +10,7 @@ MITCH wire types (structs, pack/unpack, timestamps) live in the [mitch](https://
 
 | Language | Path | Runtime / Deps | Install |
 |----------|------|----------------|---------|
-| **TypeScript** | [`ts/`](ts/) | Bun / Node 18+ | `bun add @nxr/sdk` |
+| **TypeScript** | [`ts/`](ts/) | Bun / Node 18+ | `bun add @nxrates/sdk` |
 | **Python** | [`python/`](python/) | 3.11+, aiohttp, websockets | `pip install nxr-sdk` |
 | **Go** | [`go/`](go/) | 1.22+, gorilla/websocket | `go get github.com/nxrates/nxr-sdk/go` |
 | **Rust** | [`rust/`](rust/) | tokio, reqwest, tungstenite | `cargo add nxr-sdk` |
@@ -44,16 +44,37 @@ mitch repo (codec)          nxr-sdk repo (client)
 
 ### REST endpoints
 
+Base URL: `https://api.nxrates.com`
+
 ```
-GET /v1/symbols    -> { "BTC/USDT": 1, "ETH/USDT": 2, ... }
-GET /v1/providers  -> { "1": "binance", "2": "coinbase", ... }
-GET /v1/tickers    -> [{ ticker_id, bid, ask, ... }]
-GET /health        -> 200 OK
+GET /v1/tickers              -> JSON snapshot: [{ ticker, mid, bid, ask, ci, confidence }]
+GET /v1/idx/{sym}            -> composite ticks (56B MITCH IndexRecord stream)
+GET /v1/ohlc/{sym}?tf=<s>    -> uniform OHLC bars at timeframe <s> seconds
+GET /v1/bars/{sym}/{kind}    -> kind = kline | renko (96B MITCH Bar stream)
+GET /v1/synth/tick/{sym}     -> triangulated synthetic tick (e.g. ETH-BTC)
+GET /v1/synth/ohlc/{sym}?tf= -> synthetic OHLC
+GET /v1/integrity/{sym}      -> data-quality report
+GET /health  /metrics
 ```
+
+Range params on `idx` / `ohlc` / `bars`: `from`, `to` (epoch ms), `limit`, `cursor`.
+
+**Symbol forms** — `{sym}` accepts any of three forms, resolved identically:
+
+| Form | Example | Note |
+|------|---------|------|
+| Dash | `BTC-USDT` | **Preferred** — URL-safe, no encoding |
+| Slash | `BTC%2FUSDT` | Must be percent-encoded |
+| MITCH ticker_id | `435315775907037184` or `0x060A8D644C100000` | Numeric, machine-canonical |
+
+**Content negotiation** via the `Accept` header:
+- `application/octet-stream` -> raw fixed-stride MITCH records (56B IndexRecord / 96B Bar), zero-copy decodable
+- `application/x-ndjson` -> newline-delimited JSON
+- default -> JSON array (gzip/br compressed)
 
 ### WebSocket framing
 
-Binary frames on `wss://ws.nxrates.io/v1/stream`:
+Binary frames on `wss://api.nxrates.com/v1/stream`:
 
 ```
 WS Header (8B)
@@ -69,47 +90,46 @@ Body: count x stride f64 values
 
 ## Quick start
 
-**TypeScript**
-```ts
-import { NxrClient, IndexBatch } from "@nxr/sdk";
+The production trifecta — **Rust** (canonical), **Python** (pyo3 + NumPy), and
+**TypeScript** (Node + browser) — all decode the identical MITCH wire format,
+so a batch fetched in one language decodes bit-identically in the others. Each
+ships a runnable demo against the live API in `examples/fetch_demo.*`.
 
-const nxr = new NxrClient("http://nxr-svc:40004");
-const btc = await nxr.resolve("BTC/USDT");
-
-nxr.onIndex((batch: IndexBatch) => {
-  for (let i = 0; i < batch.count; i++) {
-    console.log(`ticker=${batch.ticker(i)} mid=${batch.mid(i)}`);
-  }
-});
-nxr.connect();
-```
-
-**Python**
+**Python** (`pip install nxr-sdk`)
 ```python
-from nxr import NxrClient
+import nxr_sdk
+from nxr_sdk import Client
 
-client = NxrClient("http://localhost:40000")
-symbols = await client.symbols()
-await client.stream(on_index=lambda recs: print(recs))
+client = Client(base_url="https://api.nxrates.com")
+arr = client.fetch_idx("BTC-USDT", limit=10_000)   # NumPy structured array (raw wire)
+ohlc = client.fetch_ohlc("BTC-USDT", tf=60, limit=100)
+
+# Cross-SDK-aligned decoded view (ts_ms / mid / ci_ubp) — same fields + values
+# as the Rust and TS SDKs decoding the same /v1/idx octet-stream:
+raw = open("snapshot.idx", "rb").read()
+dec = nxr_sdk.decode_idx(raw)        # zero-Python-loop, NumPy-vectorized
 ```
 
-**Go**
-```go
-client := nxr.NewClient("http://localhost:40000")
-symbols, _ := client.Symbols(ctx)
-client.Stream(ctx, func(idx []nxr.WsIndex) {
-    fmt.Printf("ticker=%.0f mid=%.2f\n", idx[0].Ticker, idx[0].Mid)
-}, nil)
+**TypeScript** (`bun add @nxrates/sdk`)
+```ts
+import { NxrClient } from "@nxrates/sdk";
+import { decodeIdxBatch } from "@nxrates/sdk/decode";
+
+const nxr = new NxrClient({ baseUrl: "https://api.nxrates.com" });
+const ticks = await nxr.idxBinary("BTC-USDT", { limit: 10_000 }); // IndexRecord[]
+const ohlc  = await nxr.ohlc("BTC-USDT", 60, { limit: 100 });
 ```
 
-**Rust**
+**Rust** (`cargo add nxr-sdk`)
 ```rust
-let nxr = nxr_sdk::NxrClient::new("https://api.nxrates.io");
-let symbols = nxr.symbols().await?;
-let mut ws = nxr_sdk::WsStream::connect("wss://ws.nxrates.io/v1/stream").await?;
-while let Some(msg) = ws.recv().await {
-    println!("{:?}", msg);
-}
+use nxr_sdk::ipc::record::IndexRecord;
+
+// Zero-copy: bytemuck::cast_slice over the 56B fixed-stride octet-stream.
+let buf: Vec<u8> = ureq::get("https://api.nxrates.com/v1/idx/BTC-USDT?limit=10000")
+    .set("Accept", "application/octet-stream")
+    .call()?.into_reader().bytes().collect::<Result<_,_>>()?;
+let recs: &[IndexRecord] = bytemuck::cast_slice(&buf);
+for r in recs { let _mid = (r.index.bid + r.index.ask) * 0.5; }
 ```
 
 ## License

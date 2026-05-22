@@ -1,9 +1,11 @@
 //! Blocking HTTP client targeting the NXR REST surface.
 //!
-//! Endpoints (per nx-rates monorepo):
-//!   GET /v1/idx?sym=BTC/USDT&limit=1000      -> octet-stream of 56B IndexRecords
-//!   GET /v1/ohlc?sym=BTC/USDT&tf=60&from=&to= -> JSON [{ts,o,h,l,c,v,n}, ...]
-//!   GET /v1/bars?sym=BTC/USDT&kind=renko       -> octet-stream of 96B Bars
+//! Endpoints (per nx-rates monorepo) — all path-routed, `sym` is a path
+//! segment (NOT a query param). The API accepts three symbol forms:
+//! dash (`BTC-USDT`, preferred), slash (`BTC/USDT`), or numeric ticker_id.
+//!   GET /v1/idx/{sym}?limit=1000       -> octet-stream of 56B IndexRecords
+//!   GET /v1/ohlc/{sym}?tf=60&from=&to= -> JSON [{ts,open,..}, ...]
+//!   GET /v1/bars/{sym}/{kind}          -> octet-stream of 96B Bars
 //!   GET /v1/tickers, /v1/providers, /v1/symbols (JSON catalog)
 //!
 //! The client deliberately runs `reqwest::blocking` so it can be used from
@@ -41,37 +43,38 @@ impl Client {
         Ok(Self { inner, base: base_url.trim_end_matches('/').to_string() })
     }
 
-    /// Fetch raw IndexRecord stream from `/v1/idx`.
+    /// Fetch raw IndexRecord stream from `/v1/idx/{sym}`.
     ///
     /// Returns a NumPy structured array of 56B records (same dtype as
-    /// `index_record_dtype()`). Pass any of `sym`, `provider`, `from_ms`,
-    /// `to_ms`, `limit` to filter the server-side scan.
-    #[pyo3(signature = (sym=None, provider=None, from_ms=None, to_ms=None, limit=None))]
+    /// `index_record_dtype()`). `sym` is required (dash/slash/ticker_id form);
+    /// `provider`, `from_ms`, `to_ms`, `limit` filter the server-side scan.
+    #[pyo3(signature = (sym, provider=None, from_ms=None, to_ms=None, limit=None))]
     fn fetch_idx(
         &self,
         py: Python<'_>,
-        sym: Option<&str>,
+        sym: &str,
         provider: Option<u16>,
         from_ms: Option<i64>,
         to_ms: Option<i64>,
         limit: Option<usize>,
     ) -> PyResult<PyObject> {
-        let mut url = format!("{}/v1/idx", self.base);
-        let mut q: Vec<(String, String)> = Vec::new();
-        if let Some(s) = sym { q.push(("sym".into(), s.to_string())); }
-        if let Some(p) = provider { q.push(("provider".into(), p.to_string())); }
-        if let Some(f) = from_ms { q.push(("from".into(), f.to_string())); }
-        if let Some(t) = to_ms { q.push(("to".into(), t.to_string())); }
-        if let Some(l) = limit { q.push(("limit".into(), l.to_string())); }
-        if !q.is_empty() {
-            url.push('?');
-            for (i, (k, v)) in q.iter().enumerate() {
-                if i > 0 { url.push('&'); }
-                url.push_str(k); url.push('='); url.push_str(v);
-            }
-        }
+        let mut url = format!("{}/v1/idx/{}", self.base, url_sym(sym));
+        append_query(
+            &mut url,
+            &[
+                ("provider", provider.map(|v| v.to_string())),
+                ("from", from_ms.map(|v| v.to_string())),
+                ("to", to_ms.map(|v| v.to_string())),
+                ("limit", limit.map(|v| v.to_string())),
+            ],
+        );
         let bytes = py.allow_threads(|| -> Result<Vec<u8>, String> {
-            let resp = self.inner.get(&url).send().map_err(|e| e.to_string())?;
+            let resp = self
+                .inner
+                .get(&url)
+                .header(reqwest::header::ACCEPT, "application/octet-stream")
+                .send()
+                .map_err(|e| e.to_string())?;
             if !resp.status().is_success() {
                 return Err(format!("{} -> {}", url, resp.status()));
             }
@@ -83,7 +86,7 @@ impl Client {
         crate::decoders::decode_idx_bytes(py, &buf)
     }
 
-    /// Fetch JSON OHLC candles from `/v1/ohlc?sym=...&tf=...`.
+    /// Fetch JSON OHLC candles from `/v1/ohlc/{sym}?tf=...`.
     ///
     /// Returns a NumPy structured array with dtype
     /// `[(ts, i8), (open, f8), (high, f8), (low, f8), (close, f8),
@@ -98,10 +101,16 @@ impl Client {
         to_ms: Option<i64>,
         limit: Option<usize>,
     ) -> PyResult<PyObject> {
-        let mut url = format!("{}/v1/ohlc?sym={}&tf={}", self.base, sym, tf);
-        if let Some(f) = from_ms { url.push_str(&format!("&from={f}")); }
-        if let Some(t) = to_ms { url.push_str(&format!("&to={t}")); }
-        if let Some(l) = limit { url.push_str(&format!("&limit={l}")); }
+        let mut url = format!("{}/v1/ohlc/{}", self.base, url_sym(sym));
+        append_query(
+            &mut url,
+            &[
+                ("tf", Some(tf.to_string())),
+                ("from", from_ms.map(|v| v.to_string())),
+                ("to", to_ms.map(|v| v.to_string())),
+                ("limit", limit.map(|v| v.to_string())),
+            ],
+        );
 
         let body = py.allow_threads(|| -> Result<String, String> {
             let resp = self.inner.get(&url).send().map_err(|e| e.to_string())?;
@@ -154,34 +163,35 @@ impl Client {
         Ok(zeros.unbind())
     }
 
-    /// Fetch raw Bar stream from `/v1/bars`. Returns NumPy structured array of
-    /// 96B records (dtype = `bar_dtype()`).
-    #[pyo3(signature = (sym=None, kind=None, from_ms=None, to_ms=None, limit=None))]
+    /// Fetch raw Bar stream from `/v1/bars/{sym}/{kind}`. Returns NumPy
+    /// structured array of 96B records (dtype = `bar_dtype()`).
+    /// `kind` is `kline` or `renko`.
+    #[pyo3(signature = (sym, kind, from_ms=None, to_ms=None, limit=None))]
     fn fetch_bars(
         &self,
         py: Python<'_>,
-        sym: Option<&str>,
-        kind: Option<&str>,
+        sym: &str,
+        kind: &str,
         from_ms: Option<i64>,
         to_ms: Option<i64>,
         limit: Option<usize>,
     ) -> PyResult<PyObject> {
-        let mut url = format!("{}/v1/bars", self.base);
-        let mut q: Vec<(String, String)> = Vec::new();
-        if let Some(s) = sym { q.push(("sym".into(), s.to_string())); }
-        if let Some(k) = kind { q.push(("kind".into(), k.to_string())); }
-        if let Some(f) = from_ms { q.push(("from".into(), f.to_string())); }
-        if let Some(t) = to_ms { q.push(("to".into(), t.to_string())); }
-        if let Some(l) = limit { q.push(("limit".into(), l.to_string())); }
-        if !q.is_empty() {
-            url.push('?');
-            for (i, (k, v)) in q.iter().enumerate() {
-                if i > 0 { url.push('&'); }
-                url.push_str(k); url.push('='); url.push_str(v);
-            }
-        }
+        let mut url = format!("{}/v1/bars/{}/{}", self.base, url_sym(sym), kind);
+        append_query(
+            &mut url,
+            &[
+                ("from", from_ms.map(|v| v.to_string())),
+                ("to", to_ms.map(|v| v.to_string())),
+                ("limit", limit.map(|v| v.to_string())),
+            ],
+        );
         let bytes = py.allow_threads(|| -> Result<Vec<u8>, String> {
-            let resp = self.inner.get(&url).send().map_err(|e| e.to_string())?;
+            let resp = self
+                .inner
+                .get(&url)
+                .header(reqwest::header::ACCEPT, "application/octet-stream")
+                .send()
+                .map_err(|e| e.to_string())?;
             if !resp.status().is_success() {
                 return Err(format!("{} -> {}", url, resp.status()));
             }
@@ -226,6 +236,27 @@ impl Client {
         .map_err(PyRuntimeError::new_err)?;
         let json_mod = py.import_bound("json")?;
         Ok(json_mod.getattr("loads")?.call1((body,))?.unbind())
+    }
+}
+
+/// Convert any symbol form to the URL-safe dash form the NXR API prefers.
+/// `BTC/USDT` → `BTC-USDT`; dash form and numeric ticker_id pass through
+/// unchanged. Matches the server's 3-form `resolve_sym`.
+fn url_sym(sym: &str) -> String {
+    sym.replace('/', "-")
+}
+
+/// Append present (`Some`) params to `url` as a query string. Skips `None`.
+fn append_query(url: &mut String, params: &[(&str, Option<String>)]) {
+    let mut first = true;
+    for (k, v) in params {
+        if let Some(val) = v {
+            url.push(if first { '?' } else { '&' });
+            first = false;
+            url.push_str(k);
+            url.push('=');
+            url.push_str(val);
+        }
     }
 }
 

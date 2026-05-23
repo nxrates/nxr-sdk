@@ -45,6 +45,11 @@ dashmap = "6"
 # Compression helpers (gzip exchange frames)
 flate2 = "1"
 
+# Daily-shard storage layer (shard.rs): date math, manifest, shard hashing.
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+
 # Raw socket options for UDP multicast burst tuning (SO_RCVBUF).
 socket2 = { version = "0.5", features = ["all"] }
 

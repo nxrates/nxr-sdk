@@ -43,6 +43,7 @@
 pub mod bar;
 pub mod ohlc;
 pub mod paths;
+pub mod resolver;
 pub mod rolling;
 pub mod tick;
 
@@ -51,6 +52,10 @@ pub use ohlc::{
     OhlcLite, OhlcWithRange, TimedOhlc, TimedOhlcCount, VarianceEstimator, reconstruct_synth_ohlc,
     reconstruct_synth_series, reconstruct_synth_series_at_base_tf_then_rollup,
 };
-pub use paths::{Leg, SYNTH_PATHS, SynthPath, is_synth, path_for, synth_deps};
+// Legacy static registry — retained during the resolver transition. New code
+// SHOULD use `resolver::Resolver` instead; these re-exports are deprecated and
+// will be removed in the next refactor wave once all consumers migrate.
+pub use paths::{Leg as LegacyLeg, SYNTH_PATHS, SynthPath as LegacySynthPath, is_synth, path_for, synth_deps};
+pub use resolver::{Leg, Resolution, ResolveErr, Resolver, ResolverCfg, SynthPath, normalize_to_slash};
 pub use rolling::RollingCorrelation;
 pub use tick::{LegTick, SynthTick, compute_synth_tick};

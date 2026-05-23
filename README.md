@@ -63,6 +63,47 @@ aggregated TDWAP composite or a triangulated cross (e.g. `ETH-BTC`), the
 client requests it the same way and never needs to know the source. There
 is no separate "synth" endpoint: it is all aggregated MITCH data.
 
+### Triangulated / synth tickers
+
+Symbols not directly listed on the exchanges (e.g. `ETH-BTC`, `XAUT-BTC`)
+are reconstructed on-the-fly from their leg series via the math in
+`nxr_sdk::synth`. The reconstruction is **transparent** — the same routes
+(`/v1/idx/{ticker}`, `/v1/bars/{ticker}/{kind}`, `/v1/ohlc/{ticker}`)
+serve direct and synth tickers identically.
+
+| Endpoint | Synth support | Math |
+|----------|---------------|------|
+| `/v1/idx/{ticker}` | Live snapshot via `/v1/synth/tick/{ticker}`; historical via `kline` rec. below | `compute_synth_tick` (legs via current snapshots) |
+| `/v1/bars/{ticker}/kline` | ✓ | `reconstruct_synth_bar_series` over leg `.s10` (Parkinson/RS quadratic-form O/H/L/C; min-conf leg gates microstructure) |
+| `/v1/bars/{ticker}/renko` | Wave-2 (Event-Merge Sweep) | merge leg `.renko` by ts → update log(synth) by `α_k·Δ_log_A_k` per event → emit synth brick when `|Δ| ≥ h_S`; wicks via quadratic-form |
+| `/v1/ohlc/{ticker}` | ✓ | `reconstruct_synth_series_at_base_tf_then_rollup` (10s base → target TF rollup) |
+
+**Triangulation math (s10 / OHLC):**
+
+For synth `S = Π A_k^{α_k}` with α_k ∈ {-1,+1} (e.g. `ETH-BTC = ETH-USDT / BTC-USDT`):
+
+```
+log S(t) = Σ_k α_k · log A_k(t)
+σ²_S    = e' · Σ · e  (e_k = α_k, Σ = leg covariance via Parkinson or Rogers-Satchell)
+range_S = exp(±√σ²_S · range_const)   → synth H/L
+```
+
+Microstructure (vbid, vask, tick_count, realized_var, bipower_var) is
+**summed** across legs at each bucket. Confidence-gated fields (drift,
+vol_imbalance, avg_spread_bps, avg_ci_ubp, reject_rate) inherit from the
+**min-confidence leg** (largest `avg_ci_ubp`) — the weakest leg gates the
+synth signal quality.
+
+**Why on-the-fly:** synth bars are deterministic functions of leg bars,
+which are already stored. Pre-materializing every synth ticker would
+combinatorially explode storage and force re-computation on every brick
+recalibration (every 30 min for renko). On-the-fly reconstruction is
+~10⁴× cheaper than rebuilding from raw ticks and stays exact w.r.t. the
+underlying legs.
+
+Synth registry: see `/v1/synth/paths` for the live list (`SYNTH_PATHS` in
+`nxr_sdk::synth::paths`).
+
 **Symbol forms** — `{ticker}` accepts any of three forms, resolved identically:
 
 | Form | Example | Note |

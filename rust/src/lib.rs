@@ -25,6 +25,7 @@ pub mod ohlc;
 pub mod providers;
 pub mod publisher;
 pub mod resolve;
+pub mod shard;
 pub mod stats;
 pub mod synth;
 pub mod tdwap;

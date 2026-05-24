@@ -157,34 +157,44 @@ accepts dash form (`BTC-USDT`), slash form (`BTC%2FUSDT`), or numeric `ticker_id
 
 ```text
 [0..16)  MitchHeader (16 B):
-   msg_type u8 | flags u8 | seq u16 | provider_id u16 | mts_raw [u8;6] | _pad [u8;2]
+   type_provider u16  (low 4b = msg type code, high 12b = provider_id)
+   timestamp [u8;6]   (u48 LE mts, 16 us ticks since 2010-01-01)
+   count u8
+   flags u8
+   sequence u16
+   _reserved [u8;4]
 [16..56) Index body (40 B):
    ticker u64 | bid f64 | ask f64 | vbid u32 | vask u32
-   | ci u16 (sqrt-encoded; ubp = (ci/16)^2) | confidence u8
-   | accepted u8 | rejected u8 | _pad [u8;1]
+   | ci u16 (sqrt-encoded; ubp = (ci/16)^2) | tick_count u16
+   | confidence u8 | accepted u8 | rejected u8 | flags u8
 ```
 
-`mts` = 16 µs ticks since 2010-01-01 UTC.
+`mts` = 16 us ticks since 2010-01-01 UTC.
 `ms`  = EPOCH_MS_2010 (1262304000000) + mts*16/1000.
 
 ### Bar (96 B, little-endian, packed)
 
+Bar has no embedded ticker - the file path identifies it. All timestamps
+are u48 MITCH mts.
+
 ```text
-ticker u64 | open_ts u48 (6B) | close_ts u48 (6B)
+open_ts [u8;6] | close_ts [u8;6]
 | open f64 | high f64 | low f64 | close f64
-| vbid u32 | vask u32 | tick_count u32
+| vbid u32 | vask u32 | tick_count u32 | _pad [u8;8]
 | realized_var f32 | bipower_var f32 | drift f32
 | vol_imbalance f32 | avg_spread_bps f32 | max_abs_return f32
 | avg_ci_ubp u16 (sqrt-encoded) | reject_rate u16
-| kind u8 (0=kline 1=renko 2=dib 3=tib) | _pad [u8;3]
+| kind u8 (0=kline 1=renko 2=dib 3=tib) | reserved [u8;3]
 ```
 
 ## WebSocket protocol
 
 ```text
 [0]     u8   msg_type   (1 = index_batch)
+[1]     u8   _pad
 [2..4)  u16  count      (little-endian)
-[8+]    count × 9 × f64 (LE) — epoch_ms, ticker, mid, bid, ask,
+[4..8)  u32  _pad       (aligns payload to 8B boundary)
+[8+]    count x 9 x f64 (LE) - epoch_ms, ticker, mid, bid, ask,
                                 ci_ubp, confidence, accepted, rejected
 ```
 

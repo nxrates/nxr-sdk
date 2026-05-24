@@ -91,8 +91,10 @@ slice cast → owned `Vec<T>`). Metadata defaults to JSON.
 
 ```text
 [0]    u8   msg_type   (1 = index_batch)
+[1]    u8   _pad
 [2..4) u16  count      (LE)
-[8+]   count × 9 × f64 (LE) — epoch_ms, ticker, mid, bid, ask, ci_ubp,
+[4..8) u32  _pad       (aligns payload to 8B boundary)
+[8+]   count x 9 x f64 (LE) - epoch_ms, ticker, mid, bid, ask, ci_ubp,
                               confidence, accepted, rejected
 ```
 

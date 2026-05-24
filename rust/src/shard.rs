@@ -30,7 +30,8 @@
 //!   market (sentinels present) from a *producer outage* (no sentinels).
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -49,6 +50,12 @@ pub const FLAG_HEARTBEAT_SENTINEL: u8 = 0b0000_0001;
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote
 /// is unchanged. 60s bounds the "is this a gap or just quiet?" ambiguity.
 pub const SENTINEL_INTERVAL_MS: i64 = 60_000;
+
+/// Milliseconds per UTC day. Shared by all retention / cutoff math.
+pub const MS_PER_DAY: i64 = 86_400_000;
+
+/// Milliseconds per 30-minute bucket (offline Parkinson HLC + sigma window).
+pub const MS_PER_30MIN: i64 = 1_800_000;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Date / path math
@@ -174,6 +181,81 @@ pub fn shard_record_count<T>(path: &Path) -> Result<u64> {
     Ok(if stride == 0 { 0 } else { len / stride })
 }
 
+/// Buffered streaming reader for any `[T: Pod]` shard file (4096 records per
+/// refill). Used by the `*_from_idx` offline tools to avoid materializing whole
+/// shards in memory. Returns `Ok(None)` at EOF; errors on misalignment.
+///
+/// Single source of truth for the previously duplicated `IdxStream` structs in
+/// `s10_from_idx`, `renko_from_idx`, and `nxr_calibrate`.
+pub struct ShardStream<T: Pod> {
+    file: fs::File,
+    buf: Vec<u8>,
+    pos: usize,
+    filled: usize,
+    eof: bool,
+    _marker: PhantomData<T>,
+}
+
+impl<T: Pod> ShardStream<T> {
+    /// Open `path` for buffered streaming of `T` records.
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let stride = core::mem::size_of::<T>().max(1);
+        Ok(Self {
+            file,
+            buf: vec![0u8; 4096 * stride],
+            pos: 0,
+            filled: 0,
+            eof: false,
+            _marker: PhantomData,
+        })
+    }
+
+    fn refill(&mut self) -> Result<()> {
+        if self.eof {
+            return Ok(());
+        }
+        self.filled = 0;
+        self.pos = 0;
+        while self.filled < self.buf.len() {
+            match self.file.read(&mut self.buf[self.filled..])? {
+                0 => {
+                    self.eof = true;
+                    break;
+                }
+                n => self.filled += n,
+            }
+        }
+        let stride = core::mem::size_of::<T>();
+        if stride > 0 && self.filled % stride != 0 {
+            anyhow::bail!(
+                "shard stream short read {} not aligned to record size {}",
+                self.filled,
+                stride
+            );
+        }
+        Ok(())
+    }
+
+    /// Next record, or `Ok(None)` at EOF.
+    pub fn next(&mut self) -> Result<Option<T>> {
+        let stride = core::mem::size_of::<T>();
+        if stride == 0 {
+            return Ok(None);
+        }
+        if self.pos >= self.filled {
+            self.refill()?;
+            if self.pos >= self.filled {
+                return Ok(None);
+            }
+        }
+        let slice = &self.buf[self.pos..self.pos + stride];
+        let rec: T = *bytemuck::from_bytes(slice);
+        self.pos += stride;
+        Ok(Some(rec))
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Manifest
 // ─────────────────────────────────────────────────────────────────────────
@@ -234,6 +316,32 @@ impl Manifest {
             self.last_ts = last.last_ts;
         }
         self.last_updated = chrono::Utc::now().timestamp_millis();
+    }
+
+    /// Rescan all `<dir>/*.{kind_ext}` shards, drop stale entries for that
+    /// extension, re-add fresh entries by scanning each file, and merge
+    /// `kind_ext` into the comma-joined `kind` field (so a directory holding
+    /// e.g. both `.s10` and `.renko` shards records both kinds).
+    ///
+    /// Replaces the duplicated manifest-merge loop in `s10_from_idx` and
+    /// `renko_from_idx`.
+    pub fn refresh_kind<T: ShardRecord>(&mut self, dir: &Path, kind_ext: &str) -> Result<()> {
+        let existing = list_shards(dir, kind_ext)?;
+        let existing_dates: Vec<String> = existing
+            .iter()
+            .map(|(d, _)| date_stem(*d))
+            .collect();
+        self.shards
+            .retain(|s| !existing_dates.iter().any(|d| d == &s.date));
+        for (date, path) in existing {
+            self.upsert(shard_entry::<T>(date, &path)?);
+        }
+        if self.kind.is_empty() {
+            self.kind = kind_ext.to_string();
+        } else if !self.kind.split(',').any(|k| k == kind_ext) {
+            self.kind = format!("{},{}", self.kind, kind_ext);
+        }
+        Ok(())
     }
 }
 
@@ -643,6 +751,55 @@ mod tests {
         let dir = idx_dir(&root, 702);
         let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shard_stream_round_trip() {
+        // ShardStream<IndexRecord> must round-trip a multi-page shard 1:1.
+        let root = std::env::temp_dir().join("nxr_shard_stream_test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let p = root.join("2024-05-21.idx");
+        let mut all = Vec::new();
+        // 8200 records ⇒ exceeds the 4096-record refill page, exercises refill().
+        for i in 0..8200i64 {
+            let r = rec(1_716_249_600_000 + i * 1000, 100.0 + (i % 7) as f64, 101.0 + (i % 7) as f64);
+            all.extend_from_slice(bytemuck::bytes_of(&r));
+        }
+        fs::write(&p, &all).unwrap();
+        let mut stream = ShardStream::<IndexRecord>::open(&p).unwrap();
+        let mut n = 0usize;
+        while let Some(r) = stream.next().unwrap() {
+            assert_eq!(r.shard_ts_ms(), 1_716_249_600_000 + (n as i64) * 1000);
+            n += 1;
+        }
+        assert_eq!(n, 8200);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_refresh_kind_rescans_and_merges() {
+        // refresh_kind drops stale entries for the matching extension, re-adds
+        // fresh ones from disk, and merges the kind into the comma-joined field.
+        let root = std::env::temp_dir().join("nxr_manifest_refresh_test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // Write two .idx shards.
+        let d1 = NaiveDate::from_ymd_opt(2024, 5, 21).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 5, 22).unwrap();
+        let r1 = rec(1_716_249_600_000, 100.0, 101.0);
+        let r2 = rec(1_716_249_600_000 + 86_400_000, 102.0, 103.0);
+        fs::write(shard_path(&root, d1, "idx"), bytemuck::bytes_of(&r1)).unwrap();
+        fs::write(shard_path(&root, d2, "idx"), bytemuck::bytes_of(&r2)).unwrap();
+        let mut m = Manifest::new("X".into(), 1, "");
+        m.refresh_kind::<IndexRecord>(&root, "idx").unwrap();
+        assert_eq!(m.shards.len(), 2);
+        assert_eq!(m.kind, "idx");
+        // Re-running should be idempotent.
+        m.refresh_kind::<IndexRecord>(&root, "idx").unwrap();
+        assert_eq!(m.shards.len(), 2);
+        assert_eq!(m.kind, "idx");
         let _ = fs::remove_dir_all(&root);
     }
 

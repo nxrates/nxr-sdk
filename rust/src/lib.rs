@@ -47,6 +47,10 @@ pub use mitch::bar::Bar;
 pub use ipc::append_log::{self, AppendLog};
 pub use ipc::record::IndexRecord;
 
+// ---- Daily-shard storage layer ----
+
+pub use shard::{BarShardWriter, IdxShardWriter};
+
 // ---- Ticker resolution ----
 
 pub use ticker::{TickerIdCache, resolve_ticker_id};

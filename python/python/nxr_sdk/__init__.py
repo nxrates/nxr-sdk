@@ -36,6 +36,13 @@ Quick start -- decode + subscribe::
 
 from __future__ import annotations
 
+from nxr_sdk.ergo import (
+    NxrClient,
+    DEFAULT_QUOTE,
+    DEFAULT_KIND,
+    DEFAULT_INSTRUMENT_TYPE,
+    VALID_KINDS,
+)
 from nxr_sdk._native import (  # type: ignore[attr-defined]
     # constants
     INDEX_RECORD_SIZE,
@@ -70,6 +77,12 @@ __version__ = "0.1.0"
 
 __all__ = [
     "__version__",
+    # ergonomic layer
+    "NxrClient",
+    "DEFAULT_QUOTE",
+    "DEFAULT_KIND",
+    "DEFAULT_INSTRUMENT_TYPE",
+    "VALID_KINDS",
     # constants
     "INDEX_RECORD_SIZE",
     "BAR_SIZE",

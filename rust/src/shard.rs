@@ -342,6 +342,13 @@ pub struct IdxShardWriter {
     cur_date: Option<NaiveDate>,
     log: Option<AppendLog<IndexRecord>>,
     gate: bool,
+    /// Whether to refresh `manifest.json` on rotation/flush. The live aggregator
+    /// keeps this on (one rotation per day per ticker — cheap). Bulk migration
+    /// turns it OFF: rebuilding+sha256'ing+fsync'ing a growing manifest on every
+    /// one of ~730 daily rotations per ticker is O(n²) fsync churn on DRBD. The
+    /// API reader uses `list_shards`, not the manifest, so it is optional for
+    /// serving; a manifest can be rebuilt cheaply in one pass afterward.
+    manifest: bool,
     have_last: bool,
     last_bid: f64,
     last_ask: f64,
@@ -351,8 +358,14 @@ pub struct IdxShardWriter {
 impl IdxShardWriter {
     /// Open the writer for `ticker_id` under `data_root`. `gate` toggles the
     /// delta-only-append behavior (off = append every record, for parity with
-    /// the legacy writer during canary / migration).
+    /// the legacy writer during canary / migration). Manifest refresh is ON.
     pub fn open(data_root: &Path, ticker_id: u64, gate: bool) -> Result<Self> {
+        Self::open_with(data_root, ticker_id, gate, true)
+    }
+
+    /// Like [`open`](Self::open) but lets the caller disable per-rotation
+    /// manifest refresh (bulk migration sets `manifest=false` for speed).
+    pub fn open_with(data_root: &Path, ticker_id: u64, gate: bool, manifest: bool) -> Result<Self> {
         let dir = idx_dir(data_root, ticker_id);
         fs::create_dir_all(&dir)
             .with_context(|| format!("create_dir_all {}", dir.display()))?;
@@ -361,6 +374,7 @@ impl IdxShardWriter {
             cur_date: None,
             log: None,
             gate,
+            manifest,
             have_last: false,
             last_bid: 0.0,
             last_ask: 0.0,
@@ -407,8 +421,10 @@ impl IdxShardWriter {
                 // Drop the old log first so its fdatasync runs and the file is
                 // complete before we hash it.
                 self.log = None;
-                if let Err(e) = self.finalize_manifest(prev) {
-                    tracing::warn!(err = %e, "shard manifest finalize failed");
+                if self.manifest {
+                    if let Err(e) = self.finalize_manifest(prev) {
+                        tracing::warn!(err = %e, "shard manifest finalize failed");
+                    }
                 }
             }
         }

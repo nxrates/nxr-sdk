@@ -3,6 +3,11 @@
  *
  * Aligns with `nxr_sdk::IndexRecord`, `mitch::Bar`, `mitch::Tick`,
  * `nxr_sdk::ohlc::Ohlc` in the canonical Rust SDK.
+ *
+ * Naming convention (operator-enforced, matches MITCH):
+ *   - `symbol`     = atomic identifier ("BTC", "USDT", "EUR")
+ *   - `ticker`     = pair string ("BTC/USDT")
+ *   - `ticker_id`  = u64 MITCH encoding (bigint at the boundary)
  */
 
 /** Symbol type used at the API boundary. e.g. "BTC/USDT". */
@@ -116,13 +121,103 @@ export interface TickerSnapshot {
   rejected: number;
 }
 
-/** Synth-tick result from `/v1/synth/tick`. */
+/**
+ * `/v1/price/{ticker_id}` / `/v1/last` snapshot — minimal live view.
+ * Mirrors the server `SnapshotResponse` DTO.
+ */
+export interface SnapshotResponse {
+  /** MITCH ticker_id (u64; bigint at the boundary). */
+  ticker: bigint;
+  mid: number;
+  bid: number;
+  ask: number;
+  /** Confidence interval in micro basis points (relative to mid). */
+  ci: number;
+  /** Active provider count. */
+  confidence: number;
+}
+
+/** Synth-tick result from `/v1/synth/tick/{sym}`. */
 export interface SynthTick {
+  sym: string;
   bid: number;
   ask: number;
   mid: number;
-  confidence: number;
+  /** Min-provider confidence across the legs. */
+  conf: number;
 }
 
 /** Bar kind for `/v1/bars` query. */
 export type BarKind = 'kline' | 'renko';
+
+/** Data kind for the unified `history()` builder. `idx` = raw IndexRecord. */
+export type DataKind = 'idx' | BarKind;
+
+/** Synth-path leg ({ sym, exp: +1 | -1 }) returned by `/v1/synth/paths`. */
+export interface SynthLeg {
+  sym: string;
+  exp: number;
+}
+
+/** Synth-path entry returned by `/v1/synth/paths` and inside `SymbolsResponse.synth`. */
+export interface SynthPath {
+  sym: string;
+  legs: SynthLeg[];
+}
+
+/** Disk shard window: first/last `YYYY-MM-DD` filename for the kind. */
+export interface ShardWindow {
+  first_date: string | null;
+  last_date: string | null;
+  count: number;
+}
+
+/** Per-data-kind schema + on-disk presence for a single ticker. */
+export interface KindSchema {
+  /** Column names in the on-disk record (also the JSON keys). */
+  fields: string[];
+  /** Bytes per record on the binary (`Accept: application/octet-stream`) path. */
+  stride_bytes: number;
+  /** Daily-shard date range present on disk for this kind. */
+  shards: ShardWindow;
+}
+
+/** One row of the `/v1/tickers/detail` integrator inventory. */
+export interface TickerDetail {
+  /** MITCH ticker_id (u64). Wire + disk identifier. `0` for synths. */
+  ticker_id: bigint;
+  /** Pair string "BASE/QUOTE" (the ticker). */
+  ticker: string;
+  /** Base symbol (e.g. "BTC"). */
+  base: string;
+  /** Quote symbol (e.g. "USDT"). */
+  quote: string;
+  /** Asset class of the base ("CR" | "FX" | ..). */
+  base_class: string;
+  /** Asset class of the quote. */
+  quote_class: string;
+  /** "SPOT" today. Other instrument types (PERP/FUT/OPT) added later. */
+  instrument_type: string;
+  /** `true` = published directly from a venue. `false` = reconstructed synth. */
+  native: boolean;
+  /** If `native == false`, the synth legs that compose this ticker. */
+  synth_legs?: SynthLeg[];
+  /** Per-kind schema + shard window. Keys: `idx`, `kline`, `renko`. */
+  kinds: Record<string, KindSchema>;
+}
+
+/** `/v1/tickers/detail` response wrapper. */
+export interface TickersDetailResponse {
+  /** Aggregator cycle interval (ms). */
+  idx_aggregation_ms: number;
+  /** Total number of tickers (native + synth). */
+  count: number;
+  /** One row per ticker. */
+  tickers: TickerDetail[];
+}
+
+/** `/v1/symbols` response: direct ticker -> id map + synth paths. */
+export interface SymbolsResponse {
+  direct: Map<string, bigint>;
+  synth: SynthPath[];
+}

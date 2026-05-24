@@ -28,7 +28,7 @@ pip install websockets
 import nxr_sdk
 
 # Defaults to https://api.nxrates.com — pass a base_url to override.
-# Optional: api_key= bypasses per-IP rate limits (see ../docs/api-plans-and-keys.md).
+# Optional: api_key= bypasses per-IP rate limits (see ../docs/api-plans.md).
 nxr = nxr_sdk.NxrClient(api_key=os.environ.get("NXR_API_KEY"))
 
 # Universal integrator inventory (typed dataclass + cached).

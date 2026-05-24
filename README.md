@@ -37,7 +37,7 @@ let nxr = NxrClient::new("https://api.nxrates.com").with_api_key("<key>");
 ```
 
 Plans, limits, and key provisioning: see
-[../docs/api-plans-and-keys.md](../docs/api-plans-and-keys.md).
+[../docs/api-plans.md](../docs/api-plans.md).
 
 ## Design bar (operator-enforced)
 

@@ -10,10 +10,20 @@
  *
  * @example
  * ```ts
- * import { NxrClient, decodeIdxBatch } from '@nxrates/sdk';
+ * import { NxrClient } from '@nxrates/sdk';
  *
- * const nxr = new NxrClient({ baseUrl: 'http://nxr.nxrates.com' });
- * const recs = await nxr.idxBinary('BTC/USDT', { limit: 1000 });
+ * const nxr = new NxrClient(); // defaults to https://api.nxrates.com
+ *
+ * // Object form
+ * const data = await nxr.history({ ticker: 'BTC/USDT', kind: 'renko', limit: 500 });
+ * if (data.kind === 'renko') console.log(data.bars.length, 'bars');
+ *
+ * // Chainable form
+ * const data2 = await nxr.get().history().pair('ETH/USDC').renko().limit(500).fetch();
+ *
+ * // Real-time stream
+ * const sub = nxr.subscribe(['BTC/USDT'], (rec) => console.log(rec.ticker, rec.bid));
+ * // sub.close() when done
  * ```
  */
 
@@ -25,8 +35,17 @@ export type {
   Tick,
   Ohlc,
   TickerSnapshot,
+  SnapshotResponse,
   SynthTick,
+  SynthPath,
+  SynthLeg,
+  TickerDetail,
+  TickersDetailResponse,
+  KindSchema,
+  ShardWindow,
+  SymbolsResponse,
   BarKind,
+  DataKind,
 } from './types.js';
 
 // MITCH constants + low-level decoders
@@ -89,10 +108,20 @@ export {
 // Client
 export {
   NxrClient,
+  HistoryRoot,
+  HistoryBuilder,
+  DEFAULT_BASE_URL,
+  DEFAULT_QUOTE,
+  DEFAULT_KIND,
+  DEFAULT_INSTRUMENT_TYPE,
   type NxrClientOpts,
   type RangeOpts,
+  type HistoryOpts,
+  type HistoryData,
   type WsState,
   type TickerResponse,
+  type SubscriberHandle,
+  type StreamIndexRecord,
 } from './client.js';
 
 // WASM accelerator (optional)

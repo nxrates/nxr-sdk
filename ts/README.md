@@ -4,12 +4,17 @@ Official TypeScript SDK for **NX Rates** (NXR). MITCH binary decoders, REST + We
 
 ## Features
 
-- Zero-dep MITCH binary decoders for the canonical wire types: **56 B `IndexRecord`** (header + body), **96 B `Bar`**, **32 B `Tick`**, and `Index`/`MitchHeader` primitives.
-- **`NxrClient`** REST client: `/v1/tickers`, `/v1/idx`, `/v1/ohlc`, `/v1/bars`, `/v1/synth/*`, `/v1/integrity`, `/v1/symbols`, `/v1/providers`, `/health`.
-- Octet-stream fast path: `idxBinary()` / `barsBinary()` fetch raw MITCH frames and decode in TS (or WASM if available).
-- **WebSocket** zero-copy `Float64Array` batches over `/v1/stream`.
-- **`MulticastSubscriber`** (Node only): UDP multicast subscriber for the raw 56 B IndexRecord stream on `239.0.42.1:40006` (channel A) / `239.0.42.2:40007` (channel B).
-- Optional **WASM accelerator** (>10 M rec/s) compiled from the canonical Rust `mitch` crate; pure-TS fallback (~500 K rec/s) runs everywhere.
+- Zero-dep MITCH binary decoders for the canonical wire types: **56 B `IndexRecord`** (header + body), **96 B `Bar`**, **32 B `Tick`**, plus `Index`/`MitchHeader` primitives.
+- **`NxrClient`** REST client covering 100% of the live `/v1` surface:
+  - Metadata: `/health`, `/metrics`, `/v1/symbols`, `/v1/providers`, `/v1/tickers`, `/v1/tickers/detail`, `/v1/synth/paths`.
+  - Live snapshots: `/v1/price/{ticker_id}`, `/v1/last`.
+  - History: `/v1/idx/{sym}`, `/v1/bars/{sym}/{kind}`, `/v1/ohlc/{sym}`, `/v1/synth/ohlc/{sym}`, `/v1/synth/tick/{sym}`.
+  - Diagnostics: `/v1/integrity/{sym}`.
+- Two equivalent call styles per fetch — **object form** (single call) and **chainable builder** — w/ smart defaults (quote=USDT, kind=renko, instrument=spot).
+- **MITCH binary is the wire default** on idx/bars (`Accept: application/octet-stream`); JSON only on metadata.
+- **Real-time WebSocket** subscriber (`subscribe(tickers, cb)`) returning a closeable handle.
+- **`MulticastSubscriber`** (Node only): UDP multicast for the raw 56 B IndexRecord stream.
+- Optional **WASM accelerator** (>10 M rec/s); pure-TS fallback (~500 K rec/s) runs everywhere.
 - Tree-shakable: `./node` and `./browser` entry points keep `dgram` out of browser bundles.
 
 ## Install
@@ -20,181 +25,118 @@ npm install @nxrates/sdk
 bun add @nxrates/sdk
 ```
 
-## Quickstart — Browser
+## Quickstart — 60 seconds to data
 
 ```ts
-import { NxrClient } from '@nxrates/sdk/browser';
+import { NxrClient } from '@nxrates/sdk';
 
-const nxr = new NxrClient({ baseUrl: 'https://nxr.nxrates.com' });
+// Defaults to https://api.nxrates.com — pass baseUrl to override.
+const nxr = new NxrClient();
 
-// REST
-const tickers = await nxr.tickers();
-const ohlc    = await nxr.ohlc('BTC/USDT', 60_000, { limit: 100 });
+// 1. Discover the universe (cached after first call).
+const detail = await nxr.tickersDetail();
+console.log(detail.count, 'tickers; idx cadence =', detail.idx_aggregation_ms, 'ms');
 
-// Fast binary (server returns 56 B MITCH frames; SDK decodes)
-const recs = await nxr.idxBinary('BTC/USDT', { limit: 1024 });
-console.log(recs[0].mid, recs[0].ci_ubp);
+// 2. Object form — one call, smart defaults (quote=USDT, kind=renko).
+const data = await nxr.history({ ticker: 'BTC/USDT', limit: 500 });
+if (data.kind === 'renko') console.log(data.bars[0]);
 
-// WebSocket — zero-copy batches
-nxr.onIndex(batch => {
-  for (let i = 0; i < batch.count; i++) {
-    if (batch.confidence(i) >= 3) console.log(batch.ticker(i), batch.mid(i));
-  }
+// 3. Chainable form — same result, flows in conditionals.
+const idx = await nxr.get().history().pair('BTC/USDT').idx().limit(1000).fetch();
+if (idx.kind === 'idx') console.log(idx.records[0]);
+
+// 4. Real-time stream.
+const sub = nxr.subscribe(['BTC/USDT', 'ETH/USDT'], (rec) => {
+  console.log(rec.ts_ms, rec.ticker, rec.bid, rec.ask, rec.ci_ubp);
 });
-nxr.connect();
+// ...
+sub.close();
 ```
 
-## Quickstart — Node (multicast)
+## REST surface reference
+
+| Method                                      | Endpoint                          | Wire             |
+| ------------------------------------------- | --------------------------------- | ---------------- |
+| `client.health()` / `client.isHealthy()`    | `GET /health`                     | JSON / boolean   |
+| `client.metrics()`                          | `GET /metrics`                    | Prometheus text  |
+| `client.symbols()`                          | `GET /v1/symbols`                 | JSON             |
+| `client.providers()`                        | `GET /v1/providers`               | JSON             |
+| `client.tickers()`                          | `GET /v1/tickers`                 | JSON             |
+| `client.tickersDetail({ refresh? })`        | `GET /v1/tickers/detail`          | JSON, cached     |
+| `client.price(tickerId)`                    | `GET /v1/price/{ticker_id}`       | JSON             |
+| `client.last([tickerId, ...])`              | `GET /v1/last?symbols=...`        | JSON             |
+| `client.idx(sym, opts)`                     | `GET /v1/idx/{sym}`               | MITCH binary 56B |
+| `client.bars(sym, kind, opts)`              | `GET /v1/bars/{sym}/{kind}`       | MITCH binary 96B |
+| `client.ohlc(sym, tf_s, opts)`              | `GET /v1/ohlc/{sym}?tf=`          | JSON (legacy)    |
+| `client.synthPaths()`                       | `GET /v1/synth/paths`             | JSON             |
+| `client.synthTick(sym)`                     | `GET /v1/synth/tick/{sym}`        | JSON             |
+| `client.synthOhlc(sym, tf_s, opts)`         | `GET /v1/synth/ohlc/{sym}?tf=`    | JSON             |
+| `client.integrity(sym, { kind? })`          | `GET /v1/integrity/{sym}`         | JSON             |
+| `client.history(opts)`                      | unified routing                   | typed envelope   |
+| `client.get().history()....fetch()`         | unified routing                   | typed envelope   |
+| `client.subscribe(tickers, cb)`             | `WS  /v1/stream`                  | binary frames    |
+
+Range opts: `{ from?, to?, limit?, cursor? }` — all epoch ms.
+
+## Wire schemas
+
+### IndexRecord (56 B, little-endian, packed)
+
+```
+[0..16)  MitchHeader (16 B):
+   msg_type u8 | flags u8 | seq u16 | provider_id u16 | mts_raw [u8;6] | _pad [u8;2]
+[16..56) Index body (40 B):
+   ticker u64 | bid f64 | ask f64 | vbid u32 | vask u32
+   | ci u16 (sqrt-encoded; ubp = (ci/16)^2) | confidence u8
+   | accepted u8 | rejected u8 | _pad [u8;1]
+```
+
+`mts` = 16 µs ticks since 2010-01-01 UTC.
+`ms`  = EPOCH_MS_2010 + mts*16/1000.
+
+### Bar (96 B, little-endian, packed)
+
+```
+ticker u64 | open_ts u48 (6B) | close_ts u48 (6B)
+| open f64 | high f64 | low f64 | close f64
+| vbid u32 | vask u32 | tick_count u32
+| realized_var f32 | bipower_var f32 | drift f32
+| vol_imbalance f32 | avg_spread_bps f32 | max_abs_return f32
+| avg_ci_ubp u16 (sqrt-encoded) | reject_rate u16
+| kind u8 (0=kline, 1=renko, 2=dib, 3=tib) | _pad [u8;3]
+```
+
+## WebSocket protocol
+
+`ws://<host>/v1/stream` ships an `IndexBatch` frame every 100 ms:
+
+```
+[0]     u8   msg_type   (1 = index_batch)
+[2..4)  u16  count      (little-endian)
+[8+]    count × 9 × f64 (LE) — epoch_ms, ticker, mid, bid, ask,
+                                ci_ubp, confidence, accepted, rejected
+```
+
+The `subscribe(tickers, cb)` API decodes frames and dispatches per record;
+records for unsubscribed tickers (when `tickers` is non-empty) are filtered
+client-side after the WS detail cache resolves them to `ticker_id`s.
+
+## Node multicast subscriber
 
 ```ts
 import { MulticastSubscriber } from '@nxrates/sdk/node';
 
 const sub = new MulticastSubscriber({ group: '239.0.42.1', port: 40006 });
-
-sub.on('record', rec => {
-  console.log(rec.ticker, rec.mid, rec.confidence);
-});
-
-sub.on('batch', recs => {
-  // Lower-overhead alternative when datagrams carry many frames.
-});
-
-sub.on('error', err => console.error('mcast error', err));
-
+sub.on('record', (r) => console.log(r.ticker, r.mid));
 await sub.start();
-// ... later ...
-await sub.stop();
 ```
 
-For both channels A and B (dedup at the app layer):
+## Versioning
 
-```ts
-const a = new MulticastSubscriber({ group: '239.0.42.1', port: 40006 });
-const b = new MulticastSubscriber({ group: '239.0.42.2', port: 40007 });
-await Promise.all([a.start(), b.start()]);
-```
-
-## API surface
-
-### Types ([`src/types.ts`](./src/types.ts))
-
-```ts
-interface IndexRecord {
-  ts_ms: number;       // Unix epoch ms
-  provider: number;    // u12 provider id
-  ticker: bigint;      // u64 MITCH ticker id
-  bid: number; ask: number; mid: number;
-  ci_ubp: number;      // decoded confidence interval, micro basis points
-  accepted: number; rejected: number; confidence: number;
-  vbid: number; vask: number; tick_count: number; sequence: number;
-}
-
-interface Bar {
-  open_ms: number; close_ms: number;
-  open: number; high: number; low: number; close: number;
-  vbid: number; vask: number; tick_count: number;
-  realized_var: number; bipower_var: number; drift: number;
-  vol_imbalance: number; avg_spread_bps: number; max_abs_return: number;
-  avg_ci_ubp: number; reject_rate: number; kind: number;
-}
-
-interface Ohlc { ts_ms: number; open: number; ...; avg_ci_ubp: number; }
-type Sym = string; // "BTC/USDT"
-```
-
-### Decoders ([`src/decode.ts`](./src/decode.ts))
-
-```ts
-decodeIdxRecord(buf: Uint8Array, offset?: number): IndexRecord
-decodeIdxBatch(buf: Uint8Array): IndexRecord[]
-decodeBar(buf: Uint8Array, offset?: number): Bar
-decodeBarBatch(buf: Uint8Array): Bar[]
-decodeTick(buf: Uint8Array, offset?: number): Tick
-decodeFrame(buf: Uint8Array): { header, bodyOffset, bodyBytes } | null
-```
-
-### Client ([`src/client.ts`](./src/client.ts))
-
-```ts
-class NxrClient {
-  constructor(opts: { baseUrl: string; reconnectMs?: number; fetch?: typeof fetch });
-
-  // discovery
-  isHealthy(): Promise<boolean>;
-  symbols():   Promise<Map<string, bigint>>;
-  providers(): Promise<Map<number, string>>;
-
-  // market data — JSON
-  tickers(): Promise<TickerSnapshot[]>;
-  idx(sym: Sym, opts?: RangeOpts): Promise<IndexRecord[]>;
-  ohlc(sym: Sym, tf_ms: number, opts?: RangeOpts): Promise<Ohlc[]>;
-  bars(sym: Sym, kind: 'kline' | 'renko', opts?: RangeOpts): Promise<Bar[]>;
-  synthTick(sym: Sym): Promise<SynthTick>;
-  synthOhlc(sym: Sym, tf_ms: number, opts?: RangeOpts): Promise<Ohlc[]>;
-  integrity(): Promise<unknown>;
-
-  // market data — octet-stream (raw MITCH frames; decoded in SDK)
-  idxBinary(sym: Sym, opts?: RangeOpts): Promise<IndexRecord[]>;
-  barsBinary(sym: Sym, kind: 'kline' | 'renko', opts?: RangeOpts): Promise<Bar[]>;
-
-  // websocket
-  connect(wsUrl?: string): void;
-  disconnect(): void;
-  onIndex(cb: (batch: IndexBatch) => void): () => void;
-  onTick(cb:  (batch: TickBatch) => void):  () => void;
-  // ... see source for more
-}
-```
-
-### Multicast (Node) ([`src/multicast.ts`](./src/multicast.ts))
-
-```ts
-class MulticastSubscriber {
-  constructor(opts: { group: string; port: number; iface?: string; reuseAddr?: boolean });
-  on(event: 'record', cb: (rec: IndexRecord) => void): () => void;
-  on(event: 'batch',  cb: (recs: IndexRecord[]) => void): () => void;
-  on(event: 'raw',    cb: (buf: Uint8Array) => void): () => void;
-  on(event: 'error',  cb: (err: Error) => void): () => void;
-  on(event: 'listening', cb: () => void): () => void;
-  start(): Promise<void>;
-  stop():  Promise<void>;
-}
-```
-
-## Performance
-
-| Path | Approx throughput | Notes |
-|---|---|---|
-| Pure-TS `decodeIdxRecord` | ~500 K rec/s | DataView, no allocations beyond the result object |
-| Pure-TS `decodeIdxBatch`  | ~500 K rec/s | |
-| WASM `decode_idx_batch`   | >10 M rec/s | Requires `wasm-pack` build (`npm run build:wasm`); auto-loaded by `decodeIdxBatchFast` when present |
-| WS `IndexBatch.mid(i)`    | zero-copy | Float64Array view into the ArrayBuffer |
-
-To opt-in to the WASM fast path:
-
-```ts
-import { tryLoadWasm, decodeIdxBatchFast } from '@nxrates/sdk';
-await tryLoadWasm();                       // once at startup
-const recs = await decodeIdxBatchFast(buf); // uses WASM if loaded
-```
-
-## Build
-
-```sh
-npm install
-npm run build          # tsc + (optional) wasm-pack
-npm test               # vitest
-```
-
-`wasm-pack` is optional. When absent, `npm run build` emits TypeScript-only artifacts and `decodeIdxBatchFast` falls back to the pure-TS decoder.
-
-To build the WASM accelerator manually:
-
-```sh
-cargo install wasm-pack
-npm run build:wasm
-```
+Semantic versioning. The wire format (MITCH 56B/96B) is stable across minor
+versions; new fields are appended only at the end of fixed-width records.
+The REST surface follows the same rule — additive only.
 
 ## License
 
-MIT
+MIT.

@@ -642,6 +642,182 @@ impl Drop for IdxShardWriter {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// BarShardWriter — live, self-rotating .s10 / .renko writer
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Append-only writer for the canonical `bars/<id>/<date>.<ext>` layout,
+/// where `ext` is `"s10"` (10s time-bucketed klines) or `"renko"` (price
+/// movement bricks). 96 B records (`mitch::Bar`), ts-ascending.
+///
+/// Compared to [`IdxShardWriter`] this writer is intentionally simpler:
+/// - **No delta-gate.** Bars are emitted at a producer-decided cadence (s10
+///   every 10 s wall-clock, renko on price-cross). Every produced bar is
+///   appended — the cadence policy lives in the producer, not the writer.
+/// - **No sentinel.** Empty s10 windows are filled by the producer via
+///   `flat_bar(ts_ms, ref_price)` so the on-disk series is zero-gap; the
+///   writer never inserts synthetic rows.
+///
+/// Rotation matches `IdxShardWriter`: the shard for a record is chosen from
+/// the record's `ts_ms` (UTC date). Manifest refresh is ON by default — one
+/// rotation per day per ticker, cheap.
+///
+/// Producers stagger the rotation point away from `00:00:00` UTC by feeding
+/// the writer a shifted ts (e.g. s10 → `ts - 2_000` ms, renko → `ts - 4_000`
+/// ms) so the fsync storm on midnight does not pile onto idx's rotation. The
+/// shift is the producer's responsibility; the writer just routes on whatever
+/// ts is passed in.
+pub struct BarShardWriter {
+    dir: PathBuf,
+    ticker_id: u64,
+    ext: &'static str,
+    cur_date: Option<NaiveDate>,
+    log: Option<AppendLog<crate::mitch::bar::Bar>>,
+    /// Whether to refresh `manifest.json` on rotation/flush. ON by default.
+    manifest: bool,
+}
+
+impl BarShardWriter {
+    /// Open the writer for `ticker_id` under `data_root`. `ext` must be one
+    /// of `"s10"` or `"renko"`. Manifest refresh is ON.
+    pub fn open(data_root: &Path, ticker_id: u64, ext: &'static str) -> Result<Self> {
+        Self::open_with(data_root, ticker_id, ext, true)
+    }
+
+    /// Like [`open`](Self::open) but lets the caller disable per-rotation
+    /// manifest refresh.
+    pub fn open_with(
+        data_root: &Path,
+        ticker_id: u64,
+        ext: &'static str,
+        manifest: bool,
+    ) -> Result<Self> {
+        let dir = bars_dir(data_root, ticker_id);
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("create_dir_all {}", dir.display()))?;
+        let mut w = Self {
+            dir,
+            ticker_id,
+            ext,
+            cur_date: None,
+            log: None,
+            manifest,
+        };
+        w.seed_from_tail()?;
+        Ok(w)
+    }
+
+    /// Read the last record of the most-recent shard so a same-day restart
+    /// reopens the existing shard in append mode (no rotation, no manifest
+    /// finalize) instead of trying to start a fresh one.
+    fn seed_from_tail(&mut self) -> Result<()> {
+        let shards = list_shards(&self.dir, self.ext)?;
+        if let Some((date, _path)) = shards.last() {
+            self.cur_date = Some(*date);
+        }
+        Ok(())
+    }
+
+    /// Return the epoch-ms timestamp of the last bar in the most-recent shard,
+    /// or `None` if no shards exist / the shard is empty. Producers use this
+    /// at startup to skip emitting a bar for a bucket that already exists.
+    pub fn last_ts_ms(&self) -> Result<Option<i64>> {
+        let shards = list_shards(&self.dir, self.ext)?;
+        if let Some((_date, path)) = shards.last() {
+            let recs = read_shard_aligned::<crate::mitch::bar::Bar>(path)?;
+            return Ok(recs.last().map(|b| b.ts_ms()));
+        }
+        Ok(None)
+    }
+
+    /// Return the close price of the last bar in the most-recent shard, or
+    /// `None` if no shards exist / shard empty. Renko producer uses this on
+    /// open to seed its `last_close` so a restart preserves brick state
+    /// continuity across processes.
+    pub fn last_close(&self) -> Result<Option<f64>> {
+        let shards = list_shards(&self.dir, self.ext)?;
+        if let Some((_date, path)) = shards.last() {
+            let recs = read_shard_aligned::<crate::mitch::bar::Bar>(path)?;
+            return Ok(recs.last().map(|b| b.close));
+        }
+        Ok(None)
+    }
+
+    /// Ensure the open log targets `date`'s shard, rotating (and finalizing
+    /// the previous day's manifest entry) at the boundary.
+    fn ensure_shard(&mut self, date: NaiveDate) -> Result<()> {
+        if self.cur_date == Some(date) && self.log.is_some() {
+            return Ok(());
+        }
+        if let Some(prev) = self.cur_date {
+            if prev != date {
+                self.log = None;
+                if self.manifest {
+                    if let Err(e) = self.finalize_manifest(prev) {
+                        tracing::warn!(err = %e, "bar shard manifest finalize failed");
+                    }
+                }
+            }
+        }
+        let path = shard_path(&self.dir, date, self.ext);
+        self.log = Some(AppendLog::open(&path)?);
+        self.cur_date = Some(date);
+        Ok(())
+    }
+
+    /// Append `bar` to the appropriate daily shard. The shard date is taken
+    /// from `bar.ts_ms()`; producers that want to stagger the rollover should
+    /// stamp the bar's close_ts accordingly before calling.
+    pub fn append(&mut self, bar: &crate::mitch::bar::Bar) -> Result<()> {
+        let date = ts_ms_to_utc_date(bar.ts_ms());
+        self.ensure_shard(date)?;
+        self.log.as_mut().unwrap().append(bar)?;
+        Ok(())
+    }
+
+    /// Force durability of the current shard and refresh its manifest entry.
+    pub fn flush(&mut self) -> Result<()> {
+        if let Some(log) = self.log.as_mut() {
+            log.flush()?;
+        }
+        if let Some(date) = self.cur_date {
+            self.finalize_manifest(date)?;
+        }
+        Ok(())
+    }
+
+    /// Recompute and upsert the manifest entry for `date`'s shard.
+    fn finalize_manifest(&self, date: NaiveDate) -> Result<()> {
+        let path = shard_path(&self.dir, date, self.ext);
+        if !path.exists() {
+            return Ok(());
+        }
+        let mpath = manifest_path(&self.dir);
+        let ticker = self.ticker_id.to_string();
+        let mut m = read_manifest(&mpath)?
+            .unwrap_or_else(|| Manifest::new(ticker.clone(), self.ticker_id, self.ext));
+        m.upsert(shard_entry::<crate::mitch::bar::Bar>(date, &path)?);
+        // Make sure the manifest's kind field reflects every ext that has
+        // shards in this dir (it could legitimately hold both .s10 and
+        // .renko side by side).
+        if m.kind.is_empty() {
+            m.kind = self.ext.to_string();
+        } else if !m.kind.split(',').any(|k| k == self.ext) {
+            m.kind = format!("{},{}", m.kind, self.ext);
+        }
+        write_manifest(&mpath, &m)
+    }
+}
+
+impl Drop for BarShardWriter {
+    fn drop(&mut self) {
+        if let Some(date) = self.cur_date {
+            self.log = None;
+            let _ = self.finalize_manifest(date);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +976,57 @@ mod tests {
         m.refresh_kind::<IndexRecord>(&root, "idx").unwrap();
         assert_eq!(m.shards.len(), 2);
         assert_eq!(m.kind, "idx");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bar_shard_writer_roundtrip() {
+        // BarShardWriter must round-trip Bar records 1:1 through open / append /
+        // reopen — and the seed_from_tail path must let a restart continue
+        // writing into the same daily shard instead of starting fresh.
+        use crate::mitch::bar::Bar;
+        let root = std::env::temp_dir().join("nxr_bar_shard_writer_roundtrip");
+        let _ = fs::remove_dir_all(&root);
+        let t0 = 1_716_249_600_000; // 2024-05-21 00:00 UTC
+        let mut bars: Vec<Bar> = Vec::new();
+        {
+            let mut w = BarShardWriter::open(&root, 900, "s10").unwrap();
+            for i in 0..5i64 {
+                let ts = t0 + i * 10_000; // 10 s buckets
+                let mts = crate::mitch::timestamp::from_epoch_ms(ts);
+                let b = Bar::new_ohlcv(
+                    mts, mts,
+                    100.0 + i as f64,
+                    100.5 + i as f64,
+                    99.5 + i as f64,
+                    100.25 + i as f64,
+                    1, 1, 1,
+                );
+                w.append(&b).unwrap();
+                bars.push(b);
+            }
+            w.flush().unwrap();
+        }
+        // Reopen: shards should already exist, last_ts_ms reports the last bar.
+        let w2 = BarShardWriter::open(&root, 900, "s10").unwrap();
+        let last = w2.last_ts_ms().unwrap();
+        assert_eq!(last, Some(t0 + 4 * 10_000));
+        drop(w2);
+        // Direct shard read must match the written sequence byte-for-byte.
+        let dir = bars_dir(&root, 900);
+        let shards = list_shards(&dir, "s10").unwrap();
+        assert_eq!(shards.len(), 1);
+        let recs = read_shard_aligned::<Bar>(&shards[0].1).unwrap();
+        assert_eq!(recs.len(), 5);
+        for (a, b) in recs.iter().zip(bars.iter()) {
+            // Bar derives PartialEq, compare full struct (incl. enrichment).
+            assert_eq!(a, b);
+        }
+        // Manifest must have a single entry for this date with n_records=5.
+        let m = read_manifest(&manifest_path(&dir)).unwrap().unwrap();
+        assert_eq!(m.shards.len(), 1);
+        assert_eq!(m.shards[0].n_records, 5);
+        assert!(m.kind.contains("s10"));
         let _ = fs::remove_dir_all(&root);
     }
 

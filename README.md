@@ -2,170 +2,188 @@
 
 Official multi-language SDK for [NX Rates](https://nxrates.com) market data.
 
-Subscribe to real-time FX/crypto index prices via REST, WebSocket, or UDP multicast.
-
-MITCH wire types (structs, pack/unpack, timestamps) live in the [mitch](https://github.com/nxrates/mitch) repo. This SDK provides **client/transport** code that depends on and re-exports those types.
+Subscribe to real-time FX/crypto index prices via REST, WebSocket, or UDP multicast. Three first-class clients (TypeScript / Python / Rust) share the same MITCH binary wire format, the same naming convention, and the same dual call style.
 
 ## Languages
 
-| Language | Path | Runtime / Deps | Install |
-|----------|------|----------------|---------|
-| **TypeScript** | [`ts/`](ts/) | Bun / Node 18+ | `bun add @nxrates/sdk` |
-| **Python** | [`python/`](python/) | 3.11+, pyo3-backed wheel | `pip install nxr-sdk` |
-| **Rust** | [`rust/`](rust/) | tokio, reqwest, tungstenite | `cargo add nxr-sdk` |
+| Language        | Path                  | Install                                                  | Version (2026-05-24) |
+| --------------- | --------------------- | -------------------------------------------------------- | -------------------- |
+| **TypeScript**  | [`ts/`](ts/)          | `npm install @nxrates/sdk` (or `bun add @nxrates/sdk`)   | `0.3.0`              |
+| **Python**      | [`python/`](python/)  | `pip install nxr-sdk` (then `pip install websockets`)    | `0.2.0`              |
+| **Rust**        | [`rust/`](rust/)      | `cargo add nxr-sdk`                                      | `0.2.0`              |
 
-## Architecture
+Default endpoint: `https://api.nxrates.com`.
 
-```
-mitch repo (codec)          nxr-sdk repo (client)
-├─ impl/rust/               ├─ rust/      → depends on mitch crate
-├─ impl/typescript/         ├─ ts/        → depends on @nxrates/mitch
-└─ impl/python/             └─ python/    → pyo3 over rust SDK
-```
+## Design bar (operator-enforced)
 
-## Transports
+- **Naming**: `symbol` = atomic ("BTC", "USDT"), `ticker` = pair ("BTC/USDT"), `ticker_id` = u64 MITCH encoding.
+- **Two call styles**: object form + chainable builder, identical semantics.
+- **Smart defaults**: missing quote → `USDT`, missing kind → `renko`, missing instrument → `spot`.
+- **MITCH binary** is the default wire format on high-volume endpoints (`/v1/idx`, `/v1/bars`); JSON only on metadata.
+- **`ticker_id` is abstracted** — users pass `"BTC/USDT"` and the SDK caches `/v1/tickers/detail` on first call to resolve.
+- **Real-time** = WebSocket `/v1/stream`. **Historical** = REST `from`/`to`/`limit`/`cursor`.
 
-| Transport | Latency | Format | Use case |
-|-----------|---------|--------|----------|
-| REST | ~10ms | JSON | Metadata, snapshots, health |
-| WebSocket | ~1ms | Binary f64 frames | Real-time streaming over internet |
-| UDP multicast | ~5us | Raw MITCH | Cross-host LAN |
+## Quick start — side-by-side
 
-### REST endpoints
+### TypeScript
 
-Base URL: `https://api.nxrates.com`
-
-```
-GET /v1/tickers              -> JSON snapshot: [{ ticker, mid, bid, ask, ci, confidence }]
-GET /v1/idx/{ticker}            -> composite ticks (56B MITCH IndexRecord stream)
-GET /v1/bars/{ticker}/{kind}    -> bars; kind = kline | renko (96B MITCH Bar stream)
-GET /v1/integrity/{ticker}      -> data-quality report
-GET /health  /metrics
-```
-
-`{kind}=kline` takes `?tf=<seconds>` for the bar timeframe; `renko` is
-event-driven (no `tf`). Range params on `idx` / `bars`: `from`, `to`
-(epoch ms), `limit`, `cursor`.
-
-Any `{ticker}` resolves transparently — whether the series is a directly
-aggregated TDWAP composite or a triangulated cross (e.g. `ETH-BTC`), the
-client requests it the same way and never needs to know the source. There
-is no separate "synth" endpoint: it is all aggregated MITCH data.
-
-### Triangulated / synth tickers
-
-Symbols not directly listed on the exchanges (e.g. `ETH-BTC`, `XAUT-BTC`)
-are reconstructed on-the-fly from their leg series via the math in
-`nxr_sdk::synth`. The reconstruction is **transparent** — the same routes
-(`/v1/idx/{ticker}`, `/v1/bars/{ticker}/{kind}`, `/v1/ohlc/{ticker}`)
-serve direct and synth tickers identically.
-
-| Endpoint | Synth support | Math |
-|----------|---------------|------|
-| `/v1/idx/{ticker}` | Live snapshot via `/v1/synth/tick/{ticker}`; historical via `kline` rec. below | `compute_synth_tick` (legs via current snapshots) |
-| `/v1/bars/{ticker}/kline` | ✓ | `reconstruct_synth_bar_series` over leg `.s10` (Parkinson/RS quadratic-form O/H/L/C; min-conf leg gates microstructure) |
-| `/v1/bars/{ticker}/renko` | Wave-2 (Event-Merge Sweep) | merge leg `.renko` by ts → update log(synth) by `α_k·Δ_log_A_k` per event → emit synth brick when `|Δ| ≥ h_S`; wicks via quadratic-form |
-| `/v1/ohlc/{ticker}` | ✓ | `reconstruct_synth_series_at_base_tf_then_rollup` (10s base → target TF rollup) |
-
-**Triangulation math (s10 / OHLC):**
-
-For synth `S = Π A_k^{α_k}` with α_k ∈ {-1,+1} (e.g. `ETH-BTC = ETH-USDT / BTC-USDT`):
-
-```
-log S(t) = Σ_k α_k · log A_k(t)
-σ²_S    = e' · Σ · e  (e_k = α_k, Σ = leg covariance via Parkinson or Rogers-Satchell)
-range_S = exp(±√σ²_S · range_const)   → synth H/L
-```
-
-Microstructure (vbid, vask, tick_count, realized_var, bipower_var) is
-**summed** across legs at each bucket. Confidence-gated fields (drift,
-vol_imbalance, avg_spread_bps, avg_ci_ubp, reject_rate) inherit from the
-**min-confidence leg** (largest `avg_ci_ubp`) — the weakest leg gates the
-synth signal quality.
-
-**Why on-the-fly:** synth bars are deterministic functions of leg bars,
-which are already stored. Pre-materializing every synth ticker would
-combinatorially explode storage and force re-computation on every brick
-recalibration (every 30 min for renko). On-the-fly reconstruction is
-~10⁴× cheaper than rebuilding from raw ticks and stays exact w.r.t. the
-underlying legs.
-
-Synth registry: see `/v1/synth/paths` for the live list (`SYNTH_PATHS` in
-`nxr_sdk::synth::paths`).
-
-**Symbol forms** — `{ticker}` accepts any of three forms, resolved identically:
-
-| Form | Example | Note |
-|------|---------|------|
-| Dash | `BTC-USDT` | **Preferred** — URL-safe, no encoding |
-| Slash | `BTC%2FUSDT` | Must be percent-encoded |
-| MITCH ticker_id | `435315775907037184` or `0x060A8D644C100000` | Numeric, machine-canonical |
-
-**Content negotiation** via the `Accept` header:
-- `application/octet-stream` -> raw fixed-stride MITCH records (56B IndexRecord / 96B Bar), zero-copy decodable
-- `application/x-ndjson` -> newline-delimited JSON
-- default -> JSON array (gzip/br compressed)
-
-### WebSocket framing
-
-Binary frames on `wss://api.nxrates.com/v1/stream`:
-
-```
-WS Header (8B)
-  [0]    type     u8      1 (index) or 2 (tick)
-  [1]    pad      u8
-  [2..3] count    u16 LE  number of records
-  [4..7] reserved 4B
-
-Body: count x stride f64 values
-  Index stride = 9: epoch_ms, ticker, mid, bid, ask, ci, confidence, accepted, rejected
-  Tick  stride = 6: epoch_ms, ticker, provider_id, bid, ask, flags
-```
-
-## Quick start
-
-The production trifecta — **Rust** (canonical), **Python** (pyo3 + NumPy), and
-**TypeScript** (Node + browser) — all decode the identical MITCH wire format,
-so a batch fetched in one language decodes bit-identically in the others. Each
-ships a runnable demo against the live API in `examples/fetch_demo.*`.
-
-**Python** (`pip install nxr-sdk`)
-```python
-import nxr_sdk
-from nxr_sdk import Client
-
-client = Client(base_url="https://api.nxrates.com")
-arr = client.fetch_idx("BTC-USDT", limit=10_000)   # NumPy structured array (raw wire)
-ohlc = client.fetch_ohlc("BTC-USDT", tf=60, limit=100)
-
-# Cross-SDK-aligned decoded view (ts_ms / mid / ci_ubp) — same fields + values
-# as the Rust and TS SDKs decoding the same /v1/idx octet-stream:
-raw = open("snapshot.idx", "rb").read()
-dec = nxr_sdk.decode_idx(raw)        # zero-Python-loop, NumPy-vectorized
-```
-
-**TypeScript** (`bun add @nxrates/sdk`)
 ```ts
-import { NxrClient } from "@nxrates/sdk";
-import { decodeIdxBatch } from "@nxrates/sdk/decode";
+import { NxrClient } from '@nxrates/sdk';
 
-const nxr = new NxrClient({ baseUrl: "https://api.nxrates.com" });
-const ticks = await nxr.idxBinary("BTC-USDT", { limit: 10_000 }); // IndexRecord[]
-const ohlc  = await nxr.ohlc("BTC-USDT", 60, { limit: 100 });
+const nxr = new NxrClient(); // defaults to https://api.nxrates.com
+
+const detail = await nxr.tickersDetail();
+console.log(detail.count, 'tickers');
+
+// Object form
+const data = await nxr.history({ ticker: 'BTC/USDT', kind: 'renko', limit: 500 });
+
+// Chainable form
+const data2 = await nxr.get().history().pair('ETH/USDC').renko().limit(500).fetch();
+
+// Real-time
+const sub = nxr.subscribe(['BTC/USDT'], (rec) => console.log(rec.ts_ms, rec.bid));
+// sub.close() when done
 ```
 
-**Rust** (`cargo add nxr-sdk`)
+### Python
+
+```python
+import nxr_sdk, asyncio
+
+nxr = nxr_sdk.NxrClient()  # defaults to https://api.nxrates.com
+
+detail = nxr.tickers_detail()
+print(detail.count, "tickers")
+
+# Object form
+bars = nxr.history(ticker="BTC/USDT", kind="renko", limit=500)
+
+# Chainable form
+bars = nxr.get().history().pair("ETH/USDC").renko().limit(500).fetch()
+
+async def stream():
+    async with nxr.subscribe(["BTC/USDT"]) as sub:
+        async for rec in sub:
+            print(rec.ts_ms, rec.ticker, rec.bid)
+
+asyncio.run(stream())
+```
+
+### Rust
+
 ```rust
-use nxr_sdk::ipc::record::IndexRecord;
+use nxr_sdk::client::{NxrClient, HistoryOpts, DataKind, HistoryData};
 
-// Zero-copy: bytemuck::cast_slice over the 56B fixed-stride octet-stream.
-let buf: Vec<u8> = ureq::get("https://api.nxrates.com/v1/idx/BTC-USDT?limit=10000")
-    .set("Accept", "application/octet-stream")
-    .call()?.into_reader().bytes().collect::<Result<_,_>>()?;
-let recs: &[IndexRecord] = bytemuck::cast_slice(&buf);
-for r in recs { let _mid = (r.index.bid + r.index.ask) * 0.5; }
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let c = NxrClient::default(); // https://api.nxrates.com
+
+    let detail = c.tickers_detail().await?;
+    println!("{} tickers", detail.count);
+
+    // Object form
+    let data = c.history(HistoryOpts {
+        ticker: Some("BTC/USDT".into()),
+        kind: Some(DataKind::Renko),
+        limit: Some(500),
+        ..Default::default()
+    }).await?;
+
+    // Chainable form
+    let data2 = c.get().history().pair("ETH/USDC").renko().limit(500).fetch().await?;
+
+    // Real-time
+    let mut sub = c.subscribe(&["BTC/USDT".into()]).await?;
+    while let Some(rec) = sub.next().await? {
+        println!("{} {} {}", rec.epoch_ms, rec.ticker, rec.bid);
+    }
+    Ok(())
+}
 ```
+
+## REST surface (all three SDKs)
+
+| Endpoint                              | Method               | Wire             | Notes                                |
+| ------------------------------------- | -------------------- | ---------------- | ------------------------------------ |
+| `GET /health`                         | `health()`           | JSON             | Liveness + forwarder ages            |
+| `GET /metrics`                        | `metrics()`          | Prometheus text  | (TS only — `metrics()` raw body)     |
+| `GET /v1/symbols`                     | `symbols()`          | JSON             | direct map + synth paths             |
+| `GET /v1/providers`                   | `providers()`        | JSON             | provider_id → name                   |
+| `GET /v1/tickers`                     | `tickers()`          | JSON             | live snapshot for every ticker       |
+| `GET /v1/tickers/detail`              | `tickersDetail()`    | JSON, **cached** | universal integrator inventory       |
+| `GET /v1/price/{ticker_id}`           | `price(id)`          | JSON             | single live snapshot                 |
+| `GET /v1/last?symbols=...`            | `last([ids])`        | JSON             | multi-ticker snapshot                |
+| `GET /v1/idx/{sym}`                   | `idx(sym, opts)`     | **MITCH 56B**    | raw IndexRecord stream               |
+| `GET /v1/bars/{sym}/{kind}`           | `bars(sym, k, opts)` | **MITCH 96B**    | kline (S10 OHLC) or renko bars       |
+| `GET /v1/ohlc/{sym}?tf=`              | `ohlc(sym, tf)`      | JSON (legacy)    | prefer `/v1/bars/{sym}/kline`        |
+| `GET /v1/synth/paths`                 | `synthPaths()`       | JSON             | static synth registry                |
+| `GET /v1/synth/tick/{sym}`            | `synthTick(sym)`     | JSON             | instantaneous synth tick             |
+| `GET /v1/synth/ohlc/{sym}?tf=`        | `synthOhlc(...)`     | JSON             | synth OHLC reconstruction            |
+| `GET /v1/integrity/{sym}?kind=`       | `integrity(sym, k)`  | JSON / 503       | shard-integrity diagnostics          |
+| `WS  /v1/stream`                      | `subscribe(...)`     | binary frames    | live index broadcast (100 ms flush)  |
+
+Range opts everywhere: `{ from?, to?, limit?, cursor? }` — all epoch ms. Symbol path
+accepts dash form (`BTC-USDT`), slash form (`BTC%2FUSDT`), or numeric `ticker_id`.
+
+## Wire schemas
+
+### IndexRecord (56 B, little-endian, packed)
+
+```text
+[0..16)  MitchHeader (16 B):
+   msg_type u8 | flags u8 | seq u16 | provider_id u16 | mts_raw [u8;6] | _pad [u8;2]
+[16..56) Index body (40 B):
+   ticker u64 | bid f64 | ask f64 | vbid u32 | vask u32
+   | ci u16 (sqrt-encoded; ubp = (ci/16)^2) | confidence u8
+   | accepted u8 | rejected u8 | _pad [u8;1]
+```
+
+`mts` = 16 µs ticks since 2010-01-01 UTC.
+`ms`  = EPOCH_MS_2010 (1262304000000) + mts*16/1000.
+
+### Bar (96 B, little-endian, packed)
+
+```text
+ticker u64 | open_ts u48 (6B) | close_ts u48 (6B)
+| open f64 | high f64 | low f64 | close f64
+| vbid u32 | vask u32 | tick_count u32
+| realized_var f32 | bipower_var f32 | drift f32
+| vol_imbalance f32 | avg_spread_bps f32 | max_abs_return f32
+| avg_ci_ubp u16 (sqrt-encoded) | reject_rate u16
+| kind u8 (0=kline 1=renko 2=dib 3=tib) | _pad [u8;3]
+```
+
+## WebSocket protocol
+
+```text
+[0]     u8   msg_type   (1 = index_batch)
+[2..4)  u16  count      (little-endian)
+[8+]    count × 9 × f64 (LE) — epoch_ms, ticker, mid, bid, ask,
+                                ci_ubp, confidence, accepted, rejected
+```
+
+100 ms flush cadence. `count` is dedup-by-ticker within the window
+(last-write-wins). Client `subscribe(tickers, cb)` filters records
+client-side by ticker_id (resolved from the cached `/v1/tickers/detail`).
+
+## Content-type negotiation (server-side)
+
+| `Accept`                  | Response                                       |
+| ------------------------- | ---------------------------------------------- |
+| (default / unset)         | `application/octet-stream` — MITCH binary      |
+| `application/json`        | JSON envelope                                  |
+| `application/x-ndjson`    | newline-delimited JSON (for streaming clients) |
+
+The SDKs send `Accept: application/octet-stream` on `/v1/idx`, `/v1/bars`,
+`/v1/ohlc`, `/v1/synth/ohlc`. JSON on every other endpoint.
+
+## Versioning
+
+SemVer. The MITCH wire format (56 B / 96 B fixed-width records) is stable
+across minor versions; new fields are appended only at the end of fixed-width
+records. The REST surface follows the same rule — additive only.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT — see [`LICENSE`](LICENSE).

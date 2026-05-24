@@ -65,7 +65,10 @@ pub use agg::{
 
 // ---- TDWAP aggregation ----
 
-pub use tdwap::{ProviderEntry, compute_vwap, compute_vwap_at};
+pub use tdwap::{
+    ProviderEntry, WeightCache, compute_vwap, compute_vwap_at, compute_vwap_throttled,
+    compute_vwap_throttled_at, default_refresh_interval_ms,
+};
 
 // ---- Bar builder ----
 

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nxr-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "NX Rates Python SDK — pyo3-backed MITCH decoder, multicast subscriber, REST client"
 readme = "README.md"
 license = { text = "MIT" }

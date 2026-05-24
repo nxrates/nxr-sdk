@@ -38,6 +38,14 @@ from __future__ import annotations
 
 from nxr_sdk.ergo import (
     NxrClient,
+    WsSubscriber,
+    StreamIndexRecord,
+    TickersDetailResponse,
+    TickerDetail,
+    KindSchema,
+    ShardWindow,
+    SynthLeg,
+    DEFAULT_BASE_URL,
     DEFAULT_QUOTE,
     DEFAULT_KIND,
     DEFAULT_INSTRUMENT_TYPE,
@@ -73,12 +81,20 @@ from nxr_sdk._native import (  # type: ignore[attr-defined]
     compute_synth_tick,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
     # ergonomic layer
     "NxrClient",
+    "WsSubscriber",
+    "StreamIndexRecord",
+    "TickersDetailResponse",
+    "TickerDetail",
+    "KindSchema",
+    "ShardWindow",
+    "SynthLeg",
+    "DEFAULT_BASE_URL",
     "DEFAULT_QUOTE",
     "DEFAULT_KIND",
     "DEFAULT_INSTRUMENT_TYPE",

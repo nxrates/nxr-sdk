@@ -16,25 +16,108 @@ maturin develop --release
 pip install nxr-sdk
 ```
 
+For the WebSocket subscriber, also install `websockets`:
+
+```bash
+pip install websockets
+```
+
+## 60 seconds to data
+
+```python
+import nxr_sdk
+
+# Defaults to https://api.nxrates.com — pass a base_url to override.
+nxr = nxr_sdk.NxrClient()
+
+# Universal integrator inventory (typed dataclass + cached).
+detail = nxr.tickers_detail()
+print(detail.count, "tickers; idx cadence =", detail.idx_aggregation_ms, "ms")
+btc = detail.by_ticker("BTC/USDT")
+print(btc.ticker_id, btc.kinds["idx"].shards.first_date)
+
+# Historical fetch — object form (smart defaults: quote=USDT, kind=renko).
+bars = nxr.history(base="BTC", limit=500)  # → numpy structured array
+
+# Chainable form.
+bars = nxr.get().history().pair("ETH/USDC").renko().limit(500).fetch()
+
+# Real-time stream (requires `pip install websockets`).
+import asyncio
+
+async def consume():
+    async with nxr.subscribe(["BTC/USDT", "ETH/USDT"]) as sub:
+        async for rec in sub:
+            print(rec.ts_ms, rec.ticker, rec.bid, rec.ask, rec.ci_ubp)
+
+asyncio.run(consume())
+```
+
 ## What you get
 
-| API                          | Purpose                                                                |
-|------------------------------|------------------------------------------------------------------------|
-| `decode_idx_bytes(buf)`      | Bulk decode 56 B `IndexRecord` blob → NumPy structured array           |
-| `decode_bar_bytes(buf)`      | Bulk decode 96 B `Bar` blob → NumPy structured array                   |
-| `decode_tick_bytes(buf)`     | Bulk decode 32 B `Tick` blob → NumPy structured array                  |
-| `encode_idx_record(dict)`    | Encode an `IndexRecord` dict → 56 B wire bytes                         |
-| `encode_bar(dict)`           | Encode a `Bar` dict → 96 B wire bytes                                  |
-| `IndexRecord` / `Bar` / `Tick` | PyClass wrappers around a single decoded sample                       |
-| `MulticastSubscriber`        | Blocking + sync-iterable UDP multicast subscriber                      |
-| `Client`                     | Blocking REST client (`/v1/idx`, `/v1/ohlc`, `/v1/bars`, ...)          |
-| `resolve_ticker_id(sym)`     | Canonical symbol string → 64-bit MITCH ticker id                       |
-| `resolve_ticker(id)`         | 64-bit ticker id → `(base, quote, instrument_type)`                    |
-| `compute_synth_tick(...)`    | Off-line synth tick composition (multiplicative signed-leg paths)      |
+### `NxrClient` (high-level)
 
-## Quick start
+| Method                              | Purpose                                                       |
+| ----------------------------------- | ------------------------------------------------------------- |
+| `nxr.tickers_detail(refresh=False)` | `/v1/tickers/detail` → `TickersDetailResponse` dataclass      |
+| `nxr.resolve_ticker_id(sym)`        | "BTC/USDT" → MITCH ticker_id (cached)                         |
+| `nxr.history(...)` / `nxr.get()...` | Unified historical fetch (idx / kline / renko)                |
+| `nxr.subscribe([syms])`             | Async WebSocket subscriber over `/v1/stream`                  |
+| `nxr.fetch_idx(sym, ...)`           | Raw pyo3 primitive — octet-stream → NumPy structured array    |
+| `nxr.fetch_bars(sym, kind, ...)`    | Raw pyo3 primitive — 96 B Bars                                |
+| `nxr.fetch_ohlc(sym, tf, ...)`      | Legacy JSON `/v1/ohlc`                                        |
+| `nxr.fetch_tickers()`               | All-ticker JSON snapshot                                      |
+| `nxr.fetch_providers()`             | provider_id → name                                            |
+| `nxr.fetch_symbols()`               | symbol → ticker_id + synth paths                              |
 
-### Real-time multicast subscribe
+### Typed `tickers_detail()` view
+
+```python
+@dataclass
+class TickersDetailResponse:
+    idx_aggregation_ms: int
+    count: int
+    tickers: list[TickerDetail]
+    raw: dict           # original parsed JSON
+    def by_ticker(s): ...
+
+@dataclass
+class TickerDetail:
+    ticker_id: int      # 0 for synths
+    ticker: str         # "BTC/USDT"
+    base: str           # "BTC"
+    quote: str          # "USDT"
+    base_class: str     # "CR" | "FX" | ...
+    quote_class: str
+    instrument_type: str
+    native: bool
+    synth_legs: list[SynthLeg] | None
+    kinds: dict[str, KindSchema]   # "idx" | "kline" | "renko"
+
+@dataclass
+class KindSchema:
+    fields: list[str]
+    stride_bytes: int
+    shards: ShardWindow             # first_date / last_date / count
+```
+
+### Pyo3 primitives (raw / power-user)
+
+| API                            | Purpose                                                                |
+| ------------------------------ | ---------------------------------------------------------------------- |
+| `decode_idx_bytes(buf)`        | Bulk decode 56 B `IndexRecord` blob → NumPy structured array           |
+| `decode_bar_bytes(buf)`        | Bulk decode 96 B `Bar` blob → NumPy structured array                   |
+| `decode_tick_bytes(buf)`       | Bulk decode 32 B `Tick` blob → NumPy structured array                  |
+| `encode_idx_record(dict)`      | Encode an `IndexRecord` dict → 56 B wire bytes                         |
+| `encode_bar(dict)`             | Encode a `Bar` dict → 96 B wire bytes                                  |
+| `IndexRecord`/`Bar`/`Tick`     | PyClass wrappers around a single decoded sample                        |
+| `MulticastSubscriber`          | Blocking + sync-iterable UDP multicast subscriber                      |
+| `Client`                       | Blocking REST client wrapped by `NxrClient`                            |
+| `resolve_ticker_id(sym)`       | Symbol → 64-bit MITCH ticker id                                        |
+| `resolve_ticker(id)`           | 64-bit id → `(base, quote, instrument_type)`                           |
+| `compute_synth_tick(...)`      | Off-line synth tick composition                                        |
+
+## Real-time multicast (Node-LAN deployments)
 
 ```python
 import nxr_sdk
@@ -44,26 +127,7 @@ with nxr_sdk.MulticastSubscriber("239.0.42.1", 40006) as sub:
         print(rec.ts_ms, rec.ticker, rec.mid, "conf=", rec.confidence)
 ```
 
-### Historical REST batch
-
-```python
-import nxr_sdk
-
-cli = nxr_sdk.Client("http://nxr.nxrates.com")
-
-# .idx octet-stream -> NumPy structured array (zero-copy)
-arr = cli.fetch_idx(sym="BTC/USDT", limit=1000)
-print(arr.dtype.names)
-# ('type_provider', 'mts_raw', 'count', 'flags', 'sequence',
-#  'ticker', 'bid', 'ask', 'vbid', 'vask', 'ci', 'tick_count',
-#  'confidence', 'accepted', 'rejected', 'flags_body')
-
-# OHLC JSON -> NumPy
-candles = cli.fetch_ohlc(sym="BTC/USDT", tf=60, limit=500)
-print(candles[["ts", "open", "high", "low", "close"]][:5])
-```
-
-### Decode a `.idx` file directly
+## Decode a `.idx` file directly
 
 ```python
 import nxr_sdk
@@ -71,41 +135,10 @@ import nxr_sdk
 with open("/data/nxr/snapshots/btc_usdt.idx", "rb") as f:
     arr = nxr_sdk.decode_idx_bytes(f.read())
 
-# arr is a 1-D structured numpy array. Convert mts_raw -> unix-ms:
-import numpy as np
-mts = arr["mts_raw"].view(np.uint8).reshape(-1, 6)
-ms = nxr_sdk.EPOCH_MS_2010 + (
-    mts[:, 0].astype(np.int64)
-    | (mts[:, 1].astype(np.int64) << 8)
-    | (mts[:, 2].astype(np.int64) << 16)
-    | (mts[:, 3].astype(np.int64) << 24)
-    | (mts[:, 4].astype(np.int64) << 32)
-    | (mts[:, 5].astype(np.int64) << 40)
-) * 16 // 1000
-```
-
-### Encode + round-trip
-
-```python
-import nxr_sdk
-
-raw = nxr_sdk.encode_idx_record({
-    "ts_ms": 1_700_000_000_000,
-    "provider": 102,
-    "ticker": 0xDEADBEEF,
-    "bid": 50_000.0,
-    "ask": 50_010.0,
-    "vbid": 100,
-    "vask": 110,
-    "ci": 16,
-    "tick_count": 42,
-    "confidence": 3,
-    "accepted": 3,
-    "rejected": 0,
-})
-assert len(raw) == nxr_sdk.INDEX_RECORD_SIZE  # 56
-arr = nxr_sdk.decode_idx_bytes(raw)
-assert arr[0]["bid"] == 50_000.0
+# Vectorized mts→ms (helper from the public surface):
+ms = nxr_sdk._u48_le_to_ms(
+    arr["mts_raw"].view("u1").reshape(-1, 6)
+)
 ```
 
 ## Performance
@@ -115,7 +148,9 @@ assert arr[0]["bid"] == 50_000.0
   records / s end-to-end for `len(buf) > 1 MB`.
 - `MulticastSubscriber` runs a dedicated OS reader thread that pushes raw
   datagrams into an mpsc queue; the Python iterator pops + decodes only on
-  consume. Target: < 10 us added jitter on top of the kernel UDP recv path.
+  consume. Target: < 10 µs added jitter on top of the kernel UDP recv path.
+- `WsSubscriber` decodes binary frames in pure Python via `struct`; ~200 k
+  records/s end-to-end (the 100 ms server flush keeps frame counts small).
 - Build with `maturin develop --release` for production benchmarks; debug
   builds are ~10x slower.
 

@@ -350,9 +350,17 @@ pub struct IdxShardWriter {
     /// serving; a manifest can be rebuilt cheaply in one pass afterward.
     manifest: bool,
     have_last: bool,
+    // Full market-state tuple of the last written record. A tick is dropped
+    // ONLY when ALL of these are identical to the previous (a truly redundant
+    // observation) — so volume / confidence-interval changes are never lost.
+    // This matters because bars (s10/renko, carrying realized_var, OFI,
+    // vbid/vask, avg_ci) are rebuilt FROM the .idx by the *-from-idx tools;
+    // gating on price alone would corrupt their microstructure aggregates.
     last_bid: f64,
     last_ask: f64,
-    last_sentinel_ms: i64,
+    last_vbid: u32,
+    last_vask: u32,
+    last_ci: u16,
 }
 
 impl IdxShardWriter {
@@ -378,7 +386,9 @@ impl IdxShardWriter {
             have_last: false,
             last_bid: 0.0,
             last_ask: 0.0,
-            last_sentinel_ms: i64::MIN,
+            last_vbid: 0,
+            last_vask: 0,
+            last_ci: 0,
         };
         w.seed_from_tail()?;
         Ok(w)
@@ -400,8 +410,10 @@ impl IdxShardWriter {
                 let idx = last.index;
                 self.last_bid = idx.bid;
                 self.last_ask = idx.ask;
+                self.last_vbid = idx.vbid;
+                self.last_vask = idx.vask;
+                self.last_ci = idx.ci;
                 self.have_last = true;
-                self.last_sentinel_ms = last.shard_ts_ms();
             }
         }
         Ok(())
@@ -441,30 +453,41 @@ impl IdxShardWriter {
         let ts = rec.shard_ts_ms();
         let date = ts_ms_to_utc_date(ts);
         let new_day = self.cur_date != Some(date);
-        // Copy bid/ask out of the packed body before comparing (no refs).
+        // Copy market fields out of the packed body before comparing (no refs).
+        // A record is redundant ONLY if the WHOLE market observation repeats:
+        // price (bid/ask) AND volume (vbid/vask) AND confidence interval (ci).
+        // Any change is new information (it feeds downstream bar microstructure),
+        // so it is kept. Per-cycle metadata (tick_count/confidence/accepted/
+        // rejected) is intentionally NOT part of the identity — it churns every
+        // cycle and is not a market observation.
         let body = rec.index;
         let bid = body.bid;
         let ask = body.ask;
-        let changed = !self.have_last || bid != self.last_bid || ask != self.last_ask;
+        let vbid = body.vbid;
+        let vask = body.vask;
+        let ci = body.ci;
+        let changed = !self.have_last
+            || bid != self.last_bid
+            || ask != self.last_ask
+            || vbid != self.last_vbid
+            || vask != self.last_vask
+            || ci != self.last_ci;
 
         if !self.gate || changed || new_day {
             self.ensure_shard(date)?;
             self.log.as_mut().unwrap().append(rec)?;
             self.last_bid = bid;
             self.last_ask = ask;
+            self.last_vbid = vbid;
+            self.last_vask = vask;
+            self.last_ci = ci;
             self.have_last = true;
-            self.last_sentinel_ms = ts;
             return Ok(true);
         }
 
-        // Gated out (quote unchanged): emit a liveness sentinel if one is due.
-        if ts - self.last_sentinel_ms >= SENTINEL_INTERVAL_MS {
-            self.ensure_shard(date)?;
-            let mut sentinel = *rec;
-            sentinel.index.flags |= FLAG_HEARTBEAT_SENTINEL;
-            self.log.as_mut().unwrap().append(&sentinel)?;
-            self.last_sentinel_ms = ts;
-        }
+        // Truly redundant observation (every market field identical): dropped.
+        // No sentinel / no fill — the gate only ever REMOVES identical ticks,
+        // never inserts synthetic ones.
         Ok(false)
     }
 
@@ -519,11 +542,38 @@ mod tests {
     use crate::mitch::index::Index;
 
     fn rec(ts_ms: i64, bid: f64, ask: f64) -> IndexRecord {
+        rec_vol(ts_ms, bid, ask, 0, 0, 0)
+    }
+
+    fn rec_vol(ts_ms: i64, bid: f64, ask: f64, vbid: u32, vask: u32, ci: u16) -> IndexRecord {
         let mts = crate::mitch::timestamp::from_epoch_ms(ts_ms);
         let header = MitchHeader::new(message_type::INDEX, 0, mts, 1);
-        let mut index = Index::new(1, bid, ask, 0, 0, 0, 1, 1, 1, 0);
+        let mut index = Index::new(1, bid, ask, ci, vbid, vask, 1, 1, 1, 0);
         index.ticker = 700;
         IndexRecord::new(header, index)
+    }
+
+    #[test]
+    fn gate_keeps_volume_and_ci_changes_at_same_price() {
+        // Microstructure guarantee: a tick with unchanged bid/ask but changed
+        // volume or ci must NOT be dropped — bars (vbid/vask/OFI/avg_ci) are
+        // rebuilt from the .idx, so dropping these would corrupt them.
+        let root = std::env::temp_dir().join("nxr_shard_microstructure_test");
+        let _ = fs::remove_dir_all(&root);
+        let t0 = 1_716_249_600_000;
+        {
+            let mut w = IdxShardWriter::open(&root, 703, true).unwrap();
+            assert!(w.append(&rec_vol(t0, 100.0, 101.0, 5, 5, 10)).unwrap()); // first
+            assert!(w.append(&rec_vol(t0 + 100, 100.0, 101.0, 9, 5, 10)).unwrap()); // vbid Δ → kept
+            assert!(w.append(&rec_vol(t0 + 200, 100.0, 101.0, 9, 9, 10)).unwrap()); // vask Δ → kept
+            assert!(w.append(&rec_vol(t0 + 300, 100.0, 101.0, 9, 9, 22)).unwrap()); // ci Δ → kept
+            assert!(!w.append(&rec_vol(t0 + 400, 100.0, 101.0, 9, 9, 22)).unwrap()); // identical → dropped
+            w.flush().unwrap();
+        }
+        let dir = idx_dir(&root, 703);
+        let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
+        assert_eq!(recs.len(), 4); // 4 distinct observations kept, 1 identical dropped
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

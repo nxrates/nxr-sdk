@@ -1,6 +1,6 @@
 [package]
 name = "nxr-sdk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "NX Rates SDK - MITCH types, IPC primitives, aggregation, resolution, config, and consumer client (REST/WebSocket/UDP multicast)"
@@ -21,6 +21,9 @@ tokio = { version = "1.52", features = ["net", "rt", "rt-multi-thread", "macros"
 
 # HTTP / REST client
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# Zero-copy bytes (re-exported by reqwest::Bytes; pinned for the public-API surface).
+bytes = "1"
 
 # WebSocket
 tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-webpki-roots"] }
@@ -66,3 +69,5 @@ axum = "0.8"
 
 [dev-dependencies]
 ureq = { version = "2.10", features = ["json"] }
+wiremock = "0.6"
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }

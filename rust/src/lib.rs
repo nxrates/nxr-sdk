@@ -14,6 +14,7 @@
 
 pub mod agg;
 pub mod bar_builder;
+pub mod client;
 pub mod compress;
 pub mod config;
 pub mod consumer;
@@ -81,3 +82,7 @@ pub use bar_builder::{BarAccumulator, flat_bar};
 // ---- Configuration ----
 
 pub use config::NxrConfig;
+
+// ---- Consumer client (REST + WS) ----
+
+pub use client::NxrClient;

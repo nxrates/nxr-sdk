@@ -11,27 +11,16 @@ MITCH wire types (structs, pack/unpack, timestamps) live in the [mitch](https://
 | Language | Path | Runtime / Deps | Install |
 |----------|------|----------------|---------|
 | **TypeScript** | [`ts/`](ts/) | Bun / Node 18+ | `bun add @nxrates/sdk` |
-| **Python** | [`python/`](python/) | 3.11+, aiohttp, websockets | `pip install nxr-sdk` |
-| **Go** | [`go/`](go/) | 1.22+, gorilla/websocket | `go get github.com/nxrates/nxr-sdk/go` |
+| **Python** | [`python/`](python/) | 3.11+, pyo3-backed wheel | `pip install nxr-sdk` |
 | **Rust** | [`rust/`](rust/) | tokio, reqwest, tungstenite | `cargo add nxr-sdk` |
-| **C#** | [`csharp/`](csharp/) | .NET 8+ | `dotnet add package NxrSdk` |
-| **Java** | [`java/`](java/) | 17+, Maven | `<artifactId>nxr-sdk</artifactId>` |
-
-C, C++, and Zig codec implementations are in [`mitch/impl/`](https://github.com/nxrates/mitch/tree/main/impl) (header-only, no client needed).
 
 ## Architecture
 
 ```
 mitch repo (codec)          nxr-sdk repo (client)
 ├─ impl/rust/               ├─ rust/      → depends on mitch crate
-├─ impl/go/                 ├─ go/        → imports mitch Go module
 ├─ impl/typescript/         ├─ ts/        → depends on @nxrates/mitch
-├─ impl/python/             ├─ python/    → depends on nxr-mitch
-├─ impl/java/               ├─ java/      → depends on io.mitch
-├─ impl/csharp/             ├─ csharp/    → references NxrMitch
-├─ impl/c/                  └─ (no client - codec-only)
-├─ impl/cpp/
-└─ impl/zig/
+└─ impl/python/             └─ python/    → pyo3 over rust SDK
 ```
 
 ## Transports

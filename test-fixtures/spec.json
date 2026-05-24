@@ -1,0 +1,20 @@
+{
+  "ask_a": 50010.0,
+  "ask_b": 3001.0,
+  "bar_close": 103.0,
+  "bar_high": 105.0,
+  "bar_low": 99.0,
+  "bar_open": 100.0,
+  "bar_tick_count": 42,
+  "bar_vask": 1200,
+  "bar_vbid": 1000,
+  "bid_a": 50000.0,
+  "bid_b": 3000.0,
+  "doc": "Cross-SDK fixture scalars. ALL 3 SDKs read the binary + JSON files above and assert these values per row.",
+  "mid_a": 50005.0,
+  "mid_b": 3000.5,
+  "ticker_a": 435315551398526976,
+  "ticker_b": 100000000000,
+  "ts_ms_1": 1700000000000,
+  "ts_ms_2": 1700000010000
+}

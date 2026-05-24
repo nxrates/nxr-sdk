@@ -26,7 +26,9 @@ use nxr_sdk::client::{NxrClient, HistoryOpts, DataKind, HistoryData};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let c = NxrClient::default(); // https://api.nxrates.com
+    // Defaults to https://api.nxrates.com. Optional: .with_api_key("…") to
+    // bypass per-IP rate limits — see docs/api-plans-and-keys.md.
+    let c = NxrClient::default();
 
     // Discover the universe (cached after first call).
     let detail = c.tickers_detail().await?;

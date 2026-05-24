@@ -31,7 +31,8 @@ bun add @nxrates/sdk
 import { NxrClient } from '@nxrates/sdk';
 
 // Defaults to https://api.nxrates.com — pass baseUrl to override.
-const nxr = new NxrClient();
+// Optional: pass apiKey to bypass per-IP rate limits (see plans doc).
+const nxr = new NxrClient({ apiKey: process.env.NXR_API_KEY });
 
 // 1. Discover the universe (cached after first call).
 const detail = await nxr.tickersDetail();

@@ -14,6 +14,31 @@ Subscribe to real-time FX/crypto index prices via REST, WebSocket, or UDP multic
 
 Default endpoint: `https://api.nxrates.com`.
 
+## Authentication
+
+The API is read-only and **anonymous by default**. The Free tier per-IP rate
+limit (60 burst / 30 r/s) covers casual + dashboard use. To bypass the
+per-IP throttle, pass `X-NXR-Key: <your-key>` on every REST + WebSocket
+request:
+
+```ts
+// TS — set on the client; auto-attached to every call (REST + WS)
+const nxr = new NxrClient({ baseUrl: 'https://api.nxrates.com', apiKey: '<key>' });
+```
+
+```python
+# Python — same shape
+nxr = NxrClient(base_url='https://api.nxrates.com', api_key='<key>')
+```
+
+```rust
+// Rust
+let nxr = NxrClient::new("https://api.nxrates.com").with_api_key("<key>");
+```
+
+Plans, limits, and key provisioning: see
+[../docs/api-plans-and-keys.md](../docs/api-plans-and-keys.md).
+
 ## Design bar (operator-enforced)
 
 - **Naming**: `symbol` = atomic ("BTC", "USDT"), `ticker` = pair ("BTC/USDT"), `ticker_id` = u64 MITCH encoding.

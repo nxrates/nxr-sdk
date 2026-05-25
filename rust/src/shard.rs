@@ -39,6 +39,7 @@ use bytemuck::Pod;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::ipc::append_log::AppendLog;
 use crate::ipc::record::IndexRecord;
@@ -228,11 +229,19 @@ impl<T: Pod> ShardStream<T> {
         }
         let stride = core::mem::size_of::<T>();
         if stride > 0 && self.filled % stride != 0 {
-            anyhow::bail!(
-                "shard stream short read {} not aligned to record size {}",
-                self.filled,
-                stride
+            // Heal torn-trailing-write at EOF (mirrors `read_shard_aligned`):
+            // the OS guarantees atomicity only up to a page, so an
+            // aggregator killed mid-append can leave a partial trailing
+            // record. Drop the unrecoverable bytes; do not bail — that
+            // would block the whole calibrator + offline-bin fleet on any
+            // single shard with a torn tail.
+            let aligned = (self.filled / stride) * stride;
+            warn!(
+                dropped_bytes = self.filled - aligned,
+                stride,
+                "ShardStream: torn-trailing write at EOF — truncated"
             );
+            self.filled = aligned;
         }
         Ok(())
     }

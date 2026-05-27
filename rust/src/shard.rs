@@ -63,8 +63,7 @@ pub const FLAG_HISTORICAL_BACKFILL: u8 = 0b0000_0010;
 /// realized_var, drift, …); synthetic bricks have `tick_count = 0` and zero
 /// microstructure. Consumers training on tick-rate / OFI / spread should
 /// filter `(flags & FLAG_RENKO_SYNTHETIC_BRICK) == 0`. Geometry-only
-/// consumers can ignore the flag. Set by `nxr_sdk::renko::RenkoGenerator`
-/// (Phase 58.L.0, 2026-05-27).
+/// consumers can ignore the flag. Set by `nxr_sdk::renko::RenkoGenerator`.
 pub const FLAG_RENKO_SYNTHETIC_BRICK: u8 = 0b0000_0100;
 
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote

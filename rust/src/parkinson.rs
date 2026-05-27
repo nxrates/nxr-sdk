@@ -5,10 +5,6 @@
 //! that implements [`VolSource`]: a memory-mapped .vol file (backtest), an
 //! in-memory ring buffer (real-time), or a test fixture.
 //!
-//! ## Phase 58.L.0 unification
-//!
-//! Promoted from `series-factory::bar_construction::parkinson` to `nxr-sdk`
-//! so live and offline renko code share a single sigma estimator + blender.
 //! The single-bin live wrapper [`TickEmaVolSource`] sits next to the offline
 //! `MmapVolSource` (still in series-factory, where the memmap dep lives) and
 //! satisfies the same trait — `RenkoGenerator<S: VolSource>` is generic over
@@ -79,19 +75,14 @@ impl VolSource for TickEmaVolSource {
 
 /// Volatility calculation config (typically from pipeline.yml `vol` section).
 ///
-/// Field naming clarified in Phase 58.L.0: `sigma_blend_windows_days` is the
-/// 2-layer MTF σ blend (this struct, used at brick-size compute time) — the
-/// other MTF, `calibration.k_fit_windows_days`, lives on `CalibrationConfig`
-/// and controls the outer k-fit binary search. Both layers used to be called
-/// "mtf_lookback_days" / "windows_days" which collided at the call-site.
+/// `sigma_blend_windows_days` controls the 2-layer MTF σ blend used at brick-
+/// size compute time. The outer k-fit MTF lives on `CalibrationConfig` as
+/// `k_fit_windows_days`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolConfig {
     pub ema_period: usize,
     /// Per-window lookback (in days) used to blend the σ estimate. Inverse-
-    /// variance weighted across windows. Renamed from `mtf_lookback_days`
-    /// 2026-05-27 to disambiguate from the k-fit MTF on `CalibrationConfig`.
-    /// `#[serde(alias = ...)]` keeps existing YAML configs working.
-    #[serde(alias = "mtf_lookback_days")]
+    /// variance weighted across windows.
     pub sigma_blend_windows_days: Vec<usize>,
     pub winsorize_pct: [f64; 2],
     pub winsorize_min_samples: usize,

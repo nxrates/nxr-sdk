@@ -12,16 +12,6 @@
 //! keeps `k(σ)` honest. The only remaining safety is `min_pct` (floor against
 //! div-by-zero / sigma=0).
 //!
-//! ## Phase 58.L.0 unification
-//!
-//! Promoted from `series-factory::bar_construction::renko` to `nxr-sdk` so
-//! the live producer (`core/src/bars_renko.rs`) and offline pipeline
-//! (calibration + applier in `series-factory`) call into the SAME engine.
-//! The split that previously existed (live ad-hoc state machine + offline
-//! generator) caused subtle divergence that surfaced as live brick-storms
-//! on degenerate σ estimates (see `docs/internal/renko-synth-audit-2026-05-26`).
-//! Day-1 behaviour is byte-identical to the pre-unification offline path.
-//!
 //! ## Multi-brick tick semantics
 //!
 //! When a single tick crosses `N >= 2` brick boundaries, brick #1 carries
@@ -92,11 +82,10 @@ impl RenkoConfig {
 }
 
 /// Lower floor on effective k. A k below this is treated as a calibration
-/// failure (boundary-clamp from degenerate σ — see audit 2026-05-26). This
-/// is the OFFLINE/engine-level tripwire; the live producer used to carry
-/// its own copy of this floor. Phase 58.L.0 consolidated both into this
-/// engine constant. (Operator deferred K_FLOOR removal until σ-floor and
-/// rate-limiter land — see journal id=1321.)
+/// failure (boundary-clamp from degenerate σ — see audit 2026-05-26).
+/// Single tripwire shared by live producer and offline calibrator.
+/// (Operator deferred K_FLOOR removal until σ-floor and rate-limiter land —
+/// see journal id=1321.)
 pub const K_FLOOR: f64 = 0.05;
 
 /// Streaming Renko bar generator with adaptive brick sizing.

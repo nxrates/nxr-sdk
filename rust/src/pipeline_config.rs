@@ -1,7 +1,7 @@
 //! Unified `nxrates.yml` schema — single source of truth shared by every
 //! offline tool that consumes the pipeline configuration.
 //!
-//! Phase 58.L.1 consolidation: each tool previously carried a near-identical
+//! Consolidated schema: each offline tool used to carry a near-identical
 //! private copy of the `series.{renko,vol,calibration,pipeline}` schema
 //! (renko_from_idx, nxr_calibrate, renko_trailing_from_idx, mtf_sweep,
 //! generate_renko_from_ticks, fetch_crypto_history). They were not strictly

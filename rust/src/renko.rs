@@ -86,9 +86,9 @@ pub const K_FLOOR: f64 = 0.05;
 /// any local copies to this constant.
 pub const MIN_BRICK_PCT: f64 = 0.0001;
 
-/// Cap on bricks per single tick. Post Phase 58.L.1: σ scale is bounded by
-/// calibration; 1 000 bricks/tick implies a 100 000% move relative to the
-/// brick floor — impossible in any real market regime. Defensive guard.
+/// Cap on bricks per single tick. σ scale is bounded by calibration; 1 000
+/// bricks/tick implies a 100 000% move relative to the brick floor —
+/// impossible in any real market regime. Defensive guard.
 /// Canonical home — `core::bars_renko*` and `series-factory::synth_backfill`
 /// import this; no local copies allowed.
 pub const MAX_BRICKS_PER_TICK: usize = 1_000;

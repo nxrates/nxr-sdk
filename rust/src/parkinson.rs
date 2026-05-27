@@ -5,8 +5,8 @@
 //! that implements [`VolSource`]: a memory-mapped .vol file (backtest), an
 //! in-memory ring buffer (real-time), or a test fixture.
 //!
-//! The Renko engine itself no longer depends on `VolSource` (Phase 58.L.1):
-//! callers resolve σ via `MtfParkinsonCalculator` then pass the number into
+//! The Renko engine itself does not depend on `VolSource`: callers resolve σ
+//! via `MtfParkinsonCalculator` then pass the number into
 //! `RenkoGenerator::feed_tick_with_sigma`. This trait remains the input
 //! contract for the calculator only.
 

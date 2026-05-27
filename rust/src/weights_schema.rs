@@ -36,7 +36,7 @@ pub struct WeightsFile {
     #[serde(default)]
     pub renko_k_per_ticker: BTreeMap<String, f64>,
     /// Unix-seconds timestamp of the last successful `nxr-calibrate` run.
-    /// Optional so existing weights files (pre-Phase 54) still parse cleanly.
+    /// Optional so legacy weights files (pre-calibration era) still parse.
     #[serde(default)]
     pub calibrated_at: Option<u64>,
 }

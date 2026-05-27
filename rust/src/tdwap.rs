@@ -368,12 +368,13 @@ where
 /// the float fields (with `to_bits`) so that a no-op recomputation by the
 /// upstream forwarder that lands the same f64 still counts as "unchanged".
 ///
-/// Phase 58.D: dropped `last_update: Instant` from this fingerprint. With it,
-/// every idempotent forwarder re-send advanced `e.last_update` (via update()/
+/// `last_update: Instant` is deliberately NOT part of this fingerprint. RCA:
+/// every idempotent forwarder re-send advances `e.last_update` (via update()/
 /// inject()) → fingerprint diff → forced recompute path. The throttle hot-path
-/// (bit-identical replay) was effectively unreachable for active pairs, so
-/// TDWAP fanout / shard delta-gate behaved as if throttle were disabled.
-/// Genuine quote changes still flip `bid_bits` / `ask_bits` / vbid / vask.
+/// (bit-identical replay) would be effectively unreachable for active pairs,
+/// so TDWAP fanout / shard delta-gate would behave as if throttle were
+/// disabled. Genuine quote changes still flip `bid_bits` / `ask_bits` / vbid /
+/// vask.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ProviderFingerprint {
     provider_id: u16,

@@ -326,8 +326,20 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
             });
         }
 
-        // Resolve remaining as base
-        if let Some(base) = RESOLVER.find(&remaining, 0.7, None) {
+        // Phase 58.D: when quote is a crypto major (usdt/usdc/btc/eth), force
+        // class_filter=CR on the base lookup. Without it, fuzzy match landed
+        // on EQ assets (e.g. SUI → "Sun Communities"), creating ghost MITCH
+        // ids + ghost shard dirs on disk. Crypto-quote-pair ⇒ base must be CR.
+        let cr_quote = matches!(
+            quote.name.to_lowercase().as_str(),
+            "tether" | "usd coin" | "bitcoin" | "ethereum"
+        );
+        let class_filter = if cr_quote { Some(AssetClass::CR) } else { None };
+
+        // Resolve remaining as base. Phase 58.D: threshold 0.7 → 0.9 to
+        // suppress weak-similarity matches that misclass new tokens (e.g.
+        // ENA matched "ENA Group SA"). Confident match or skip.
+        if let Some(base) = RESOLVER.find(&remaining, 0.9, class_filter) {
             let tid = TickerId::new(instrument_type, base.asset.class, base.asset.class_id, quote.class, quote.class_id, 0)?;
             let name = format!("{}/{}", base.asset.name, quote.name);
             steps.push(format!("Resolved base asset: {} (confidence: {:.2})", base.asset.name, base.confidence));
@@ -340,7 +352,8 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
     }
 
     // Step 3: try as single asset with USD quote
-    if let Some(asset) = RESOLVER.find(&cleaned, 0.7, None) {
+    // Phase 58.D: threshold 0.7 → 0.9 (same RCA as base lookup above).
+    if let Some(asset) = RESOLVER.find(&cleaned, 0.9, None) {
         let usd = RESOLVER.find("usd", 0.95, Some(AssetClass::FX))
             .ok_or_else(|| MitchError::InvalidData("Could not resolve USD".into()))?;
         let tid = TickerId::new(instrument_type, asset.asset.class, asset.asset.class_id, usd.asset.class, usd.asset.class_id, 0)?;

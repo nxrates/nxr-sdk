@@ -140,7 +140,8 @@ impl NxrConfig {
                  USDT/USD,USDC/USD,USDC/USDT,FDUSD/USD,USDS/USDT,USD1/USDT,USD1/USDC,\
                  GHO/USDT,GHO/USD,CRVUSD/USDT,USYC/USDC,BUIDL/USDC,USDF/USDT,\
                  RLUSD/USDT,RLUSD/USD,USDY/USDT,USDTB/USDT,USD0/USDT,\
-                 AUSD/USDT,USDG/USDT,EURC/USDC,EURC/USD,USDD/USDT,PYUSD/USD",
+                 AUSD/USDT,USDG/USDT,EURC/USDC,EURC/USD,USDD/USDT,PYUSD/USD,\
+                 USDe/USDT,USDe/USDC,USDe/USD",
             ),
             sink_host: env_or("NXR_SINK_HOST", "127.0.0.1"),
             sink_port: env_or("NXR_SINK_PORT", "40010").parse().unwrap_or(40010),

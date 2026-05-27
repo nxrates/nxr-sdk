@@ -144,6 +144,17 @@ pub fn synth_deps(leg: &str) -> &'static [&'static SynthPath] {
     SYNTH_DEPS.get(leg).map(Vec::as_slice).unwrap_or(&[])
 }
 
+/// Normalize any text symbol form to slash. Dash → slash. No-op on slash.
+/// Numeric / hex prefixed forms are returned as-is (caller resolves separately).
+#[inline]
+pub fn normalize_to_slash(s: &str) -> String {
+    if s.contains('-') {
+        s.replace('-', "/")
+    } else {
+        s.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +198,12 @@ mod tests {
         assert!(!deps.is_empty(), "BTC/USDT must back several synths");
         // ETH/BTC depends on BTC/USDT.
         assert!(deps.iter().any(|p| p.sym == "ETH/BTC"));
+    }
+
+    #[test]
+    fn dash_normalizes_to_slash() {
+        assert_eq!(normalize_to_slash("BTC-USDT"), "BTC/USDT");
+        assert_eq!(normalize_to_slash("BTC/USDT"), "BTC/USDT");
+        assert_eq!(normalize_to_slash("0x060A8D644C100000"), "0x060A8D644C100000");
     }
 }

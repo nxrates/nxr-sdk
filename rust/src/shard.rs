@@ -591,13 +591,20 @@ impl IdxShardWriter {
     /// gap-detection audit distinguish a *quiet* market (sentinels present)
     /// from a *producer outage* (no sentinels for > sentinel interval).
     ///
-    /// Bounds-check (R1 H1): rejects ts > now+60s and ts < now-2y, so a bad
-    /// clock or replayed historical packet cannot land in the wrong shard.
+    /// Bounds-check (R1 H1): rejects ts > now+60s and ts < now-2y for any
+    /// record whose `Index.flags` does NOT carry [`FLAG_HISTORICAL_BACKFILL`].
+    /// Offline merge / migrate paths set that bit before calling `append`
+    /// (single source of truth for "this row is from offline replay"); the
+    /// live aggregator never sets it, so a bad clock or stale ws frame still
+    /// fails loudly there.
     pub fn append(&mut self, rec: &IndexRecord) -> Result<bool> {
         let ts = rec.shard_ts_ms();
         // ts sanity: a future ts mis-routes the shard date (creates a "future"
-        // shard) and a >2y-old ts is almost certainly a bug (we don't replay
-        // history through the live writer). Both are loud failures.
+        // shard) and a >2y-old ts is almost certainly a bug for LIVE writes.
+        // Historical-backfill records bypass the guard because legitimate
+        // 5y backfills land timestamps far older than `now-2y`.
+        let body_flags = rec.index.flags;
+        let is_historical = body_flags & FLAG_HISTORICAL_BACKFILL != 0;
         let now_ms = chrono::Utc::now().timestamp_millis();
         if ts > now_ms + 60_000 {
             return Err(anyhow::anyhow!(
@@ -606,9 +613,9 @@ impl IdxShardWriter {
                 now_ms + 60_000
             ));
         }
-        if ts < now_ms - 730 * MS_PER_DAY {
+        if !is_historical && ts < now_ms - 730 * MS_PER_DAY {
             return Err(anyhow::anyhow!(
-                "IdxShardWriter::append: ancient ts {} < now-2y ({})",
+                "IdxShardWriter::append: ancient ts {} < now-2y ({}) without FLAG_HISTORICAL_BACKFILL",
                 ts,
                 now_ms - 730 * MS_PER_DAY
             ));

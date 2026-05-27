@@ -80,10 +80,18 @@ impl RenkoConfig {
 /// Single tripwire shared by live producer and offline calibrator.
 pub const K_FLOOR: f64 = 0.05;
 
+/// Renko brick-pct safety floor. Guards against σ=0 → div-by-zero / zero
+/// brick degenerate. Mirrors `RenkoConfig::default().min_pct` so live +
+/// offline + calibration share the same floor. Canonical home — promote
+/// any local copies to this constant.
+pub const MIN_BRICK_PCT: f64 = 0.0001;
+
 /// Cap on bricks per single tick. Post Phase 58.L.1: σ scale is bounded by
 /// calibration; 1 000 bricks/tick implies a 100 000% move relative to the
 /// brick floor — impossible in any real market regime. Defensive guard.
-const MAX_BRICKS_PER_TICK: usize = 1_000;
+/// Canonical home — `core::bars_renko*` and `series-factory::synth_backfill`
+/// import this; no local copies allowed.
+pub const MAX_BRICKS_PER_TICK: usize = 1_000;
 
 /// Streaming Renko bar generator with adaptive brick sizing.
 ///

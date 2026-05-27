@@ -76,6 +76,21 @@ pub const MS_PER_DAY: i64 = 86_400_000;
 /// Milliseconds per 30-minute bucket (offline Parkinson HLC + sigma window).
 pub const MS_PER_30MIN: i64 = 1_800_000;
 
+/// S10 bar window in milliseconds (the canonical s10 cadence). Shared by the
+/// live s10 producer, the synth s10 producer, and the offline backfill so a
+/// single edit changes them all.
+pub const BAR_MS_S10: i64 = 10_000;
+
+/// Shard-rotation stagger for s10 producers: feed the writer `ts - SHIFT` so
+/// the daily rollover fsync lands at 00:00:02 UTC, off the idx 00:00:00 hot
+/// path. Single source of truth.
+pub const ROLLOVER_SHIFT_MS_S10: i64 = 2_000;
+
+/// Shard-rotation stagger for renko producers: feed the writer `ts - SHIFT`
+/// so the daily rollover fsync lands at 00:00:04 UTC, off both idx
+/// (00:00:00) and s10 (00:00:02). Single source of truth.
+pub const ROLLOVER_SHIFT_MS_RENKO: i64 = 4_000;
+
 // ─────────────────────────────────────────────────────────────────────────
 // Date / path math
 // ─────────────────────────────────────────────────────────────────────────

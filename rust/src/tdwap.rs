@@ -538,14 +538,28 @@ pub fn compute_vwap_throttled_at(
 
 /// Compute the refresh interval for the throttled VWAP path.
 ///
-/// Policy: refresh at `stale_threshold_secs / 5 · 1000` ms (≈ HL/5 for the
-/// clamped half-life), but never faster than the aggregation cycle itself
-/// (else the throttle is a no-op and we just add overhead).
+/// Policy: refresh at `stale_threshold_secs / 5 · 1000` ms, but never faster
+/// than the aggregation cycle itself (else the throttle is a no-op).
 ///
-/// For the production default (stale=10s, agg=50ms): returns 1000 ms.
-/// For aggressive FX (stale=2s, agg=50ms): returns 400 ms.
-/// For pathological tight HL (stale=0.2s, agg=50ms): returns 50 ms — falls
-/// back to per-cycle refresh, throttle effectively disabled.
+/// **Relation to the operator's "weights update ≤ 1/5 agg freq, HL ≥ 5-10×
+/// refresh" rule (Aud-M1):** the half-life used inside `compute_vwap_at` is
+/// `clamp(IPI_K · ema_ipi, 1.0, stale/2)` — for the typical clamped case
+/// `HL = stale/2`. With `refresh = stale/5` this yields `HL/refresh = 2.5`,
+/// short of the stated 5-10× target. The 2.5× ratio is the production
+/// trade-off: refresh frequency is bounded below by `aggregation_interval_ms`
+/// (50 ms hot loop), and pushing refresh to `stale/10` would put it under
+/// the agg cycle on tight-HL pairs. Per-provider weight drift between
+/// refreshes is therefore up to `1 - exp(-1/2.5 · ln2) ≈ 24%`. This is
+/// acceptable for the delta-gate (composite weight ratio drift on a quiet
+/// market still produces a bit-identical Index because the cached composite
+/// is replayed verbatim — see `compute_vwap_throttled_at`) but should be
+/// audited if `stale_threshold_secs` is ever pushed below 5 s in prod.
+///
+/// Examples:
+/// - Production crypto (stale=10s, agg=50ms): refresh = 2000 ms, HL ≤ 5 s.
+/// - Aggressive FX (stale=2s, agg=50ms): refresh = 400 ms, HL ≤ 1 s.
+/// - Pathological tight HL (stale=0.2s, agg=50ms): refresh = 50 ms — falls
+///   back to per-cycle refresh, throttle effectively disabled.
 #[inline]
 pub fn default_refresh_interval_ms(stale_threshold_secs: f64, aggregation_interval_ms: u64) -> u64 {
     let hl_over_5_ms = (stale_threshold_secs * 1000.0 / 5.0).round();

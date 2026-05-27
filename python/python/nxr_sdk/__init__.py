@@ -51,6 +51,21 @@ from nxr_sdk.ergo import (
     DEFAULT_INSTRUMENT_TYPE,
     VALID_KINDS,
 )
+from nxr_sdk.errors import (
+    PlanLimitError,
+    parse_plan_limit_error,
+    plan_limit_error_from_json,
+    PLAN_ERROR_DISCRIMINANT,
+    PLAN_RATE_LIMIT_HTTP,
+    PLAN_RATE_LIMIT_WS,
+    PLAN_WS_FEED_CAP,
+    PLAN_ENCODING_FORBIDDEN,
+    PLAN_TIMEFRAME_FORBIDDEN,
+    PLAN_HISTORY_FORBIDDEN,
+    PLAN_AUTH_REQUIRED,
+    PLAN_KEY_INVALID,
+    PLAN_KEY_REVOKED,
+)
 from nxr_sdk._native import (  # type: ignore[attr-defined]
     # constants
     INDEX_RECORD_SIZE,
@@ -99,6 +114,20 @@ __all__ = [
     "DEFAULT_KIND",
     "DEFAULT_INSTRUMENT_TYPE",
     "VALID_KINDS",
+    # plan-tier errors
+    "PlanLimitError",
+    "parse_plan_limit_error",
+    "plan_limit_error_from_json",
+    "PLAN_ERROR_DISCRIMINANT",
+    "PLAN_RATE_LIMIT_HTTP",
+    "PLAN_RATE_LIMIT_WS",
+    "PLAN_WS_FEED_CAP",
+    "PLAN_ENCODING_FORBIDDEN",
+    "PLAN_TIMEFRAME_FORBIDDEN",
+    "PLAN_HISTORY_FORBIDDEN",
+    "PLAN_AUTH_REQUIRED",
+    "PLAN_KEY_INVALID",
+    "PLAN_KEY_REVOKED",
     # constants
     "INDEX_RECORD_SIZE",
     "BAR_SIZE",

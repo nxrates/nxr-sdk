@@ -18,6 +18,7 @@ pub mod client;
 pub mod compress;
 pub mod config;
 pub mod consumer;
+pub mod errors;
 pub mod ipc;
 pub mod logging;
 pub mod memory;
@@ -86,3 +87,7 @@ pub use config::NxrConfig;
 // ---- Consumer client (REST + WS) ----
 
 pub use client::NxrClient;
+
+// ---- Plan-tier typed errors ----
+
+pub use errors::{PlanErrorCode, PlanLimitError, PlanLimitErrorBody, PLAN_ERROR_DISCRIMINANT};

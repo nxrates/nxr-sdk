@@ -752,6 +752,19 @@ impl BarShardWriter {
         Ok(None)
     }
 
+    /// Return the last bar in the most-recent shard, or `None` if no shards
+    /// exist / shard empty. Renko producer uses this to warm-seed σ-EMA from
+    /// the prior shard's `realized_var` on restart, eliminating cold-start
+    /// brick storms (Sprint M2 — audit point #5(v), 2026-05-26).
+    pub fn last_bar(&self) -> Result<Option<crate::mitch::bar::Bar>> {
+        let shards = list_shards(&self.dir, self.ext)?;
+        if let Some((_date, path)) = shards.last() {
+            let recs = read_shard_aligned::<crate::mitch::bar::Bar>(path)?;
+            return Ok(recs.last().copied());
+        }
+        Ok(None)
+    }
+
     /// Ensure the open log targets `date`'s shard, rotating (and finalizing
     /// the previous day's manifest entry) at the boundary.
     fn ensure_shard(&mut self, date: NaiveDate) -> Result<()> {

@@ -126,3 +126,14 @@ export {
 
 // WASM accelerator (optional)
 export { tryLoadWasm, decodeIdxBatchFast, type NxrWasmModule } from './wasm-loader.js';
+
+// Plan-tier error types — typed handlers for HTTP 401/403/406/429 with the
+// `PLAN_LIMIT_EXCEEDED` wire shape. See ../docs/api-plans.md §"Error codes".
+export {
+  PlanLimitError,
+  parsePlanLimitError,
+  planLimitErrorFromJson,
+  PLAN_ERROR_DISCRIMINANT,
+  type PlanErrorCode,
+  type PlanLimitErrorBody,
+} from './errors.js';

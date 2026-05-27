@@ -155,6 +155,64 @@ ms = nxr_sdk._u48_le_to_ms(
 - Build with `maturin develop --release` for production benchmarks; debug
   builds are ~10x slower.
 
+## Plan tiers at a glance
+
+| Tier        | Price (USD/mo) | WS feeds   | Encodings        | History  |
+| ----------- | -------------- | ---------- | ---------------- | -------- |
+| Free        | 0              | —          | JSON             | 1 month  |
+| Starter     | 20             | 10         | JSON, f64, MITCH | 3 months |
+| Pro         | 100            | 50         | JSON, f64, MITCH | 1 year   |
+| Enterprise  | 1,000          | 500        | JSON, f64, MITCH | full     |
+| Colo        | 5,000          | unbounded  | JSON, f64, MITCH | full     |
+
+Full matrix incl. min TFs, latency targets, and fair-use notes:
+[`docs/api-plans.md`](../../docs/api-plans.md).
+
+## Error handling
+
+When a request exceeds a plan limit, the server emits HTTP 401 / 403 / 406 /
+429 with a JSON body whose `error` field equals `"PLAN_LIMIT_EXCEEDED"`. The
+SDK parses that shape into a typed `PlanLimitError` so callers can branch on
+`code` rather than regexing English `message` strings.
+
+| Code                       | HTTP | WS close | Resolution                |
+| -------------------------- | ---- | -------- | ------------------------- |
+| `PLAN_RATE_LIMIT_HTTP`     | 429  | —        | back off + retry          |
+| `PLAN_RATE_LIMIT_WS`       | —    | 4029     | back off + retry          |
+| `PLAN_WS_FEED_CAP`         | 403  | 4030     | upgrade plan / fewer subs |
+| `PLAN_ENCODING_FORBIDDEN`  | 406  | —        | upgrade / fall back JSON  |
+| `PLAN_TIMEFRAME_FORBIDDEN` | 403  | —        | upgrade / coarsen TF      |
+| `PLAN_HISTORY_FORBIDDEN`   | 403  | —        | upgrade / shorten range   |
+| `PLAN_AUTH_REQUIRED`       | 401  | 4401     | provide API key           |
+| `PLAN_KEY_INVALID`         | 401  | 4401     | verify key                |
+| `PLAN_KEY_REVOKED`         | 403  | 4403     | rotate / contact support  |
+
+Full taxonomy + wire JSON samples in
+[`docs/api-plans.md`](../../docs/api-plans.md#error-codes-and-sdk-handling).
+
+### How to detect plan limits in code
+
+```python
+import nxr_sdk
+from nxr_sdk.errors import PlanLimitError
+
+nxr = nxr_sdk.NxrClient(base_url="https://api.nxrates.com")
+
+try:
+    arr = nxr.fetch_idx("BTC-USDT", limit=1000)
+except PlanLimitError as e:
+    print(f"{e.code}: {e.message}")
+    if e.is_upgrade_needed():
+        print(f"Upgrade → {e.upgrade_url}")
+    elif e.is_rate_limit():
+        pass  # back off and retry
+    elif e.is_auth_error():
+        pass  # refresh / rotate API key
+```
+
+Runnable example: [`examples/plan_aware.py`](./examples/plan_aware.py) —
+`python examples/plan_aware.py`.
+
 ## MITCH spec
 
 Wire layout source-of-truth: `nx-rates/mitch/impl/rust/src/{header,index,bar,tick}.rs`.

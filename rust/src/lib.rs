@@ -19,13 +19,16 @@ pub mod compress;
 pub mod config;
 pub mod consumer;
 pub mod errors;
+pub mod grid;
 pub mod ipc;
 pub mod logging;
 pub mod memory;
 pub mod metrics;
 pub mod ohlc;
+pub mod parkinson;
 pub mod providers;
 pub mod publisher;
+pub mod renko;
 pub mod resolve;
 pub mod shard;
 pub mod stats;
@@ -52,6 +55,12 @@ pub use ipc::record::IndexRecord;
 // ---- Daily-shard storage layer ----
 
 pub use shard::{BarShardWriter, IdxShardWriter};
+
+// ---- Renko engine (live + offline shared) ----
+
+pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
+pub use parkinson::{MtfParkinsonCalculator, TickEmaVolSource, VolConfig, VolSource};
+pub use renko::{RenkoConfig, RenkoGenerator, K_FLOOR as RENKO_K_FLOOR};
 
 // ---- Ticker resolution ----
 

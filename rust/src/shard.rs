@@ -56,6 +56,17 @@ pub const FLAG_HEARTBEAT_SENTINEL: u8 = 0b0000_0001;
 /// guard might legitimately have to skip a backfilled record (R1 H12).
 pub const FLAG_HISTORICAL_BACKFILL: u8 = 0b0000_0010;
 
+/// `Bar.flags` bit 2: this renko brick is a synthetic continuation of a
+/// multi-brick tick (i.e. one source tick crossed N >= 2 brick boundaries
+/// and bricks 2..N were minted to maintain price-grid continuity). The
+/// first brick of the sequence carries the full microstructure (tick_count,
+/// realized_var, drift, …); synthetic bricks have `tick_count = 0` and zero
+/// microstructure. Consumers training on tick-rate / OFI / spread should
+/// filter `(flags & FLAG_RENKO_SYNTHETIC_BRICK) == 0`. Geometry-only
+/// consumers can ignore the flag. Set by `nxr_sdk::renko::RenkoGenerator`
+/// (Phase 58.L.0, 2026-05-27).
+pub const FLAG_RENKO_SYNTHETIC_BRICK: u8 = 0b0000_0100;
+
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote
 /// is unchanged. 60s bounds the "is this a gap or just quiet?" ambiguity.
 pub const SENTINEL_INTERVAL_MS: i64 = 60_000;

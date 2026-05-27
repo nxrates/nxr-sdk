@@ -61,6 +61,12 @@ socket2 = { version = "0.5", features = ["all"] }
 # at startup so a runaway process cannot OOM the host.
 libc = "0.2"
 
+# R1 H9: advisory flock on today's open shard. Lets the live aggregator hold
+# an exclusive LOCK_EX|LOCK_NB on its currently-open .idx so offline tools
+# (migrate, ticks_to_idx replay) can detect "writer already has this shard"
+# and skip today's file instead of producing torn writes.
+fs2 = "0.4"
+
 # Prometheus metrics: shared across all nxr services (core, fx, crypto) so
 # every binary exposes /metrics on its own port without copy-pasted axum setup.
 metrics = "0.24"

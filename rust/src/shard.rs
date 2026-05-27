@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use bytemuck::Pod;
 use chrono::NaiveDate;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -87,6 +88,41 @@ pub fn date_stem(d: NaiveDate) -> String {
 /// Per-ticker indexes directory, keyed by MITCH id: `<data>/indexes/<id>`.
 pub fn idx_dir(data_root: &Path, ticker_id: u64) -> PathBuf {
     data_root.join("indexes").join(ticker_id.to_string())
+}
+
+/// Advisory lock-file path for a ticker's currently-open writer (R1 H9).
+/// One per `idx_dir` — the live aggregator holds an exclusive flock here so
+/// offline tools (`migrate_to_sharded`, `ticks_to_idx`) can detect contention
+/// and skip the target ticker instead of producing torn writes.
+pub fn writer_lock_path(ticker_dir: &Path) -> PathBuf {
+    ticker_dir.join(".writer.lock")
+}
+
+/// Try to acquire an exclusive, non-blocking advisory lock on the per-ticker
+/// writer-lock file. Returns the locked `File` handle (caller must hold it for
+/// the writer's lifetime — `drop` releases the flock).
+///
+/// On lock contention, returns an error explicitly naming the path so callers
+/// can surface "today's shard held by another writer (live aggregator likely)".
+pub fn try_acquire_writer_lock(ticker_dir: &Path) -> Result<fs::File> {
+    fs::create_dir_all(ticker_dir)
+        .with_context(|| format!("create_dir_all {}", ticker_dir.display()))?;
+    let lock_path = writer_lock_path(ticker_dir);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open writer-lock {}", lock_path.display()))?;
+    file.try_lock_exclusive().map_err(|e| {
+        anyhow::anyhow!(
+            "writer-lock {} held by another writer (live aggregator likely): {}",
+            lock_path.display(),
+            e
+        )
+    })?;
+    Ok(file)
 }
 
 /// Per-ticker bars directory, keyed by MITCH id: `<data>/bars/<id>`.
@@ -466,6 +502,12 @@ pub struct IdxShardWriter {
     cur_date: Option<NaiveDate>,
     log: Option<AppendLog<IndexRecord>>,
     gate: bool,
+    /// R1 H9: advisory writer-lock. Kept open for the writer's lifetime;
+    /// dropping the field releases the flock automatically. `None` only for
+    /// the unlocked-open variant used by offline tools that legitimately do
+    /// not contend with the live aggregator (e.g. read-back paths constructed
+    /// just to inspect `last_bar`).
+    _writer_lock: Option<fs::File>,
     /// Whether to refresh `manifest.json` on rotation/flush. The live aggregator
     /// keeps this on (one rotation per day per ticker — cheap). Bulk migration
     /// turns it OFF: rebuilding+sha256'ing+fsync'ing a growing manifest on every
@@ -503,10 +545,16 @@ impl IdxShardWriter {
 
     /// Like [`open`](Self::open) but lets the caller disable per-rotation
     /// manifest refresh (bulk migration sets `manifest=false` for speed).
+    ///
+    /// Acquires an exclusive advisory flock on `<ticker_dir>/.writer.lock`
+    /// (R1 H9). On contention, returns an error naming the path so the
+    /// caller can decide to skip the ticker (offline tools) vs hard-fail
+    /// (live aggregator — a second instance starting up means a deploy bug).
     pub fn open_with(data_root: &Path, ticker_id: u64, gate: bool, manifest: bool) -> Result<Self> {
         let dir = idx_dir(data_root, ticker_id);
         fs::create_dir_all(&dir)
             .with_context(|| format!("create_dir_all {}", dir.display()))?;
+        let lock = try_acquire_writer_lock(&dir)?;
         let mut w = Self {
             dir,
             cur_date: None,
@@ -520,6 +568,7 @@ impl IdxShardWriter {
             last_vask: 0,
             last_ci: 0,
             last_written_ts: 0,
+            _writer_lock: Some(lock),
         };
         w.seed_from_tail()?;
         Ok(w)
@@ -757,6 +806,10 @@ pub struct BarShardWriter {
     log: Option<AppendLog<crate::mitch::bar::Bar>>,
     /// Whether to refresh `manifest.json` on rotation/flush. ON by default.
     manifest: bool,
+    /// R1 H9: per-(ticker, ext) writer-lock. The s10 + renko producers and the
+    /// offline `*_from_idx` replays both target `bars/<id>/<date>.<ext>` — flock
+    /// lets the offline tool detect "live producer holds this stream" and skip.
+    _writer_lock: Option<fs::File>,
 }
 
 impl BarShardWriter {
@@ -777,6 +830,24 @@ impl BarShardWriter {
         let dir = bars_dir(data_root, ticker_id);
         fs::create_dir_all(&dir)
             .with_context(|| format!("create_dir_all {}", dir.display()))?;
+        // R1 H9: per-stream lock — `<bars_dir>/.writer.<ext>.lock`. Separate
+        // from .idx lock and per-ext so s10 and renko producers can both run
+        // concurrently on the same ticker.
+        let lock_path = dir.join(format!(".writer.{}.lock", ext));
+        let lock_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open bar writer-lock {}", lock_path.display()))?;
+        lock_file.try_lock_exclusive().map_err(|e| {
+            anyhow::anyhow!(
+                "bar writer-lock {} held by another writer (live producer likely): {}",
+                lock_path.display(),
+                e
+            )
+        })?;
         let mut w = Self {
             dir,
             ticker_id,
@@ -784,6 +855,7 @@ impl BarShardWriter {
             cur_date: None,
             log: None,
             manifest,
+            _writer_lock: Some(lock_file),
         };
         w.seed_from_tail()?;
         Ok(w)

@@ -26,6 +26,7 @@ pub mod memory;
 pub mod metrics;
 pub mod ohlc;
 pub mod parkinson;
+pub mod pipeline_config;
 pub mod providers;
 pub mod publisher;
 pub mod renko;

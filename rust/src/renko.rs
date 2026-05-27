@@ -1,15 +1,20 @@
 //! Adaptive Renko bar generation — unified engine shared by live + offline.
 //!
 //! Brick size formula:
-//!   b_t = p_t * max(multiplier * sigma_blend(t), min_pct)
+//!   b_t = p_t * max(multiplier * sigma_pct, min_pct)
 //!
-//! where `sigma_blend` comes from [`crate::parkinson::MtfParkinsonCalculator`]
-//! over any [`crate::parkinson::VolSource`] (mmap for backtest, single-bin
-//! [`crate::parkinson::TickEmaVolSource`] for real-time). NO upper ceiling —
-//! operator directive 2026-05-24 ("markets be markets"): an adaptive Renko
-//! that caps brick % on high-σ days biases calibration's binary search
-//! downward (the search assumes the clamp does not fire). Removing `max_pct`
-//! keeps `k(σ)` honest. The only remaining safety is `min_pct` (floor against
+//! where `sigma_pct` is provided by the caller per tick (or per 30-min bin)
+//! and corresponds to the calibrator-aligned Parkinson σ at 30-min horizon.
+//!
+//! The σ source is the caller's concern — offline callers can resolve it
+//! from a memory-mapped `.vol` file via [`crate::parkinson::MtfParkinsonCalculator`];
+//! live callers maintain a Δt-weighted EWMA. The engine itself does not
+//! consult any [`crate::parkinson::VolSource`] — it takes a number.
+//!
+//! NO upper ceiling on brick % — operator directive 2026-05-24 ("markets be
+//! markets"): an adaptive Renko that caps brick % on high-σ days biases
+//! calibration's binary search downward (the search assumes the clamp does
+//! not fire). The only remaining safety is `min_pct` (floor against
 //! div-by-zero / sigma=0).
 //!
 //! ## Multi-brick tick semantics
@@ -23,7 +28,6 @@
 //!
 //! Design:
 //!   * Streaming, never holds all bars in RAM
-//!   * Fixed lookbacks and auto-weighting, no over-fitting
 //!   * Continuity invariants enforced (single-sided wick, open[i]=close[i-1])
 //!   * Emits `mitch::Bar` with `kind = BarKind::Renko as u8`.
 
@@ -34,12 +38,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::bar_builder::BarAccumulator;
 use crate::grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
-use crate::parkinson::{MtfParkinsonCalculator, VolConfig, VolSource};
 use crate::shard::FLAG_RENKO_SYNTHETIC_BRICK;
 
 /// Adaptive Renko configuration.
 ///
-/// `multiplier` controls bars/day via `brick_pct = multiplier * sigma_blend`
+/// `multiplier` controls bars/day via `brick_pct = multiplier * sigma_pct`
 /// (auto-calibrated via target bars/day). `min_pct` is a safety floor.
 /// No upper ceiling — see module docstring.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -55,15 +58,6 @@ impl Default for RenkoConfig {
 }
 
 impl RenkoConfig {
-    /// Unique identifier for this config (used for output file naming).
-    pub fn id(&self) -> String {
-        format!(
-            "m{:04}_mp{:04}",
-            (self.multiplier * 10000.0) as u16,
-            (self.min_pct * 1_000_000.0) as u16,
-        )
-    }
-
     pub fn validate(&self) -> Result<()> {
         // Upper bound mirrors `CalibrationConfig.mult_bounds[1]` (default 4.0):
         // binary search may legitimately converge above 1.0 on high-vol regimes
@@ -84,23 +78,31 @@ impl RenkoConfig {
 /// Lower floor on effective k. A k below this is treated as a calibration
 /// failure (boundary-clamp from degenerate σ — see audit 2026-05-26).
 /// Single tripwire shared by live producer and offline calibrator.
-/// (Operator deferred K_FLOOR removal until σ-floor and rate-limiter land —
-/// see journal id=1321.)
 pub const K_FLOOR: f64 = 0.05;
 
+/// Cap on bricks per single tick. Post Phase 58.L.1: σ scale is bounded by
+/// calibration; 1 000 bricks/tick implies a 100 000% move relative to the
+/// brick floor — impossible in any real market regime. Defensive guard.
+const MAX_BRICKS_PER_TICK: usize = 1_000;
+
 /// Streaming Renko bar generator with adaptive brick sizing.
+///
+/// The engine is σ-agnostic: callers pass `sigma_pct` per tick (or per
+/// 30-min bin, refreshed on the same cadence the calibrator uses). The
+/// engine recomputes `brick_size = ref_price * max(multiplier * sigma_pct,
+/// min_pct)` lazily whenever `sigma_pct` changes meaningfully — typically
+/// on every call, since the math is cheap and the comparison overhead is
+/// not worth optimising further.
 ///
 /// Emits `mitch::Bar` with `kind = BarKind::Renko as u8`. Microstructure
 /// fields (realized_var, bipower_var, drift, vol_imbalance, avg_spread_bps,
 /// max_abs_return, avg_ci_ubp, reject_rate) are populated when callers feed
-/// full IndexRecord context via `feed_index_record(...)`. The legacy
-/// `feed_tick(ts, mid)` path (used by the offline calibrator for fast brick
-/// counting) leaves microstructure at zero — calibration only cares about
-/// brick count, not enrichment.
-pub struct RenkoGenerator<'a, S: VolSource + ?Sized> {
+/// full IndexRecord context via `feed_index_record(...)`. The lighter
+/// `feed_tick_with_sigma(ts, mid, sigma_pct, ...)` path (used by the offline
+/// calibrator for fast brick counting) leaves microstructure at zero —
+/// calibration only cares about brick count, not enrichment.
+pub struct RenkoGenerator {
     config: RenkoConfig,
-    sigma_calc: MtfParkinsonCalculator<'a, S>,
-    sigma_cache: Option<&'a [f64]>,
     current_brick_size: f64,
     /// Grid step derived from `current_brick_size`; recomputed only when the
     /// brick size changes (every 30 min or on init), so the hot path reads it
@@ -114,21 +116,18 @@ pub struct RenkoGenerator<'a, S: VolSource + ?Sized> {
     bar_start_ts: i64,
     tick_count: u32,
     n_bars: usize,
-    total_duration_ms: u64,
     /// Microstructure accumulator. Populated only via `feed_index_record`;
-    /// flushed at every brick emit. The legacy `feed_tick(ts, mid)` path
-    /// (offline calibration) leaves this empty — emit_bar then writes zero
-    /// micros, which is acceptable since calibration discards Bar bodies.
+    /// flushed at every brick emit. The legacy `feed_tick_with_sigma`
+    /// path (offline calibration) leaves this empty — emit_bar then writes
+    /// zero micros, which is acceptable since calibration discards Bar bodies.
     acc: BarAccumulator,
 }
 
-impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
-    pub fn new(config: RenkoConfig, source: &'a S, vol_config: VolConfig) -> Result<Self> {
+impl RenkoGenerator {
+    pub fn new(config: RenkoConfig) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             config,
-            sigma_calc: MtfParkinsonCalculator::new(source, vol_config),
-            sigma_cache: None,
             current_brick_size: 0.0,
             current_grid_step: 0.0,
             last_recompute_period: i64::MIN,
@@ -139,19 +138,13 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
             bar_start_ts: 0,
             tick_count: 0,
             n_bars: 0,
-            total_duration_ms: 0,
             acc: BarAccumulator::new(),
         })
     }
 
-    /// Use a precomputed sigma cache for O(1) lookups.
-    pub fn set_sigma_cache(&mut self, cache: &'a [f64]) {
-        self.sigma_cache = Some(cache);
-    }
-
-    /// Cumulative bar count and total duration (ms).
-    pub fn stats(&self) -> (usize, u64) {
-        (self.n_bars, self.total_duration_ms)
+    /// Cumulative bar count.
+    pub fn n_bars(&self) -> usize {
+        self.n_bars
     }
 
     /// Current brick size in absolute price units (post snap_to_25_grid).
@@ -173,7 +166,7 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
     /// the wrapper reads the previous brick close off disk and primes the
     /// engine so the first post-restart tick can immediately decide whether
     /// it crosses a brick boundary. `brick_size` is recomputed lazily on the
-    /// next tick (when σ source is consulted).
+    /// next tick (when σ is consulted).
     pub fn seed_last_close(&mut self, last_close: f64) {
         self.last_close = last_close;
         self.pending_high = last_close;
@@ -181,22 +174,11 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
         self.initialized = last_close > 0.0;
     }
 
-    fn compute_brick_size(&mut self, price: f64, timestamp_ms: i64) -> f64 {
-        let mts = timestamp::from_epoch_ms(timestamp_ms);
-        let hour_idx = self.sigma_calc.find_index_for_mts(mts);
-        let sigma = if let Some(cache) = self.sigma_cache {
-            cache.get(hour_idx).copied().unwrap_or(0.01)
-        } else {
-            self.sigma_calc.compute_sigma(hour_idx)
-        };
-
+    fn compute_brick_size(&mut self, price: f64, timestamp_ms: i64, sigma_pct: f64) -> f64 {
         // K_FLOOR defends against boundary-clamped k from a degenerate
         // calibration (see docs/internal/renko-synth-audit-2026-05-26.md).
-        // The clamp-detector in calibrate.rs is the upstream guard; this is
-        // belt-and-suspenders for downstream consumers of any stale
-        // ticker-params.json that still carries a degenerate value.
         let k_eff = (self.config.multiplier as f64).max(K_FLOOR);
-        let raw_pct = k_eff * sigma;
+        let raw_pct = k_eff * sigma_pct;
         // Floor only — no ceiling (markets be markets, see module doc).
         let clamped_pct = raw_pct.max(self.config.min_pct as f64);
         let raw_brick = price * clamped_pct;
@@ -275,6 +257,7 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
         ci_ubp: f64,
         accepted: u32,
         rejected: u32,
+        sigma_pct: f64,
         write_bar: &mut F,
     ) -> Result<()>
     where
@@ -287,16 +270,25 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
         // Ingest into the accumulator BEFORE brick detection so the closing
         // tick is included in the closing brick's microstructure stats.
         self.acc.ingest(bid, ask, vbid, vask, ts, ci_ubp, accepted, rejected);
-        self.feed_tick(ts, mid, write_bar)
+        self.feed_tick_with_sigma(ts, mid, sigma_pct, write_bar)
     }
 
-    /// Feed one tick, emitting any produced bars via the callback.
-    pub fn feed_tick<F>(&mut self, ts: i64, price: f64, write_bar: &mut F) -> Result<()>
+    /// Feed one tick with an explicit σ_pct, emitting any produced bars via
+    /// the callback. `sigma_pct` is the calibrator-aligned 30-min Parkinson
+    /// σ (or its live EWMA equivalent) as a fraction of price.
+    #[inline]
+    pub fn feed_tick_with_sigma<F>(
+        &mut self,
+        ts: i64,
+        price: f64,
+        sigma_pct: f64,
+        write_bar: &mut F,
+    ) -> Result<()>
     where
         F: FnMut(&Bar) -> Result<()>,
     {
         if !self.initialized {
-            self.compute_brick_size(price, ts);
+            self.compute_brick_size(price, ts, sigma_pct);
             self.last_close = snap_to_grid(price, self.current_grid_step);
             self.pending_high = price;
             self.pending_low = price;
@@ -310,7 +302,7 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
 
         let current_half_hour = ts / 1_800_000;
         if current_half_hour > self.last_recompute_period {
-            self.compute_brick_size(price, ts);
+            self.compute_brick_size(price, ts, sigma_pct);
             self.last_close = snap_to_grid(self.last_close, self.current_grid_step);
         }
 
@@ -324,7 +316,6 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
 
         let grid = self.current_grid_step;
 
-        const MAX_BRICKS_PER_TICK: usize = 10_000;
         let mut bricks_this_tick = 0usize;
 
         let mut first_in_seq = true;
@@ -334,8 +325,6 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
                 break;
             }
             bricks_this_tick += 1;
-            let duration = (ts - self.bar_start_ts) as u64;
-            self.total_duration_ms += duration;
 
             let low = if first_in_seq { self.pending_low.min(self.last_close) } else { self.last_close };
             let tick_count_for_bar = if first_in_seq { self.tick_count } else { 0 };
@@ -356,8 +345,6 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
                 break;
             }
             bricks_this_tick += 1;
-            let duration = (ts - self.bar_start_ts) as u64;
-            self.total_duration_ms += duration;
 
             let high = if first_in_seq { self.pending_high.max(self.last_close) } else { self.last_close };
             let tick_count_for_bar = if first_in_seq { self.tick_count } else { 0 };
@@ -374,30 +361,26 @@ impl<'a, S: VolSource + ?Sized> RenkoGenerator<'a, S> {
         Ok(())
     }
 
-    /// Feed many ticks from an iterator.
+    /// Feed many `(ts, mid, sigma_pct)` observations from an iterator.
     pub fn generate<F>(
         &mut self,
-        price_iter: impl Iterator<Item = (i64, f64)>,
+        iter: impl Iterator<Item = (i64, f64, f64)>,
         mut write_bar: F,
-    ) -> Result<(usize, u64)>
+    ) -> Result<usize>
     where
         F: FnMut(&Bar) -> Result<()>,
     {
         let bars_before = self.n_bars;
-        let dur_before = self.total_duration_ms;
-
-        for (ts, price) in price_iter {
-            self.feed_tick(ts, price, &mut write_bar)?;
+        for (ts, price, sigma) in iter {
+            self.feed_tick_with_sigma(ts, price, sigma, &mut write_bar)?;
         }
-
-        Ok((self.n_bars - bars_before, self.total_duration_ms - dur_before))
+        Ok(self.n_bars - bars_before)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parkinson::TickEmaVolSource;
 
     #[test]
     fn config_validation() {
@@ -412,26 +395,19 @@ mod tests {
     }
 
     #[test]
-    fn config_id() {
-        let config = RenkoConfig { multiplier: 0.075, min_pct: 0.000830 };
-        assert_eq!(config.id(), "m0750_mp0830");
-    }
-
-    #[test]
     fn synthetic_brick_flag_on_multi_brick_tick() {
         // Construct a generator that will fire multiple bricks on a single
         // tick (brick_size set very small relative to the price jump).
-        let src = TickEmaVolSource::new(0.001); // 0.1% σ
         let cfg = RenkoConfig { multiplier: 0.075, min_pct: 0.0001 };
-        let mut r =
-            RenkoGenerator::new(cfg, &src, VolConfig::default()).expect("generator new");
+        let mut r = RenkoGenerator::new(cfg).expect("generator new");
+        let sigma_pct = 0.001; // 0.1% σ
 
         let mut bars: Vec<Bar> = Vec::new();
         // Seed at p=100. First tick initialises.
-        r.feed_tick(0, 100.0, &mut |b| { bars.push(*b); Ok(()) }).unwrap();
+        r.feed_tick_with_sigma(0, 100.0, sigma_pct, &mut |b| { bars.push(*b); Ok(()) }).unwrap();
         // Jump to p=110: ~10% move, brick_size ≈ price * 0.075 * 0.001 ≈ 0.0075
         // (floored at min_pct=0.0001 → brick ≈ 0.01). Either way produces many bricks.
-        r.feed_tick(1_000, 110.0, &mut |b| { bars.push(*b); Ok(()) }).unwrap();
+        r.feed_tick_with_sigma(1_000, 110.0, sigma_pct, &mut |b| { bars.push(*b); Ok(()) }).unwrap();
 
         assert!(bars.len() >= 2, "expected multi-brick emission, got {}", bars.len());
         // Brick #1 should not have the synthetic flag set; subsequent bricks

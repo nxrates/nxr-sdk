@@ -5,10 +5,10 @@
 //! that implements [`VolSource`]: a memory-mapped .vol file (backtest), an
 //! in-memory ring buffer (real-time), or a test fixture.
 //!
-//! The single-bin live wrapper [`TickEmaVolSource`] sits next to the offline
-//! `MmapVolSource` (still in series-factory, where the memmap dep lives) and
-//! satisfies the same trait — `RenkoGenerator<S: VolSource>` is generic over
-//! the source so the engine never branches on live-vs-historical.
+//! The Renko engine itself no longer depends on `VolSource` (Phase 58.L.1):
+//! callers resolve σ via `MtfParkinsonCalculator` then pass the number into
+//! `RenkoGenerator::feed_tick_with_sigma`. This trait remains the input
+//! contract for the calculator only.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,51 +26,6 @@ pub trait VolSource {
     /// Bin index for the given MITCH mts (u48 ticks since 2010). Clamps to
     /// `len().saturating_sub(1)` on overshoot.
     fn find_index_for_mts(&self, mts: u64) -> usize;
-
-    /// True when no bins are available.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-/// Single-bin `VolSource` whose sigma is updated externally (e.g. by the live
-/// producer as it tick-EMAs `|log r|`). Length is always 1.
-///
-/// Used by `bars_renko.rs` so the live producer feeds the same
-/// `RenkoGenerator<S: VolSource>` engine that the offline calibrator and
-/// applier use. The `MtfParkinsonCalculator` blend collapses to a constant
-/// returning `sigma_ema_pct` because `len == 1`, so windowing degenerates
-/// cleanly to a single lookup — by design.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TickEmaVolSource {
-    /// Latest per-tick σ as a fraction of price (0.01 = 1%).
-    pub sigma_ema_pct: f64,
-}
-
-impl TickEmaVolSource {
-    /// Construct with an initial σ estimate (0.0 ⇒ engine falls back to
-    /// `min_pct` floor on the first brick).
-    pub fn new(sigma_ema_pct: f64) -> Self {
-        Self { sigma_ema_pct }
-    }
-
-    /// Replace the current σ estimate. Call after each per-tick EMA update
-    /// in the live producer, before feeding the tick into `RenkoGenerator`.
-    #[inline]
-    pub fn set(&mut self, sigma_ema_pct: f64) {
-        self.sigma_ema_pct = sigma_ema_pct;
-    }
-}
-
-impl VolSource for TickEmaVolSource {
-    #[inline]
-    fn len(&self) -> usize { 1 }
-
-    #[inline]
-    fn sigma_pct(&self, _i: usize) -> f64 { self.sigma_ema_pct }
-
-    #[inline]
-    fn find_index_for_mts(&self, _mts: u64) -> usize { 0 }
 }
 
 /// Volatility calculation config (typically from pipeline.yml `vol` section).
@@ -245,14 +200,4 @@ mod tests {
         assert!((calc.compute_sigma(0) - 0.02).abs() < 1e-9);
     }
 
-    #[test]
-    fn tick_ema_vol_source_basics() {
-        let mut s = TickEmaVolSource::new(0.015);
-        assert_eq!(s.len(), 1);
-        assert_eq!(s.sigma_pct(0), 0.015);
-        assert_eq!(s.sigma_pct(99), 0.015); // out-of-range returns single bin
-        assert_eq!(s.find_index_for_mts(123456789), 0);
-        s.set(0.020);
-        assert_eq!(s.sigma_pct(0), 0.020);
-    }
 }

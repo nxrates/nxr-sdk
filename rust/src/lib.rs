@@ -59,7 +59,7 @@ pub use shard::{BarShardWriter, IdxShardWriter};
 // ---- Renko engine (live + offline shared) ----
 
 pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
-pub use parkinson::{MtfParkinsonCalculator, TickEmaVolSource, VolConfig, VolSource};
+pub use parkinson::{MtfParkinsonCalculator, VolConfig, VolSource};
 pub use renko::{RenkoConfig, RenkoGenerator, K_FLOOR as RENKO_K_FLOOR};
 
 // ---- Ticker resolution ----

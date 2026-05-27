@@ -54,7 +54,7 @@ const GIB: u64 = 1024 * 1024 * 1024;
 
 /// Total physical RAM in bytes, or `None` if the platform is unsupported or
 /// the syscall fails.
-pub fn physical_memory_bytes() -> Option<u64> {
+pub(crate) fn physical_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     unsafe {
         let mut size: u64 = 0;
@@ -89,7 +89,7 @@ pub fn physical_memory_bytes() -> Option<u64> {
 /// `vm_stat` free+inactive+speculative on macOS and `/proc/meminfo`
 /// `MemAvailable` on Linux — both intended to reflect what a new process
 /// can allocate without reclaim pressure.
-pub fn available_memory_bytes() -> Option<u64> {
+pub(crate) fn available_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
         // Shell out to vm_stat once at startup. The mach host_statistics64

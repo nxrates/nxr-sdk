@@ -5,7 +5,7 @@ use flate2::read::{GzDecoder, ZlibDecoder};
 use std::io::Read;
 
 /// Decompress a gzip frame to raw bytes.
-pub fn decode_gzip_bytes(data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decode_gzip_bytes(data: &[u8]) -> Option<Vec<u8>> {
     let mut decoder = GzDecoder::new(data);
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).ok()?;

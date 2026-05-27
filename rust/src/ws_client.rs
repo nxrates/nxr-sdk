@@ -76,7 +76,7 @@ pub struct WsIndex {
 /// Low-level binary-frame decoder. Returns the number of records decoded,
 /// pushing each onto `out`. Returns `Err` on malformed frames; callers should
 /// log and drop the offending message.
-pub fn decode_index_frame(bytes: &[u8], out: &mut Vec<WsIndex>) -> Result<usize> {
+pub(crate) fn decode_index_frame(bytes: &[u8], out: &mut Vec<WsIndex>) -> Result<usize> {
     if bytes.len() < FRAME_HEADER_BYTES {
         bail!("frame too short: {} < {}", bytes.len(), FRAME_HEADER_BYTES);
     }

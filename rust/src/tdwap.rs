@@ -479,7 +479,7 @@ pub fn compute_vwap_throttled(
 }
 
 /// Throttled TDWAP with an explicit clock (for tests and replay).
-pub fn compute_vwap_throttled_at(
+pub(crate) fn compute_vwap_throttled_at(
     ticker_id: u64,
     entries: &[(u16, ProviderEntry)],
     stale_threshold_secs: f64,

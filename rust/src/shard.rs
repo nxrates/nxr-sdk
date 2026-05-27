@@ -119,7 +119,7 @@ pub fn idx_dir(data_root: &Path, ticker_id: u64) -> PathBuf {
 /// One per `idx_dir` — the live aggregator holds an exclusive flock here so
 /// offline tools (`migrate_to_sharded`, `ticks_to_idx`) can detect contention
 /// and skip the target ticker instead of producing torn writes.
-pub fn writer_lock_path(ticker_dir: &Path) -> PathBuf {
+pub(crate) fn writer_lock_path(ticker_dir: &Path) -> PathBuf {
     ticker_dir.join(".writer.lock")
 }
 
@@ -129,7 +129,7 @@ pub fn writer_lock_path(ticker_dir: &Path) -> PathBuf {
 ///
 /// On lock contention, returns an error explicitly naming the path so callers
 /// can surface "today's shard held by another writer (live aggregator likely)".
-pub fn try_acquire_writer_lock(ticker_dir: &Path) -> Result<fs::File> {
+pub(crate) fn try_acquire_writer_lock(ticker_dir: &Path) -> Result<fs::File> {
     fs::create_dir_all(ticker_dir)
         .with_context(|| format!("create_dir_all {}", ticker_dir.display()))?;
     let lock_path = writer_lock_path(ticker_dir);
@@ -239,15 +239,6 @@ pub fn read_shard_aligned<T: Pod>(path: &Path) -> Result<Vec<T>> {
     // T is `repr(C, packed)` (align 1) for our record types, so cast_slice
     // never fails the alignment check; bytes from `fs::read` are align-1 safe.
     Ok(bytemuck::cast_slice::<u8, T>(aligned).to_vec())
-}
-
-/// Number of whole records in a shard file (cheap: `len / stride`, no read).
-pub fn shard_record_count<T>(path: &Path) -> Result<u64> {
-    let len = fs::metadata(path)
-        .with_context(|| format!("stat {}", path.display()))?
-        .len();
-    let stride = std::mem::size_of::<T>() as u64;
-    Ok(if stride == 0 { 0 } else { len / stride })
 }
 
 /// Buffered streaming reader for any `[T: Pod]` shard file (4096 records per

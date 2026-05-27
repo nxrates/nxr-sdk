@@ -52,12 +52,6 @@ impl AsFrameBytes for Arc<Vec<u8>> {
     }
 }
 
-/// Convenience alias for the byte-oriented hot path: one fully-framed MITCH
-/// message packed into a reference-counted byte vector. Producers call
-/// `Arc::new(bytes)` once per frame; the broadcast channel clones the `Arc`
-/// (not the bytes) for each subscriber.
-pub type FrameBytes = Arc<Vec<u8>>;
-
 /// Temporal replay schedule for a publisher instance.
 ///
 /// The publisher always sends each frame to every sink at `t=0`. When
@@ -73,19 +67,20 @@ pub type FrameBytes = Arc<Vec<u8>>;
 /// is a slightly wider 25 ms + 75 ms triple-shot for heartbeats. Full
 /// rationale: `docs/redundancy.md`.
 #[derive(Debug, Clone, Default)]
-pub struct ReplaySchedule {
+pub(crate) struct ReplaySchedule {
     offsets: Vec<Duration>,
 }
 
 impl ReplaySchedule {
     /// No replay: single-shot per sink. Right for high-rate aggregated data
     /// where the next frame supersedes a lost one (e.g. Index at 20 Hz).
-    pub fn none() -> Self {
+    pub(crate) fn none() -> Self {
         Self::default()
     }
 
     /// Arbitrary offsets from `t=0`. Empty vec behaves like [`Self::none`].
-    pub fn at_offsets(offsets: Vec<Duration>) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn at_offsets(offsets: Vec<Duration>) -> Self {
         Self { offsets }
     }
 
@@ -93,7 +88,8 @@ impl ReplaySchedule {
     /// triple-shot at `t=0, t+25 ms, t+75 ms`. Sized to decorrelate from
     /// sub-ms kernel queue events and typical switch microbursts at
     /// negligible wire cost. See `docs/redundancy.md`.
-    pub fn heartbeat() -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn heartbeat() -> Self {
         Self::at_offsets(vec![
             Duration::from_millis(25),
             Duration::from_millis(75),
@@ -101,12 +97,13 @@ impl ReplaySchedule {
     }
 
     /// Configured offsets, in send order.
-    pub fn offsets(&self) -> &[Duration] {
+    pub(crate) fn offsets(&self) -> &[Duration] {
         &self.offsets
     }
 
     /// True when no replay shots are configured.
-    pub fn is_empty(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.offsets.is_empty()
     }
 }
@@ -137,7 +134,8 @@ impl<S: FrameSink + 'static> Publisher<S> {
 
     /// Configure temporal redundancy: each frame is replayed at the given
     /// offsets on every sink, in addition to the initial `t=0` send.
-    pub fn with_replay(mut self, replay: ReplaySchedule) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn with_replay(mut self, replay: ReplaySchedule) -> Self {
         self.replay = replay;
         self
     }

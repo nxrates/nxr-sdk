@@ -83,7 +83,7 @@ pub use agg::{
 
 pub use tdwap::{
     ProviderEntry, WeightCache, compute_vwap, compute_vwap_at, compute_vwap_throttled,
-    compute_vwap_throttled_at, default_refresh_interval_ms,
+    default_refresh_interval_ms,
 };
 
 // ---- Bar builder ----

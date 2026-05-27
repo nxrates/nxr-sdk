@@ -72,6 +72,32 @@ impl<T: Pod> AppendLog<T> {
             .append(true)
             .open(path)
             .with_context(|| format!("open {:?}", path))?;
+        // Torn-trailing-write recovery on open: if a prior writer was killed
+        // mid-append, the file may end with a partial T record (< stride
+        // bytes). The OS guarantees atomicity only up to a page, so we must
+        // truncate any unaligned tail BEFORE accepting new appends — else the
+        // next write lands at an unaligned offset and every reader after
+        // permanently sees corrupt records. (R1 C3: live-append torn-write
+        // recovery — readers already heal via `read_shard_aligned` but the
+        // writer was not, leaving the file permanently misaligned on disk.)
+        let stride = std::mem::size_of::<T>() as u64;
+        if stride > 0 {
+            let len = file
+                .metadata()
+                .with_context(|| format!("stat {:?}", path))?
+                .len();
+            let aligned = (len / stride) * stride;
+            if len != aligned {
+                warn!(
+                    path = %path.display(),
+                    dropped_bytes = len - aligned,
+                    stride,
+                    "AppendLog: truncating torn-trailing partial record on open"
+                );
+                file.set_len(aligned)
+                    .with_context(|| format!("truncate {:?} to alignment", path))?;
+            }
+        }
         Ok(Self {
             file,
             path: path.to_string_lossy().into_owned(),

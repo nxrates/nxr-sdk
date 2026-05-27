@@ -48,6 +48,13 @@ use crate::ipc::record::IndexRecord;
 /// change. Written every [`SENTINEL_INTERVAL_MS`] while the quote is unchanged.
 pub const FLAG_HEARTBEAT_SENTINEL: u8 = 0b0000_0001;
 
+/// `Index.flags` bit 1: this record was produced by an offline backfill /
+/// historical replay (merge-idx, migrate_to_sharded, ticks-to-idx), not by the
+/// live aggregator. Lets a consumer tag synthetic vs real-time records when
+/// joining backfill+live, and lets the audit understand why a "future ts"
+/// guard might legitimately have to skip a backfilled record (R1 H12).
+pub const FLAG_HISTORICAL_BACKFILL: u8 = 0b0000_0010;
+
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote
 /// is unchanged. 60s bounds the "is this a gap or just quiet?" ambiguity.
 pub const SENTINEL_INTERVAL_MS: i64 = 60_000;
@@ -478,6 +485,12 @@ pub struct IdxShardWriter {
     last_vbid: u32,
     last_vask: u32,
     last_ci: u16,
+    /// ts_ms of the last record we actually wrote (sentinel or otherwise).
+    /// Used by the sentinel rule: if the quote has not changed AND the gap
+    /// since the last write reaches [`SENTINEL_INTERVAL_MS`], emit a sentinel
+    /// row so a downstream gap-detection audit can distinguish "quiet market"
+    /// from "producer outage". (R1 C2)
+    last_written_ts: i64,
 }
 
 impl IdxShardWriter {
@@ -506,6 +519,7 @@ impl IdxShardWriter {
             last_vbid: 0,
             last_vask: 0,
             last_ci: 0,
+            last_written_ts: 0,
         };
         w.seed_from_tail()?;
         Ok(w)
@@ -531,6 +545,10 @@ impl IdxShardWriter {
                 self.last_vask = idx.vask;
                 self.last_ci = idx.ci;
                 self.have_last = true;
+                // Seed the sentinel-gap clock from the tail's ts so a same-
+                // session restart does not emit a spurious immediate sentinel
+                // (or hide an outage by resetting to 0).
+                self.last_written_ts = last.shard_ts_ms();
             }
         }
         Ok(())
@@ -563,11 +581,38 @@ impl IdxShardWriter {
         Ok(())
     }
 
-    /// Append `rec` subject to the delta-gate. Returns `true` if a real (non
-    /// sentinel) record was written. The caller's broadcast / snapshot path is
-    /// unaffected — only the *disk append* is gated.
+    /// Append `rec` subject to the delta-gate. Returns `true` if a record
+    /// (real OR sentinel) was written. The caller's broadcast / snapshot path
+    /// is unaffected — only the *disk append* is gated.
+    ///
+    /// Sentinel rule (R1 C2): when the quote is unchanged but the gap since
+    /// the last on-disk write reaches [`SENTINEL_INTERVAL_MS`], a copy of the
+    /// record with [`FLAG_HEARTBEAT_SENTINEL`] set is written. This lets the
+    /// gap-detection audit distinguish a *quiet* market (sentinels present)
+    /// from a *producer outage* (no sentinels for > sentinel interval).
+    ///
+    /// Bounds-check (R1 H1): rejects ts > now+60s and ts < now-2y, so a bad
+    /// clock or replayed historical packet cannot land in the wrong shard.
     pub fn append(&mut self, rec: &IndexRecord) -> Result<bool> {
         let ts = rec.shard_ts_ms();
+        // ts sanity: a future ts mis-routes the shard date (creates a "future"
+        // shard) and a >2y-old ts is almost certainly a bug (we don't replay
+        // history through the live writer). Both are loud failures.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if ts > now_ms + 60_000 {
+            return Err(anyhow::anyhow!(
+                "IdxShardWriter::append: future ts {} > now+60s ({})",
+                ts,
+                now_ms + 60_000
+            ));
+        }
+        if ts < now_ms - 730 * MS_PER_DAY {
+            return Err(anyhow::anyhow!(
+                "IdxShardWriter::append: ancient ts {} < now-2y ({})",
+                ts,
+                now_ms - 730 * MS_PER_DAY
+            ));
+        }
         let date = ts_ms_to_utc_date(ts);
         let new_day = self.cur_date != Some(date);
         // Copy market fields out of the packed body before comparing (no refs).
@@ -599,12 +644,27 @@ impl IdxShardWriter {
             self.last_vask = vask;
             self.last_ci = ci;
             self.have_last = true;
+            self.last_written_ts = ts;
             return Ok(true);
         }
 
-        // Truly redundant observation (every market field identical): dropped.
-        // No sentinel / no fill — the gate only ever REMOVES identical ticks,
-        // never inserts synthetic ones.
+        // Quote unchanged. If enough wall-clock has elapsed since the last
+        // on-disk write, emit a liveness sentinel so the audit can tell quiet
+        // markets apart from producer outages.
+        if self.have_last && ts - self.last_written_ts >= SENTINEL_INTERVAL_MS {
+            let mut sentinel = *rec;
+            sentinel.index.flags |= FLAG_HEARTBEAT_SENTINEL;
+            self.ensure_shard(date)?;
+            self.log.as_mut().unwrap().append(&sentinel)?;
+            // Do NOT update last_{bid,ask,...} — those track the last real
+            // market state, and a sentinel by definition carries the same
+            // state. Only the wall-clock cursor advances.
+            self.last_written_ts = ts;
+            return Ok(true);
+        }
+
+        // Truly redundant observation: dropped (no real quote change, and the
+        // sentinel cadence has not yet elapsed).
         Ok(false)
     }
 
@@ -643,10 +703,16 @@ impl IdxShardWriter {
 impl Drop for IdxShardWriter {
     fn drop(&mut self) {
         // Best-effort durability + manifest finalize on graceful shutdown.
+        // R1 H8: respect manifest=false — bulk migration disables manifest
+        // refresh per rotation for O(n²) fsync churn reasons; honouring that
+        // ON DROP too means a cleanly-finishing migration does not pay the
+        // O(n*shards) hash bill it explicitly opted out of.
         if let Some(date) = self.cur_date {
-            // Drop the log to fdatasync, then hash.
+            // Drop the log to fdatasync, then optionally hash.
             self.log = None;
-            let _ = self.finalize_manifest(date);
+            if self.manifest {
+                let _ = self.finalize_manifest(date);
+            }
         }
     }
 }
@@ -833,9 +899,12 @@ impl BarShardWriter {
 
 impl Drop for BarShardWriter {
     fn drop(&mut self) {
+        // R1 H8: same manifest=false honouring as IdxShardWriter::Drop.
         if let Some(date) = self.cur_date {
             self.log = None;
-            let _ = self.finalize_manifest(date);
+            if self.manifest {
+                let _ = self.finalize_manifest(date);
+            }
         }
     }
 }
@@ -859,6 +928,19 @@ mod tests {
         IndexRecord::new(header, index)
     }
 
+    /// UTC midnight of yesterday (in epoch-ms) — always within the writer's
+    /// `[now-2y, now+60s]` accept window. Tests that exercise `append()` use
+    /// this instead of a hard-coded ts so they don't bit-rot as the wall
+    /// clock advances past the guard (R1 H1).
+    fn t_recent_day_start() -> i64 {
+        let now = chrono::Utc::now().timestamp_millis();
+        let d = ts_ms_to_utc_date(now - MS_PER_DAY);
+        d.and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
+    }
+
     #[test]
     fn gate_keeps_volume_and_ci_changes_at_same_price() {
         // Microstructure guarantee: a tick with unchanged bid/ask but changed
@@ -866,7 +948,7 @@ mod tests {
         // rebuilt from the .idx, so dropping these would corrupt them.
         let root = std::env::temp_dir().join("nxr_shard_microstructure_test");
         let _ = fs::remove_dir_all(&root);
-        let t0 = 1_716_249_600_000;
+        let t0 = t_recent_day_start();
         {
             let mut w = IdxShardWriter::open(&root, 703, true).unwrap();
             assert!(w.append(&rec_vol(t0, 100.0, 101.0, 5, 5, 10)).unwrap()); // first
@@ -896,11 +978,11 @@ mod tests {
     fn delta_gate_drops_unchanged_quotes() {
         let root = std::env::temp_dir().join("nxr_shard_gate_test");
         let _ = fs::remove_dir_all(&root);
-        let t0 = 1_716_249_600_000;
+        let t0 = t_recent_day_start();
         {
             let mut w = IdxShardWriter::open(&root, 700, true).unwrap();
             assert!(w.append(&rec(t0, 100.0, 101.0)).unwrap()); // first: written
-            assert!(!w.append(&rec(t0 + 100, 100.0, 101.0)).unwrap()); // same: gated
+            assert!(!w.append(&rec(t0 + 100, 100.0, 101.0)).unwrap()); // same: gated (sentinel not yet due)
             assert!(w.append(&rec(t0 + 200, 100.5, 101.5)).unwrap()); // moved: written
             w.flush().unwrap();
         }
@@ -916,8 +998,9 @@ mod tests {
     fn day_boundary_always_writes() {
         let root = std::env::temp_dir().join("nxr_shard_dayboundary_test");
         let _ = fs::remove_dir_all(&root);
-        let day1 = 1_716_249_600_000; // 2024-05-21
-        let day2 = day1 + 86_400_000; // 2024-05-22
+        // Use yesterday + day-before-yesterday so both ts pass the H1 guard.
+        let day1 = t_recent_day_start() - MS_PER_DAY;
+        let day2 = day1 + 86_400_000;
         {
             let mut w = IdxShardWriter::open(&root, 701, true).unwrap();
             assert!(w.append(&rec(day1, 100.0, 101.0)).unwrap());
@@ -934,7 +1017,7 @@ mod tests {
     fn seed_from_tail_survives_restart() {
         let root = std::env::temp_dir().join("nxr_shard_restart_test");
         let _ = fs::remove_dir_all(&root);
-        let t0 = 1_716_249_600_000;
+        let t0 = t_recent_day_start();
         {
             let mut w = IdxShardWriter::open(&root, 702, true).unwrap();
             w.append(&rec(t0, 100.0, 101.0)).unwrap();
@@ -942,6 +1025,7 @@ mod tests {
         }
         {
             // Restart: same quote should be gated (seeded from tail), not re-written.
+            // +100ms keeps us well under SENTINEL_INTERVAL_MS so no sentinel fires.
             let mut w = IdxShardWriter::open(&root, 702, true).unwrap();
             assert!(!w.append(&rec(t0 + 100, 100.0, 101.0)).unwrap());
             w.flush().unwrap();
@@ -949,6 +1033,53 @@ mod tests {
         let dir = idx_dir(&root, 702);
         let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sentinel_emitted_after_interval_when_quote_unchanged() {
+        // R1 C2: a quiet market (no quote change) must still emit a sentinel
+        // row every SENTINEL_INTERVAL_MS so the audit can distinguish quiet
+        // from outage. Caller's record is NOT mutated — a copy is written
+        // with FLAG_HEARTBEAT_SENTINEL set.
+        let root = std::env::temp_dir().join("nxr_shard_sentinel_test");
+        let _ = fs::remove_dir_all(&root);
+        let t0 = t_recent_day_start();
+        {
+            let mut w = IdxShardWriter::open(&root, 704, true).unwrap();
+            assert!(w.append(&rec(t0, 100.0, 101.0)).unwrap()); // first: written
+            // Half-interval later, unchanged quote → still gated, no sentinel.
+            assert!(!w
+                .append(&rec(t0 + SENTINEL_INTERVAL_MS / 2, 100.0, 101.0))
+                .unwrap());
+            // Full-interval later, unchanged quote → sentinel emitted.
+            assert!(w
+                .append(&rec(t0 + SENTINEL_INTERVAL_MS, 100.0, 101.0))
+                .unwrap());
+            w.flush().unwrap();
+        }
+        let dir = idx_dir(&root, 704);
+        let recs =
+            read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
+        assert_eq!(recs.len(), 2);
+        // First record: real, no flag.
+        let f0 = recs[0].index.flags;
+        assert_eq!(f0 & FLAG_HEARTBEAT_SENTINEL, 0);
+        // Second record: sentinel.
+        let f1 = recs[1].index.flags;
+        assert_eq!(f1 & FLAG_HEARTBEAT_SENTINEL, FLAG_HEARTBEAT_SENTINEL);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn future_ts_rejected() {
+        // R1 H1: future ts > now+60s is a hard error (mis-routes shard date).
+        let root = std::env::temp_dir().join("nxr_shard_future_ts_test");
+        let _ = fs::remove_dir_all(&root);
+        let mut w = IdxShardWriter::open(&root, 705, true).unwrap();
+        let future = chrono::Utc::now().timestamp_millis() + 5 * 60_000; // +5min
+        let r = rec(future, 100.0, 101.0);
+        assert!(w.append(&r).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1009,7 +1140,7 @@ mod tests {
         use crate::mitch::bar::Bar;
         let root = std::env::temp_dir().join("nxr_bar_shard_writer_roundtrip");
         let _ = fs::remove_dir_all(&root);
-        let t0 = 1_716_249_600_000; // 2024-05-21 00:00 UTC
+        let t0 = t_recent_day_start();
         let mut bars: Vec<Bar> = Vec::new();
         {
             let mut w = BarShardWriter::open(&root, 900, "s10").unwrap();

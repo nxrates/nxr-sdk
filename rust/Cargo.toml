@@ -16,6 +16,9 @@ mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }
 # Zero-copy memory types
 bytemuck = { version = "1", features = ["derive"] }
 
+# Zero-copy mmap reader for .bars artifact files (BarFile)
+memmap2 = "0.9"
+
 # Async runtime (consumer-side needs net + rt + macros + time + sync for UDP/WS)
 tokio = { version = "1.52", features = ["net", "rt", "rt-multi-thread", "macros", "time", "sync", "io-util"] }
 

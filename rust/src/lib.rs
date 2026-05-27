@@ -14,6 +14,7 @@
 
 pub mod agg;
 pub mod bar_builder;
+pub mod bar_reader;
 pub mod client;
 pub mod compress;
 pub mod config;
@@ -52,6 +53,10 @@ pub use mitch::bar::Bar;
 
 pub use ipc::append_log::{self, AppendLog};
 pub use ipc::record::IndexRecord;
+
+// ---- Zero-copy .bars mmap reader ----
+
+pub use bar_reader::{BarFile, write_bars};
 
 // ---- Daily-shard storage layer ----
 

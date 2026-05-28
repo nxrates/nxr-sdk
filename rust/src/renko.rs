@@ -193,7 +193,7 @@ impl RenkoGenerator {
         let brick_size = snap_to_25_grid(raw_brick);
         self.current_brick_size = brick_size;
         self.current_grid_step = grid_step_for_brick(brick_size);
-        self.last_recompute_period = timestamp_ms / 1_800_000;
+        self.last_recompute_period = timestamp_ms / crate::shard::MS_PER_30MIN;
         brick_size
     }
 
@@ -308,7 +308,7 @@ impl RenkoGenerator {
 
         self.tick_count += 1;
 
-        let current_half_hour = ts / 1_800_000;
+        let current_half_hour = ts / crate::shard::MS_PER_30MIN;
         if current_half_hour > self.last_recompute_period {
             self.compute_brick_size(price, ts, sigma_pct);
             self.last_close = snap_to_grid(self.last_close, self.current_grid_step);

@@ -165,6 +165,17 @@ impl NxrConfig {
             .filter(|s| !s.is_empty())
             .collect()
     }
+
+    /// Data root directory inferred from `indexes_dir` (its parent). Falls
+    /// back to `/data` if `indexes_dir` is at the filesystem root. Single
+    /// source of truth for the 3 inline `Path::new(&self.indexes_dir).parent()…`
+    /// copies in `core/src/{main,aggregator,server/rest}.rs`.
+    pub fn data_root(&self) -> std::path::PathBuf {
+        std::path::Path::new(&self.indexes_dir)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/data"))
+            .to_path_buf()
+    }
 }
 
 fn env_or(key: &str, default: &str) -> String {

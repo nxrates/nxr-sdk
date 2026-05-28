@@ -7,6 +7,19 @@
 //! n-1) estimator because that is what the historical ML callsites used. For
 //! population variance, divide sum-of-squared-deviations by n at the callsite.
 
+/// Round a finite f64 to `sig` significant digits. Single source of truth for
+/// the `round_sig` (rest.rs) and `round_to_6_sig_digits` (series-factory) dups.
+/// Returns the input unchanged for `0.0`, NaN, or infinite values.
+#[inline]
+pub fn round_to_sig_digits(v: f64, sig: i32) -> f64 {
+    if v == 0.0 || !v.is_finite() {
+        return v;
+    }
+    let mag = v.abs().log10().floor() as i32;
+    let factor = 10f64.powi(sig - 1 - mag);
+    (v * factor).round() / factor
+}
+
 /// Arithmetic mean of a slice. Returns 0.0 for an empty slice.
 #[inline]
 pub fn mean(data: &[f64]) -> f64 {

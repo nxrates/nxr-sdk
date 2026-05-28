@@ -73,6 +73,12 @@ pub const SENTINEL_INTERVAL_MS: i64 = 60_000;
 /// Milliseconds per UTC day. Shared by all retention / cutoff math.
 pub const MS_PER_DAY: i64 = 86_400_000;
 
+/// Milliseconds per hour. Shared time constant.
+pub const MS_PER_HOUR: i64 = 3_600_000;
+
+/// Seconds per UTC day. Shared time constant.
+pub const SECS_PER_DAY: u64 = 86_400;
+
 /// Milliseconds per 30-minute bucket (offline Parkinson HLC + sigma window).
 pub const MS_PER_30MIN: i64 = 1_800_000;
 
@@ -108,6 +114,40 @@ pub fn ts_ms_to_utc_date(ts_ms: i64) -> NaiveDate {
 #[inline]
 pub fn date_stem(d: NaiveDate) -> String {
     d.format("%Y-%m-%d").to_string()
+}
+
+/// Parse a UTC date in `YYYY-MM-DD` format. Single source of truth for the
+/// 5+ duplicate `parse_date` copies that previously lived in the offline bins.
+#[inline]
+pub fn parse_utc_date(s: &str) -> anyhow::Result<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .with_context(|| format!("parse date `{}`", s))
+}
+
+/// Parse a UTC date in `YYYY-MM-DD` format OR the literal "today" (current
+/// UTC date). Thin wrapper around [`parse_utc_date`] for binaries that accept
+/// a `today` alias on the CLI (e.g. `backfill_all`).
+#[inline]
+pub fn parse_utc_date_or_today(s: &str) -> anyhow::Result<NaiveDate> {
+    if s.eq_ignore_ascii_case("today") {
+        return Ok(chrono::Utc::now().date_naive());
+    }
+    parse_utc_date(s)
+}
+
+/// Inclusive set of UTC dates in `[from, to]` (ascending). Single source of
+/// truth for the duplicate `day_range` copies in the offline bins.
+pub fn day_range_inclusive(from: NaiveDate, to: NaiveDate) -> Vec<NaiveDate> {
+    let mut out = Vec::new();
+    let mut d = from;
+    while d <= to {
+        out.push(d);
+        d = match d.succ_opt() {
+            Some(n) => n,
+            None => break,
+        };
+    }
+    out
 }
 
 /// Per-ticker indexes directory, keyed by MITCH id: `<data>/indexes/<id>`.

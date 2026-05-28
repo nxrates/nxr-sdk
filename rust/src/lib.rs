@@ -64,14 +64,13 @@ pub use shard::{BarShardWriter, IdxShardWriter};
 
 // ---- Renko engine (live + offline shared) ----
 
-pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
 pub use parkinson::{MtfParkinsonCalculator, VolConfig, VolSource};
-pub use renko::{RenkoConfig, RenkoGenerator, K_FLOOR as RENKO_K_FLOOR};
+pub use renko::{RenkoConfig, RenkoGenerator};
 
 // ---- Ticker resolution ----
 
 pub use ticker::{TickerIdCache, resolve_ticker_id};
-pub use resolve::{resolve_ticker, resolve_asset_in_class, get_asset_by_id};
+pub use resolve::{resolve_ticker, get_asset_by_id};
 
 // ---- Provider lookups ----
 

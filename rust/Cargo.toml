@@ -70,6 +70,14 @@ libc = "0.2"
 # and skip today's file instead of producing torn writes.
 fs2 = "0.4"
 
+# Coarse monotonic timestamp used as `ProviderEntry::last_update`. Repr is
+# `transparent(u64)` so the struct is `Copy` + `Pod`-friendly and we avoid
+# the per-cycle `Instant` clone in the aggregator hot path
+# (see core/src/aggregator.rs:312). Resolution is millisecond-class (updated
+# by a 25 ms background thread) which is well below the 50 ms TDWAP cycle
+# and the 1 µs `.clamp(1e-6, 300.0)` floor inside `update_at`.
+coarsetime = "0.1"
+
 # Prometheus metrics: shared across all nxr services (core, fx, crypto) so
 # every binary exposes /metrics on its own port without copy-pasted axum setup.
 metrics = "0.24"

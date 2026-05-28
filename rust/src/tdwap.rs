@@ -8,7 +8,21 @@
 //!   - `ProviderEntry`: per-provider metadata wrapper around `Index`
 //!   - `compute_vwap`: cross-provider TDWAP with adaptive decay and confidence interval
 
-use std::time::{Duration, Instant};
+// Time source: `coarsetime::Instant` is `repr(transparent) u64` with
+// `derive(Copy)`, which lets `ProviderEntry` itself be `Copy`. The previous
+// `std::time::Instant` representation is `!Copy` on macOS/Linux (it wraps a
+// non-Copy `mach_timebase_info`-derived struct / `timespec` pair), forcing
+// the hot aggregator path to `clone()` every entry per cycle
+// (≈80 k clones/s at 20 Hz × ≈400 tickers × ≈10 providers).
+//
+// Resolution is millisecond-class — the staleness math
+// (`clamp(1e-6, 300.0)` floor on inter-arrival time, half-life ≥ 1 s)
+// is unaffected by trading a nanosecond for a millisecond clock.
+//
+// `coarsetime::Duration` is API-compatible with the subset we use
+// (`from_millis`, `as_f64`, `as_secs`). We import both unqualified so the
+// rest of the file reads identically to the pre-Δ1.C version.
+use coarsetime::{Duration, Instant};
 
 use mitch::Index;
 
@@ -69,13 +83,15 @@ pub fn decode_ci_ubp(encoded: u16) -> f64 {
 /// by backtest/replay consumers (which advance a simulated clock anchored at
 /// the first observation). Wall-clock-convenience wrappers (`new`, `update`,
 /// `inject`, `effective_weight`) call `Instant::now()` internally.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ProviderEntry {
     /// Latest per-provider aggregate (MITCH canonical type).
     pub index: Index,
     /// Volume-normalized weight from ticker-params.json (1.0 = median exchange).
     pub base_weight: f64,
-    /// Last update time (for time-decay calculation).
+    /// Last update time (for time-decay calculation). Uses
+    /// `coarsetime::Instant` (u64 newtype) so the whole struct is `Copy`.
+    /// See module-level comment on the time-source choice.
     pub last_update: Instant,
     /// EMA of inter-arrival time in seconds (alpha = 0.1).
     /// Initialized to 5 s - crypto adapts down quickly, FX stays near actual cadence.
@@ -107,8 +123,11 @@ impl ProviderEntry {
 
     /// Replace the stored Index and update timing against an explicit clock.
     pub fn update_at(&mut self, index: Index, now: Instant) {
-        let ipi = now.saturating_duration_since(self.last_update)
-            .as_secs_f64()
+        // `coarsetime::Instant::duration_since` saturates on underflow
+        // (uses `u64::saturating_sub` internally), so the previous
+        // `saturating_duration_since` → `duration_since` rename is safe.
+        let ipi = now.duration_since(self.last_update)
+            .as_f64()
             .clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
         self.last_update = now;
@@ -124,8 +143,8 @@ impl ProviderEntry {
 
     /// Injection variant with an explicit clock.
     pub fn inject_at(&mut self, bid: f64, ask: f64, vbid: u32, vask: u32, now: Instant) {
-        let ipi = now.saturating_duration_since(self.last_update)
-            .as_secs_f64()
+        let ipi = now.duration_since(self.last_update)
+            .as_f64()
             .clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
         self.last_update = now;
@@ -150,7 +169,7 @@ impl ProviderEntry {
 
     /// Effective-weight variant with an explicit clock.
     pub fn effective_weight_at(&self, stale_threshold_secs: f64, now: Instant) -> f64 {
-        let age = now.saturating_duration_since(self.last_update).as_secs_f64();
+        let age = now.duration_since(self.last_update).as_f64();
         let half_life = (IPI_K * self.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
         let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
         self.base_weight * decay.max(0.001)
@@ -232,7 +251,7 @@ where
         }
 
         // Inline effective-weight computation so `exp` and the age read happen once.
-        let age = now.saturating_duration_since(entry.last_update).as_secs_f64();
+        let age = now.duration_since(entry.last_update).as_f64();
         let half_life = (IPI_K * entry.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
         let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
         let decay_floored = decay.max(0.001);
@@ -508,7 +527,7 @@ pub(crate) fn compute_vwap_throttled_at(
         || cache.fingerprints != cache.scratch
         || cache
             .last_refresh
-            .map(|t| now.saturating_duration_since(t) >= Duration::from_millis(refresh_interval_ms))
+            .map(|t| now.duration_since(t) >= Duration::from_millis(refresh_interval_ms))
             .unwrap_or(true);
 
     if !must_refresh {

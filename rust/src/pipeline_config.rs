@@ -28,6 +28,21 @@ pub struct PipelineYml {
     pub series: SeriesYml,
 }
 
+impl PipelineYml {
+    /// Read and parse a pipeline-yaml file from disk. Single source of truth
+    /// for the 6+ `serde_yaml::from_str(&fs::read_to_string(p)?)?` callsites
+    /// in `series-factory/src/bin/*`. Uses `serde_yml` (the maintained fork);
+    /// schema is forward-compatible with serde_yaml-emitted files because
+    /// only the `Deserialize` derives are exercised.
+    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        let s = std::fs::read_to_string(path)
+            .with_context(|| format!("read pipeline yaml {}", path.display()))?;
+        serde_yml::from_str::<Self>(&s)
+            .with_context(|| format!("parse pipeline yaml {}", path.display()))
+    }
+}
+
 /// `cexs:` block — exchange and stablecoin metadata.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CexsYml {

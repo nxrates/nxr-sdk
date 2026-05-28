@@ -54,6 +54,12 @@ pub use mitch::bar::Bar;
 pub use ipc::append_log::{self, AppendLog};
 pub use ipc::record::IndexRecord;
 
+// ---- Zero-copy .bars mmap reader ----
+//
+// Consumed by external workspaces (btr/prime/crates/bin/*). Keep re-exported;
+// see audit Wave 2.C deferral note.
+pub use bar_reader::{BarFile, write_bars};
+
 // ---- Daily-shard storage layer ----
 
 pub use shard::{BarShardWriter, IdxShardWriter};

@@ -28,7 +28,7 @@
 //!
 //! Design:
 //!   * Streaming, never holds all bars in RAM
-//!   * Continuity invariants enforced (single-sided wick, open[i]=close[i-1])
+//!   * Continuity invariants enforced (single-sided wick, `open[i] = close[i-1]`)
 //!   * Emits `mitch::Bar` with `kind = BarKind::Renko as u8`.
 
 use anyhow::Result;

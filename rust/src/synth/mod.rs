@@ -41,12 +41,16 @@
 //! are verbatim ports.
 
 pub mod bar;
+pub mod idx_source;
 pub mod ohlc;
 pub mod paths;
 pub mod replay;
 pub mod rolling;
 pub mod tick;
 
+pub use idx_source::{
+    EphemeralIdxSource, IdxSource, DEFAULT_EPHEMERAL_CAPACITY,
+};
 pub use replay::{compute_synth_index, LEG_STALE_TTL_MS, SYNTH_KERNEL_PROVIDER_ID};
 
 pub use bar::{

@@ -54,10 +54,6 @@ pub use mitch::bar::Bar;
 pub use ipc::append_log::{self, AppendLog};
 pub use ipc::record::IndexRecord;
 
-// ---- Zero-copy .bars mmap reader ----
-
-pub use bar_reader::{BarFile, write_bars};
-
 // ---- Daily-shard storage layer ----
 
 pub use shard::{BarShardWriter, IdxShardWriter};
@@ -70,7 +66,7 @@ pub use renko::{RenkoConfig, RenkoGenerator};
 // ---- Ticker resolution ----
 
 pub use ticker::{TickerIdCache, resolve_ticker_id};
-pub use resolve::{resolve_ticker, get_asset_by_id};
+pub use resolve::resolve_ticker;
 
 // ---- Provider lookups ----
 

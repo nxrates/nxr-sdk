@@ -46,7 +46,12 @@ pub mod paths;
 pub mod rolling;
 pub mod tick;
 
-pub use bar::{reconstruct_synth_bar_series, reconstruct_synth_bar_series_at_base_tf_then_rollup};
+pub use bar::{
+    build_rolling_rho_cache, reconstruct_synth_bar_series,
+    reconstruct_synth_bar_series_at_base_tf_then_rollup,
+    reconstruct_synth_bar_series_rolling_rho, rho_cache_callback, DEFAULT_RHO_WINDOW_BUCKETS,
+    RhoCache,
+};
 pub use ohlc::{
     OhlcLite, OhlcWithRange, TimedOhlc, TimedOhlcCount, VarianceEstimator, reconstruct_synth_ohlc,
     reconstruct_synth_series, reconstruct_synth_series_at_base_tf_then_rollup,

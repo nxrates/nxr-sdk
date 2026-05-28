@@ -663,6 +663,17 @@ impl IdxShardWriter {
     /// live aggregator never sets it, so a bad clock or stale ws frame still
     /// fails loudly there.
     pub fn append(&mut self, rec: &IndexRecord) -> Result<bool> {
+        // Default path: ask the OS for now_ms once. Hot callers (live
+        // aggregator) should use `append_with_now` and supply a cycle-scoped
+        // `now_ms` so they avoid one vDSO syscall per appended record.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.append_with_now(rec, now_ms)
+    }
+
+    /// Like [`append`] but takes a caller-supplied `now_ms` for the ts sanity
+    /// bounds. Lets a tight loop (e.g. the aggregator cycle) capture the
+    /// wall-clock once and amortise it across many `append` calls.
+    pub fn append_with_now(&mut self, rec: &IndexRecord, now_ms: i64) -> Result<bool> {
         let ts = rec.shard_ts_ms();
         // ts sanity: a future ts mis-routes the shard date (creates a "future"
         // shard) and a >2y-old ts is almost certainly a bug for LIVE writes.
@@ -670,7 +681,6 @@ impl IdxShardWriter {
         // 5y backfills land timestamps far older than `now-2y`.
         let body_flags = rec.index.flags;
         let is_historical = body_flags & FLAG_HISTORICAL_BACKFILL != 0;
-        let now_ms = chrono::Utc::now().timestamp_millis();
         if ts > now_ms + 60_000 {
             return Err(anyhow::anyhow!(
                 "IdxShardWriter::append: future ts {} > now+60s ({})",

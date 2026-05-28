@@ -109,6 +109,39 @@ impl PlanErrorCode {
             Self::PlanAuthRequired | Self::PlanKeyInvalid | Self::PlanKeyRevoked
         )
     }
+
+    /// HTTP status code emitted by the REST surface for this plan error.
+    /// Numeric (`u16`) to keep the SDK free of an axum dependency at this
+    /// layer; the server-side `core/src/server/plan_errors.rs` IntoResponse
+    /// converts to `axum::http::StatusCode`. Single source of truth previously
+    /// duplicated in core's enum (Wave 2.B of repo-redundancy audit).
+    pub fn http_status_u16(&self) -> u16 {
+        match self {
+            Self::PlanRateLimitHttp => 429,
+            Self::PlanRateLimitWs => 429,
+            Self::PlanWsFeedCap => 403,
+            Self::PlanEncodingForbidden => 406,
+            Self::PlanTimeframeForbidden => 403,
+            Self::PlanHistoryForbidden => 403,
+            Self::PlanAuthRequired => 401,
+            Self::PlanKeyInvalid => 401,
+            Self::PlanKeyRevoked => 403,
+        }
+    }
+
+    /// WebSocket close code per RFC 6455 §7.4.2 (4000-4999 = application).
+    /// Only WS-class codes have a meaningful value; REST-only codes return
+    /// `None`.
+    pub fn ws_close_code(&self) -> Option<u16> {
+        match self {
+            Self::PlanRateLimitWs => Some(4029),
+            Self::PlanWsFeedCap => Some(4030),
+            Self::PlanAuthRequired => Some(4401),
+            Self::PlanKeyInvalid => Some(4401),
+            Self::PlanKeyRevoked => Some(4403),
+            _ => None,
+        }
+    }
 }
 
 /// Wire JSON body shape — exact mirror of `PlanErrorBody` in the server.

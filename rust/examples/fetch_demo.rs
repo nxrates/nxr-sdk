@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use bytemuck;
 use nxr_sdk::ipc::record::IndexRecord;
-use nxr_sdk::ohlc::Ohlc;
 use serde::Deserialize;
 
 const BASE_URL: &str = "https://api.nxrates.com";

@@ -38,6 +38,7 @@
 //! the input TF-N bars are already wall-clock aligned.
 
 use mitch::common::CI_SCALE;
+use crate::tdwap::decode_ci_ubp;
 
 use crate::ipc::record::IndexRecord;
 
@@ -131,14 +132,6 @@ impl BucketState {
 }
 
 // ── Encoding helpers ────────────────────────────────────────────────────
-
-/// Decode the u16 wire CI of an `Index` body to `ci_ubp` (micro basis
-/// points of mid). Inverse of the encoding documented in `mitch::Index::ci`.
-#[inline]
-fn decode_ci_ubp(ci_u16: u16) -> f64 {
-    let x = ci_u16 as f64 / CI_SCALE;
-    x * x
-}
 
 /// Encode the mean of accumulated `ci_ubp` values using the same
 /// sqrt compression as `mitch::Bar::avg_ci_ubp` (and `BarAccumulator`).

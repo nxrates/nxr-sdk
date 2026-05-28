@@ -20,6 +20,7 @@ pub mod compress;
 pub mod config;
 pub mod consumer;
 pub mod errors;
+pub mod f64_frame;
 pub mod grid;
 pub mod ipc;
 pub mod logging;

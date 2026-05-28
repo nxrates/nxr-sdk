@@ -10,7 +10,7 @@
 //! broadcast channel.
 //!
 //! Temporal redundancy is configured per publisher instance via
-//! [`ReplaySchedule`]. Heartbeat publishers can enable triple-shot delivery
+//! [`crate::publisher::ReplaySchedule`]. Heartbeat publishers can enable triple-shot delivery
 //! (`t=0, t+25 ms, t+75 ms`) while Index publishers stay single-shot because
 //! a lost Index is replaced by the next 50 ms aggregation window. See
 //! `docs/redundancy.md` for the research backing these defaults.

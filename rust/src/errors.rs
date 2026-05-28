@@ -130,7 +130,7 @@ pub struct PlanLimitErrorBody {
 /// Typed plan-tier error returned by the SDK on any 4xx whose JSON body
 /// matches the [`PlanLimitErrorBody`] wire shape.
 ///
-/// Implements [`std::error::Error`] + [`Display`] so it composes with
+/// Implements [`std::error::Error`] + [`std::fmt::Display`] so it composes with
 /// `anyhow` / `?` / `thiserror`-using callers without further wiring.
 #[derive(Clone, Debug)]
 pub struct PlanLimitError {

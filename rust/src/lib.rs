@@ -5,8 +5,8 @@
 //! Includes:
 //! - MITCH wire types (re-exported from the `mitch` crate)
 //! - IPC primitives: [`AppendLog`] (append-only .idx files), [`IndexRecord`]
-//! - Aggregation: [`TickAccumulator`], [`RunningStats`], [`compute_vwap`], [`TDWAP`]
-//! - Resolution: [`resolve_ticker`], [`resolve_asset_in_class`], [`resolve_ticker_id`], [`TickerIdCache`]
+//! - Aggregation: [`TickAccumulator`], [`RunningStats`], [`compute_vwap`]
+//! - Resolution: [`resolve_ticker`], [`resolve_ticker_id`], [`TickerIdCache`]
 //! - Provider lookup: [`get_market_provider_by_id`]
 //! - Statistics: full-period monthly-geo sharpe/sortino helpers, OLS, drawdown
 //! - Configuration: [`NxrConfig`] (environment-based)

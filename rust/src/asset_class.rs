@@ -1,43 +1,23 @@
-//! Asset-class taxonomy — runtime-classifiable from YAML config.
+//! Asset-class taxonomy — derived from MITCH wire bits.
 //!
-//! Promoted from triplicated `const CRYPTO_MAJORS` / `STABLE_SYMBOLS` /
-//! `FX_MAJORS` in `series-factory/src/bin/{nxr_calibrate,renko_trailing,
-//! mtf_sweep}.rs` (D-audit 2026-05-29).
+//! MITCH ticker_id already encodes `base_asset_class` + `quote_asset_class`
+//! via 4-bit `AssetClass` enums (CR / SD / FX / PM / CM / EQ / …). There is
+//! NO reason to maintain string-list duplicates of "what's a stablecoin"
+//! or "what's an FX symbol" in Rust — the wire protocol is the canonical
+//! source.
 //!
-//! Inputs are READ FROM YAML (`cexs.crypto_majors`, `cexs.stablecoins`,
-//! `cexs.fx_majors`) — operator mandate: no hardcoded lists in code.
-//! When the YAML field is empty, fall through to [`DEFAULT_STABLECOINS`] /
-//! [`DEFAULT_CRYPTO_MAJORS`] / [`DEFAULT_FX_MAJORS`] so the binaries still
-//! work on a stripped-down config (research / unit tests).
+//! The ONE thing the wire does NOT encode is "major vs alt" inside
+//! `AssetClass::CR` (Binance-volume-cutoff judgment). That single list
+//! lives in YAML `cexs.crypto_majors` and is the only configurable list
+//! this module exposes.
 
-/// Audit-frozen fallback stablecoin list. The runtime list comes from
-/// `cexs.stablecoins` in `config.yml`; this only kicks in when that field
-/// is absent or empty (rare — e.g. unit tests).
-pub const DEFAULT_STABLECOINS: &[&str] =
-    &["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "DAI", "USDS", "USD1", "PYUSD",
-      "USD", "USDE", "RLUSD", "USDG"];
+use mitch::common::AssetClass;
+use mitch::ticker::TickerId;
 
-/// Audit-frozen fallback crypto-major list.
-pub const DEFAULT_CRYPTO_MAJORS: &[&str] = &["BTC", "ETH", "SOL", "BNB", "XRP"];
-
-/// Audit-frozen fallback FX-major list (G5 + JPY/CHF/AUD/NZD/CAD).
-pub const DEFAULT_FX_MAJORS: &[&str] =
-    &["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD"];
-
-/// Resolve effective list: prefer YAML override, fall through to default
-/// when empty. `&[String]` is the YAML shape; returns `Vec<&str>` ready
-/// for `.contains(&sym)`.
-pub fn effective_list<'a>(yaml: &'a [String], default: &'static [&'static str])
-    -> Vec<&'a str>
-{
-    if yaml.is_empty() {
-        default.to_vec()
-    } else {
-        yaml.iter().map(String::as_str).collect()
-    }
-}
-
-/// Asset class bucket for renko target-bpd resolution.
+/// Asset class bucket for renko target_bpd resolution.
+/// Maps MITCH wire `(base_class, quote_class)` + operator-defined
+/// `crypto_majors` list → a stable string key used by
+/// `CalibrationYml::target_for_class`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssetClassBucket {
     CryptoMajor,
@@ -63,55 +43,70 @@ impl AssetClassBucket {
     }
 }
 
-/// Classify a `base/quote` symbol pair.
+/// Classify by MITCH wire bits + crypto-major list.
 ///
-/// `crypto_majors`, `stables`, `fx_majors` are typically obtained from
-/// [`effective_list`] applied to the YAML fields.
-pub fn classify_pair(
-    base: &str,
-    quote: &str,
-    crypto_majors: &[&str],
-    stables: &[&str],
-    fx_majors: &[&str],
-) -> AssetClassBucket {
-    let base_stable = stables.contains(&base);
-    let quote_stable = stables.contains(&quote);
-    let base_fx = fx_majors.contains(&base);
-    let quote_fx = fx_majors.contains(&quote);
-
-    if base_stable && quote_stable {
-        return AssetClassBucket::CryptoStable;
-    }
-    if base_fx && quote_fx {
-        return AssetClassBucket::FxMajor;
-    }
-    if base_fx || quote_fx {
-        return AssetClassBucket::FxCross;
-    }
-    let base_major = crypto_majors.contains(&base);
-    let quote_major = crypto_majors.contains(&quote);
-    if quote_stable {
-        return if base_major { AssetClassBucket::CryptoMajor } else { AssetClassBucket::CryptoAlt };
-    }
-    if base_major || quote_major {
-        AssetClassBucket::CryptoCross
-    } else {
-        AssetClassBucket::Default
+/// `base_sym` is needed ONLY to look up the major-vs-alt judgment within
+/// `AssetClass::CR`. Stable / FX / metal / etc. classification comes from
+/// the ticker's encoded `base_asset_class()` / `quote_asset_class()`.
+pub fn classify_ticker(ticker: &TickerId, base_sym: &str, crypto_majors: &[&str]) -> AssetClassBucket {
+    let b = ticker.base_asset_class();
+    let q = ticker.quote_asset_class();
+    use AssetClass::*;
+    match (b, q) {
+        (SD, SD) => AssetClassBucket::CryptoStable,
+        (FX, FX) => AssetClassBucket::FxMajor,
+        (_, FX) | (FX, _) => AssetClassBucket::FxCross,
+        (CR, CR) => AssetClassBucket::CryptoCross,
+        (CR, SD) | (CR, _) => {
+            if crypto_majors.contains(&base_sym.to_uppercase().as_str()) {
+                AssetClassBucket::CryptoMajor
+            } else {
+                AssetClassBucket::CryptoAlt
+            }
+        }
+        _ => AssetClassBucket::Default,
     }
 }
+
+/// Resolve a YAML `Vec<String>` list to `Vec<&str>`, falling through to a
+/// compile-time fallback only when the YAML field is empty. Used for the
+/// single remaining configurable list (`cexs.crypto_majors`).
+pub fn effective_list<'a>(yaml: &'a [String], default: &'static [&'static str])
+    -> Vec<&'a str>
+{
+    if yaml.is_empty() {
+        default.to_vec()
+    } else {
+        yaml.iter().map(String::as_str).collect()
+    }
+}
+
+/// Audit-frozen fallback crypto-major list. ONLY used when
+/// `cexs.crypto_majors` in YAML is empty. Operator may override per env
+/// (e.g. add SUI/TON/HYPE) without rebuilding.
+pub const DEFAULT_CRYPTO_MAJORS: &[&str] = &["BTC", "ETH", "SOL", "BNB", "XRP"];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mitch::common::{AssetClass, InstrumentType};
+    use mitch::ticker::TickerId;
+
+    fn t(base: AssetClass, quote: AssetClass) -> TickerId {
+        TickerId::new(InstrumentType::SPOT, base, 0, quote, 0, 0).unwrap()
+    }
+
     #[test]
-    fn defaults_classify_correctly() {
-        let cm = DEFAULT_CRYPTO_MAJORS;
-        let st = DEFAULT_STABLECOINS;
-        let fx = DEFAULT_FX_MAJORS;
-        assert_eq!(classify_pair("BTC", "USDT", cm, st, fx), AssetClassBucket::CryptoMajor);
-        assert_eq!(classify_pair("PEPE", "USDT", cm, st, fx), AssetClassBucket::CryptoAlt);
-        assert_eq!(classify_pair("USDC", "USDT", cm, st, fx), AssetClassBucket::CryptoStable);
-        assert_eq!(classify_pair("ETH", "BTC", cm, st, fx), AssetClassBucket::CryptoCross);
-        assert_eq!(classify_pair("EUR", "USD", cm, st, fx), AssetClassBucket::FxMajor);
+    fn wire_classification_no_string_lists() {
+        let majors = DEFAULT_CRYPTO_MAJORS;
+        // CR base + SD quote → major if BTC, alt otherwise
+        assert_eq!(classify_ticker(&t(AssetClass::CR, AssetClass::SD), "BTC", majors), AssetClassBucket::CryptoMajor);
+        assert_eq!(classify_ticker(&t(AssetClass::CR, AssetClass::SD), "PEPE", majors), AssetClassBucket::CryptoAlt);
+        // SD/SD → stable
+        assert_eq!(classify_ticker(&t(AssetClass::SD, AssetClass::SD), "USDC", majors), AssetClassBucket::CryptoStable);
+        // CR/CR → cross
+        assert_eq!(classify_ticker(&t(AssetClass::CR, AssetClass::CR), "ETH", majors), AssetClassBucket::CryptoCross);
+        // FX/FX → major
+        assert_eq!(classify_ticker(&t(AssetClass::FX, AssetClass::FX), "EUR", majors), AssetClassBucket::FxMajor);
     }
 }

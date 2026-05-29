@@ -266,14 +266,28 @@ static RESOLVER: LazyLock<AssetResolver> = LazyLock::new(AssetResolver::new);
 
 // ---- Quote currency detection ----
 
-const MAJOR_QUOTE_SYMBOLS: &[&str] = &[
+/// Major quote currency symbols used by `detect_quote_currency` (lowercase
+/// for direct comparison against `to_lowercase()` input). Single SDK source
+/// of truth — superset of [`DEFAULT_QUOTE_SUFFIXES`] (the crypto-CEX side
+/// uses a tighter subset to avoid mis-splitting non-crypto-quoted pairs).
+/// Phase 59.R2D — was duplicated in `sdk::resolve::MAJOR_QUOTE_SYMBOLS`
+/// (private) + `crypto::exchange::DEFAULT_QUOTE_SUFFIXES` (also private).
+pub const MAJOR_QUOTE_SYMBOLS_LC: &[&str] = &[
     "usdt", "usdc", "usd", "eur", "gbp", "jpy", "cad", "aud", "chf", "btc", "eth",
 ];
+
+/// Uppercase quote suffix list used by CEX symbol parsers
+/// (`normalize_suffix("BTCUSDT", DEFAULT_QUOTE_SUFFIXES)` → "BTC/USDT").
+/// Order is load-bearing: longer / more-specific suffixes first so
+/// `USDT` matches before `USD`. Audit-frozen 2026-05-29 — adding new
+/// quote bases requires a CEX adapter audit.
+/// Phase 59.R2D moved this from `crypto::exchange::mod::DEFAULT_QUOTE_SUFFIXES`.
+pub const DEFAULT_QUOTE_SUFFIXES: &[&str] = &["USDT", "USDC", "BTC", "ETH", "USD"];
 
 fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
     let lower = symbol.to_lowercase();
 
-    for &q in MAJOR_QUOTE_SYMBOLS {
+    for &q in MAJOR_QUOTE_SYMBOLS_LC {
         // Quote at end
         if lower.ends_with(q) && lower.len() > q.len() {
             let remaining = lower[..lower.len() - q.len()].trim_end_matches(&['/', '_', '.'][..]);

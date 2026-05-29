@@ -43,11 +43,47 @@ impl PipelineYml {
     }
 }
 
-/// `cexs:` block — exchange and stablecoin metadata.
+/// `cexs:` block — exchange + asset metadata + classification lists.
+///
+/// CANONICAL HOME for soft / changeable asset lists. All previously
+/// hardcoded `const` arrays in `core/`, `weights/`, `series-factory/bin/*`
+/// now read from these fields (operator mandate 2026-05-29: NO hardcoded
+/// vars; consolidated config). Empty `Vec` = falls back to sdk default
+/// when callsite needs one (e.g. bridge_stables defaults to FNV-frozen
+/// audit list).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CexsYml {
+    /// Stablecoins recognized at runtime (was: `core::weights::BRIDGE_STABLES`,
+    /// `series_factory/renko_trailing::STABLE_SYMBOLS`, `mtf_sweep::STABLE_SYMBOLS`).
     #[serde(default)]
     pub stablecoins: Vec<String>,
+    /// Bridge-quoted stables (subset of `stablecoins` used for synth-USD
+    /// derivation). If empty, callers fall back to `stablecoins`.
+    #[serde(default)]
+    pub bridge_stables: Vec<String>,
+    /// Major-cap crypto asset symbols (base side). Was:
+    /// `series_factory/{nxr_calibrate,renko_trailing,mtf_sweep}::CRYPTO_MAJORS`.
+    #[serde(default)]
+    pub crypto_majors: Vec<String>,
+    /// FX major currency symbols. Was: `series_factory::nxr_calibrate::FX_MAJORS`.
+    #[serde(default)]
+    pub fx_majors: Vec<String>,
+    /// All scrape-able assets (input list for the weights scraper).
+    #[serde(default)]
+    pub assets: Vec<String>,
+    /// Volume scraper config — URLs + intervals. Was: `weights::scraper::CMC_PAIRS_URL`.
+    #[serde(default)]
+    pub scraper: ScraperYml,
+}
+
+/// `cexs.scraper:` block — endpoints + selectors for CEX volume scraping.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ScraperYml {
+    /// CoinMarketCap pairs endpoint. Defaults to the production CMC API
+    /// when absent. Override here to test against a staging mirror or to
+    /// pin against a specific API version without rebuilding.
+    #[serde(default)]
+    pub cmc_pairs_url: Option<String>,
 }
 
 /// `series:` block — pipeline-internal config.

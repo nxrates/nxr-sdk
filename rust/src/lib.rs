@@ -13,6 +13,7 @@
 //! - Logging: [`logging::init`]
 
 pub mod agg;
+pub mod asset_class;
 pub mod bar_builder;
 pub mod bar_reader;
 pub mod client;

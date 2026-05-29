@@ -48,6 +48,7 @@ pub mod paths;
 pub mod replay;
 pub mod rolling;
 pub mod tick;
+pub mod triangulation_rules;
 
 pub use idx_source::{
     EphemeralIdxSource, IdxSource, DEFAULT_EPHEMERAL_CAPACITY,

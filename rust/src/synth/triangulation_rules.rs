@@ -58,8 +58,12 @@ pub struct InjectionRuleSpec {
 
 // ── Synthesis rules ─────────────────────────────────────────────────────────
 
-/// All currently-active synthesis rules. Order = legacy hardcoded order from
-/// `core/src/triangulator.rs::build_rules` (preserved for byte-exact parity).
+/// All currently-active synthesis rules. Rule CONTENT is byte-exact vs the
+/// legacy hardcoded list in `core/src/triangulator.rs::build_rules`. Vec
+/// iteration order differs (sections 3+4 split-by-class here vs legacy's
+/// per-crypto interleave of AUD/CHF after EUR/GBP). Order does NOT affect
+/// correctness: aggregator emit-paths key by `ticker_id` so per-rule output
+/// is set-equivalent.
 ///
 /// Sections:
 /// 1. USDT/<fiat> = USDT/USD × USD<FIAT>          (26 entries)

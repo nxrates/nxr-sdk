@@ -97,6 +97,11 @@ pub static SYNTH_PATHS: LazyLock<Vec<SynthPath>> = LazyLock::new(|| {
         SynthPath::new("ADA/BTC", &[("ADA/USDT", 1), ("BTC/USDT", -1)]),
         SynthPath::new("XRP/BTC", &[("XRP/USDT", 1), ("BTC/USDT", -1)]),
 
+        // ── 2-leg crosses via USDT pivot — BNB-quoted (operator priority). ──
+        // ETH/BNB = (ETH/USDT) × (USDT/BNB) = (ETH/USDT) / (BNB/USDT)
+        SynthPath::new("ETH/BNB", &[("ETH/USDT", 1), ("BNB/USDT", -1)]),
+        SynthPath::new("BTC/BNB", &[("BTC/USDT", 1), ("BNB/USDT", -1)]),
+
         // ── Cross-quote (FX bridge). EUR-quoted via EUR/USDT inverse. ──
         // BTC/EUR = BTC/USDT × USDT/EUR = (BTC/USDT) / (EUR/USDT)
         SynthPath::new("BTC/EUR",  &[("BTC/USDT",  1), ("EUR/USDT", -1)]),

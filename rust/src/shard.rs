@@ -97,6 +97,15 @@ pub const ROLLOVER_SHIFT_MS_S10: i64 = 2_000;
 /// (00:00:00) and s10 (00:00:02). Single source of truth.
 pub const ROLLOVER_SHIFT_MS_RENKO: i64 = 4_000;
 
+/// Canonical timeframe ladder in seconds — server-enforced whitelist for
+/// `/v1/ohlc` and `/v1/synth/ohlc`, single source of truth for the BTR TF
+/// ladder. Was hardcoded `TF_WHITELIST_S` at `core/src/server/rest.rs:31`
+/// (phase 59.R3.C3.O2, 2026-05-30).
+pub const CANONICAL_TFS_S: &[u32] = &[
+    10, 20, 30, 60, 120, 300, 900, 1800,
+    3600, 7200, 14400, 28800, 43200, 86400, 259200,
+];
+
 // ─────────────────────────────────────────────────────────────────────────
 // Date / path math
 // ─────────────────────────────────────────────────────────────────────────

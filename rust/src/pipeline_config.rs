@@ -465,6 +465,14 @@ pub struct CexsYml {
     /// derivation). If empty, callers fall back to `stablecoins`.
     #[serde(default)]
     pub bridge_stables: Vec<String>,
+    /// USD fiat quote aliases recognized by the synth-injection builder as
+    /// the "raw USD" leg (distinct from on-chain stables). Was: hardcoded
+    /// `"USD"` literal at `core/src/weights.rs:226` (phase 59.R3.C5.A3,
+    /// 2026-05-30). When the quote is one of these, the builder emits a
+    /// `target × bridge_stable/USD` (inverted) injection rule.
+    /// Defaults to `["USD"]` if YAML key is absent.
+    #[serde(default)]
+    pub usd_aliases: Vec<String>,
     /// Major-cap crypto asset symbols (base side). Was:
     /// `series_factory/{nxr_calibrate,renko_trailing,mtf_sweep}::CRYPTO_MAJORS`.
     #[serde(default)]

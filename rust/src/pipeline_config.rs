@@ -26,6 +26,22 @@ use crate::parkinson::VolConfig;
 /// 59.R3.C2.O1 (2026-05-30).
 pub const DEFAULT_MIN_VOLUME_INJECTION_USD: f64 = 100_000.0;
 
+/// Default Binance historical-archive URL prefixes.
+/// Fallback for `cexs.exchanges.binance.archive_url_template.*` when unset.
+/// Phase 59.R3.C2.O4 (2026-05-30).
+pub const DEFAULT_ARCHIVE_URL_BINANCE_MONTHLY: &str =
+    "https://data.binance.vision/data/spot/monthly/aggTrades/{sym}/";
+pub const DEFAULT_ARCHIVE_URL_BINANCE_DAILY: &str =
+    "https://data.binance.vision/data/spot/daily/aggTrades/{sym}/";
+pub const DEFAULT_ARCHIVE_URL_BINANCE_PROBE: &str =
+    "https://data.binance.vision/data/spot/monthly/aggTrades/{sym}/{sym}-aggTrades-{y:04}-{m:02}.zip";
+
+/// Default Bybit historical-archive URL prefixes.
+pub const DEFAULT_ARCHIVE_URL_BYBIT_MONTHLY: &str = "https://public.bybit.com/spot/{sym}/";
+pub const DEFAULT_ARCHIVE_URL_BYBIT_DAILY: &str = "https://public.bybit.com/spot/{sym}/";
+pub const DEFAULT_ARCHIVE_URL_BYBIT_PROBE: &str =
+    "https://public.bybit.com/trading/{sym}/{sym}{y:04}-{m:02}.csv.gz";
+
 /// Top-level wrapper matching the layout of `nxrates.yml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PipelineYml {
@@ -191,6 +207,36 @@ pub struct ExchangeYml {
     /// `cexs.aliases` map which the weights scraper uses globally.
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
+    /// Historical-archive URL template(s) used by `series-factory` sources.
+    /// Was hardcoded in `series-factory/src/sources/{binance,bybit}.rs` and
+    /// `series-factory/src/bin/fetch_crypto_history.rs` (phase 59.R3.C2.O4,
+    /// 2026-05-30). `None` ⇒ fall back to the per-source `DEFAULT_ARCHIVE_URL_*`
+    /// const.
+    #[serde(default)]
+    pub archive_url_template: Option<ArchiveUrlTemplate>,
+}
+
+/// Per-exchange historical-archive URL prefixes. Each field is the URL stem
+/// up to (and including) the trailing `/`; the adapter appends
+/// `{filename}` (already `format!`-built with sym/date) to compose the full
+/// download URL. `None` fields fall back to the per-source default const.
+///
+/// `monthly` / `daily` are used by the bulk-fetch adapters
+/// (`sources/{binance,bybit}.rs`); `probe` is used by `fetch_crypto_history`
+/// to HEAD-probe coverage (bybit's probe path differs from its bulk path).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ArchiveUrlTemplate {
+    /// Monthly archive URL prefix. Interpolates `{sym}` for the symbol token.
+    /// Example: `https://data.binance.vision/data/spot/monthly/aggTrades/{sym}/`.
+    #[serde(default)]
+    pub monthly: Option<String>,
+    /// Daily archive URL prefix. Interpolates `{sym}`.
+    #[serde(default)]
+    pub daily: Option<String>,
+    /// Probe URL template — used by `fetch_crypto_history` coverage probe.
+    /// Interpolates `{sym}`, `{y}`, `{m}` (zero-padded year/month).
+    #[serde(default)]
+    pub probe: Option<String>,
 }
 
 /// `forex:` block — non-CEX broker-forwarded symbols + broker metadata.

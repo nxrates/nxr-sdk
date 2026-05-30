@@ -175,6 +175,13 @@ pub struct ExchangeYml {
     /// Phase 59.R3.H1 (2026-05-30).
     #[serde(default)]
     pub quote_suffixes: Vec<String>,
+    /// Fallback ticker list used by `parse_markets_response` when REST returns
+    /// a malformed / geo-blocked response. Was hardcoded in
+    /// `crypto/src/exchange/{bullish,bitunix,weex}.rs` (phase 59.R3.C2.O2,
+    /// 2026-05-30). Empty ⇒ adapter receives an empty market list (failing
+    /// loudly is preferable to silently shipping a stale audit-frozen set).
+    #[serde(default)]
+    pub fallback_markets: Vec<String>,
 }
 
 /// `forex:` block — non-CEX broker-forwarded symbols + broker metadata.

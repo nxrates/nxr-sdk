@@ -447,7 +447,7 @@ impl Manifest {
         if let Some(last) = self.shards.last() {
             self.last_ts = last.last_ts;
         }
-        self.last_updated = chrono::Utc::now().timestamp_millis();
+        self.last_updated = crate::now_ms() as i64;
     }
 
     /// Rescan all `<dir>/*.{kind_ext}` shards, drop stale entries for that
@@ -730,7 +730,7 @@ impl IdxShardWriter {
         // Default path: ask the OS for now_ms once. Hot callers (live
         // aggregator) should use `append_with_now` and supply a cycle-scoped
         // `now_ms` so they avoid one vDSO syscall per appended record.
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::now_ms() as i64;
         self.append_with_now(rec, now_ms)
     }
 
@@ -745,11 +745,11 @@ impl IdxShardWriter {
         // 5y backfills land timestamps far older than `now-2y`.
         let body_flags = rec.index.flags;
         let is_historical = body_flags & FLAG_HISTORICAL_BACKFILL != 0;
-        if ts > now_ms + 60_000 {
+        if ts > now_ms + MS_PER_MIN {
             return Err(anyhow::anyhow!(
                 "IdxShardWriter::append: future ts {} > now+60s ({})",
                 ts,
-                now_ms + 60_000
+                now_ms + MS_PER_MIN
             ));
         }
         if !is_historical && ts < now_ms - 730 * MS_PER_DAY {
@@ -1102,7 +1102,7 @@ mod tests {
     /// this instead of a hard-coded ts so they don't bit-rot as the wall
     /// clock advances past the guard (R1 H1).
     fn t_recent_day_start() -> i64 {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::now_ms() as i64;
         let d = ts_ms_to_utc_date(now - MS_PER_DAY);
         d.and_hms_opt(0, 0, 0)
             .unwrap()
@@ -1246,7 +1246,7 @@ mod tests {
         let root = std::env::temp_dir().join("nxr_shard_future_ts_test");
         let _ = fs::remove_dir_all(&root);
         let mut w = IdxShardWriter::open(&root, 705, true).unwrap();
-        let future = chrono::Utc::now().timestamp_millis() + 5 * 60_000; // +5min
+        let future = crate::now_ms() as i64 + 5 * MS_PER_MIN; // +5min
         let r = rec(future, 100.0, 101.0);
         assert!(w.append(&r).is_err());
         let _ = fs::remove_dir_all(&root);

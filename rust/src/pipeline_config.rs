@@ -32,6 +32,60 @@ pub struct PipelineYml {
     pub network: NetworkYml,
     #[serde(default)]
     pub server: ServerYml,
+    /// Offline-tool / runtime operator-facing pipeline knobs that aren't
+    /// part of the canonical core data path. Currently:
+    ///   - `sweep.pairs`: the `mtf_sweep` calibration sweep universe (was:
+    ///     hardcoded `series-factory/src/bin/mtf_sweep.rs::SWEEP_PAIRS`).
+    #[serde(default)]
+    pub pipeline: PipelineSectionYml,
+    /// Synth-pair registry. Currently:
+    ///   - `initial_pairs`: launch synth-pair list (was: hardcoded
+    ///     `sdk/rust/src/synth/pairs.rs::INITIAL_SYNTH_PAIRS`).
+    #[serde(default)]
+    pub synths: SynthsYml,
+}
+
+/// `pipeline:` block — offline-tool operator-facing knobs (sweep universe,
+/// future: per-bin overrides). Distinct from `series.pipeline:` (which holds
+/// replay/backfill knobs).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PipelineSectionYml {
+    #[serde(default)]
+    pub sweep: SweepYml,
+}
+
+/// `pipeline.sweep:` — `mtf_sweep` bin universe.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SweepYml {
+    /// `<BASE>/<QUOTE>` pair list for the `mtf_sweep` calibration sweep.
+    /// Empty ⇒ fall back to [`crate::synth::pairs::DEFAULT_SWEEP_PAIRS`].
+    #[serde(default)]
+    pub pairs: Vec<PairSpec>,
+}
+
+/// One `<BASE>/<QUOTE>` spec — yaml-friendly version of `(&str, &str)`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PairSpec {
+    pub base: String,
+    pub quote: String,
+}
+
+/// `synths:` block — synth-pair registry.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SynthsYml {
+    /// Initial / launch synth pairs. Empty ⇒ fall back to
+    /// [`crate::synth::pairs::DEFAULT_INITIAL_SYNTH_PAIRS`].
+    #[serde(default)]
+    pub initial_pairs: Vec<SynthPairYml>,
+}
+
+/// YAML-side mirror of [`crate::synth::pairs::SynthPairSpec`] — owned strings
+/// so deserialization works without `'static` lifetime gymnastics.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SynthPairYml {
+    pub synth_sym: String,
+    pub base_sym: String,
+    pub quote_sym: String,
 }
 
 /// Source of the default `NXR_CONFIG` fallback path. Determines what

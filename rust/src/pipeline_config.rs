@@ -20,6 +20,12 @@ use std::collections::BTreeMap;
 
 use crate::parkinson::VolConfig;
 
+/// Default min 24h USD volume below which the core weights builder skips
+/// emitting a synth injection rule (stablecoin- or USD-quoted pairs).
+/// Was: hardcoded `100_000.0` at `core/src/weights.rs:190,211`. Phase
+/// 59.R3.C2.O1 (2026-05-30).
+pub const DEFAULT_MIN_VOLUME_INJECTION_USD: f64 = 100_000.0;
+
 /// Top-level wrapper matching the layout of `nxrates.yml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PipelineYml {
@@ -301,6 +307,14 @@ pub struct CexsYml {
     /// Was: `weights::config::default_min_stable`.
     #[serde(default)]
     pub min_volume_stable_usd: Option<f64>,
+    /// Min 24h USD volume threshold used by `core::weights` injection-rule
+    /// builder (`load_file`) to decide whether to emit a synth injection for
+    /// a stablecoin-quoted or USD-quoted pair. Was: hardcoded `100_000.0`
+    /// literal at `core/src/weights.rs:190,211` (phase 59.R3.C2.O1,
+    /// 2026-05-30). Distinct from the scraper's eligibility threshold above.
+    /// `None` ⇒ falls back to [`DEFAULT_MIN_VOLUME_INJECTION_USD`].
+    #[serde(default)]
+    pub min_volume_injection_usd: Option<f64>,
     /// Weights scraper poll cadence (minutes). Was:
     /// `weights::config::default_scrape_interval`.
     #[serde(default)]

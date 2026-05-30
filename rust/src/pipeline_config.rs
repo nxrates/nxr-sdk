@@ -162,6 +162,13 @@ pub struct ExchangeYml {
     /// REST markets / exchangeInfo endpoint (audit-frozen).
     #[serde(default)]
     pub rest_url: Option<String>,
+    /// Per-exchange quote-asset suffix list used by `normalize_symbol`
+    /// (suffix-split mode). Was hardcoded in 13 adapters
+    /// (`crypto/src/exchange/{binance,bybit,bitget,...}.rs::quote_suffixes`).
+    /// Empty ⇒ fall back to `nxr_sdk::resolve::DEFAULT_QUOTE_SUFFIXES`.
+    /// Phase 59.R3.H1 (2026-05-30).
+    #[serde(default)]
+    pub quote_suffixes: Vec<String>,
 }
 
 /// `forex:` block — non-CEX broker-forwarded symbols + broker metadata.

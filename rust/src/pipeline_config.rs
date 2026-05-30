@@ -65,7 +65,57 @@ pub struct PipelineYml {
     ///     `sdk/rust/src/synth/pairs.rs::INITIAL_SYNTH_PAIRS`).
     #[serde(default)]
     pub synths: SynthsYml,
+    /// Runtime tuning knobs for the forwarders, fx broker server, and core
+    /// REST/WS layer. Phase 59.R3.C2.O5 (2026-05-30) — was hardcoded
+    /// `const FORWARDER_HEARTBEAT_SECS / BROKER_STALE_SECS / FRAME_BUF_MAX
+    /// / STALE_SECS / REFRESH_OFFSET_SECS / FLUSH_MS` in
+    /// `crypto/src/main.rs`, `crypto/src/bin/fx.rs`,
+    /// `core/src/server/{rest,mod,ws}.rs`.
+    #[serde(default)]
+    pub runtime: RuntimeYml,
 }
+
+/// `runtime:` block — forwarder + server tuning knobs. All `Option<…>`
+/// fields fall back to their per-callsite `DEFAULT_RUNTIME_*` constant when
+/// the YAML is silent (so old `config.yml` files keep working).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RuntimeYml {
+    /// Forwarder heartbeat cadence (seconds). Was: hardcoded
+    /// `FORWARDER_HEARTBEAT_SECS = 5` in `crypto/src/main.rs:34` and
+    /// `crypto/src/bin/fx.rs:52`.
+    #[serde(default)]
+    pub forwarder_heartbeat_secs: Option<u64>,
+    /// FX broker liveness staleness threshold (seconds). Was: hardcoded
+    /// `BROKER_STALE_SECS = 30` in `crypto/src/bin/fx.rs:48`.
+    #[serde(default)]
+    pub broker_stale_secs: Option<u64>,
+    /// Cap on accumulated TCP input awaiting frame parsing (bytes). Defense
+    /// in depth against runaway peers. Was: hardcoded
+    /// `FRAME_BUF_MAX = 2 * 1024 * 1024` in `crypto/src/bin/fx.rs:254`.
+    #[serde(default)]
+    pub frame_buf_max: Option<usize>,
+    /// REST `/health` stale-forwarder threshold (seconds). Was: hardcoded
+    /// `STALE_SECS = 20` in `core/src/server/rest.rs:786`.
+    #[serde(default)]
+    pub health_stale_secs: Option<u64>,
+    /// Daily-refresh wait offset past UTC midnight (seconds). Was: hardcoded
+    /// `REFRESH_OFFSET_SECS = 30` in `core/src/server/mod.rs:232`.
+    #[serde(default)]
+    pub daily_refresh_offset_secs: Option<u64>,
+    /// WS flush cadence (ms). Was: hardcoded `FLUSH_MS = 100` in
+    /// `core/src/server/ws.rs:92`.
+    #[serde(default)]
+    pub ws_flush_ms: Option<u64>,
+}
+
+/// Per-callsite runtime defaults. Mirror the prior `const` values so
+/// YAML-silent configs preserve audit-frozen behaviour.
+pub const DEFAULT_RUNTIME_FORWARDER_HEARTBEAT_SECS: u64 = 5;
+pub const DEFAULT_RUNTIME_BROKER_STALE_SECS: u64 = 30;
+pub const DEFAULT_RUNTIME_FRAME_BUF_MAX: usize = 2 * 1024 * 1024;
+pub const DEFAULT_RUNTIME_HEALTH_STALE_SECS: u64 = 20;
+pub const DEFAULT_RUNTIME_DAILY_REFRESH_OFFSET_SECS: u64 = 30;
+pub const DEFAULT_RUNTIME_WS_FLUSH_MS: u64 = 100;
 
 /// `pipeline:` block — offline-tool operator-facing knobs (sweep universe,
 /// future: per-bin overrides). Distinct from `series.pipeline:` (which holds

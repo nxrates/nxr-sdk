@@ -48,6 +48,27 @@ pub fn median(data: &[f64]) -> f64 {
     if n % 2 == 0 { (s[n / 2 - 1] + s[n / 2]) / 2.0 } else { s[n / 2] }
 }
 
+/// Median absolute deviation about the sample median. Single allocation; uses
+/// `median` internally. Returns 0.0 for an empty slice. Single source of
+/// truth for the inline MAD copies previously in `series-factory`
+/// (`data_quality_audit.rs` + `renko_continuity_check.rs`). Phase
+/// 59.R3.C5.C2/C3 (2026-05-30).
+pub fn mad(data: &[f64]) -> f64 {
+    if data.is_empty() { return 0.0; }
+    let med = median(data);
+    let devs: Vec<f64> = data.iter().map(|x| (x - med).abs()).collect();
+    median(&devs)
+}
+
+/// Convenience variant of [`mad`] that returns `(median, mad)` in a single
+/// pass through the sort step. Same defaults as `mad(&[])` ⇒ `(0.0, 0.0)`.
+pub fn median_and_mad(data: &[f64]) -> (f64, f64) {
+    if data.is_empty() { return (0.0, 0.0); }
+    let med = median(data);
+    let devs: Vec<f64> = data.iter().map(|x| (x - med).abs()).collect();
+    (med, median(&devs))
+}
+
 /// Coefficient of variation: `std(data) / |mean(data)|`. Population variance
 /// (divisor n, not n-1) to match the cross-fold stability convention used in
 /// Renko stats HOMO/ROBUST components.

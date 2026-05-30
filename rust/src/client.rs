@@ -710,14 +710,19 @@ fn build_range(opts: &RangeOpts, extra: Option<(&str, &str)>) -> String {
     }
 }
 
+/// Owned-string ticker parser with `DEFAULT_QUOTE` fallback for unquoted
+/// inputs. Delegates the actual split logic to
+/// [`crate::ticker::split_pair_multi`] (the canonical 2-leg splitter) to
+/// avoid drift between client.rs and the sdk's pair-split rules.
+/// Phase 59.R3.C5.C5 (2026-05-30) — was an inline `for sep in ['/', '-', '_']`
+/// loop that diverged subtly from `split_pair_multi` (e.g. did not reject
+/// inputs with multiple separators).
 fn parse_ticker(s: &str) -> (String, String) {
     let t = s.trim().to_uppercase();
-    for sep in ['/', '-', '_'] {
-        if let Some(i) = t.find(sep) {
-            return (t[..i].trim().to_string(), t[i + 1..].trim().to_string());
-        }
+    match crate::ticker::split_pair_multi(&t, &['/', '-', '_']) {
+        Some((base, quote)) => (base.trim().to_string(), quote.trim().to_string()),
+        None => (t, DEFAULT_QUOTE.to_string()),
     }
-    (t, DEFAULT_QUOTE.to_string())
 }
 
 fn resolve_bq(opts: &HistoryOpts) -> Result<(String, String)> {

@@ -178,7 +178,21 @@ pub struct ForexYml {
     #[serde(default)]
     pub broker_symbols: Vec<String>,
     #[serde(default)]
-    pub brokers: BTreeMap<String, serde_yml::Value>,
+    pub brokers: BTreeMap<String, FxBrokerYml>,
+}
+
+/// `forex.brokers.<name>:` per-broker mitch_id + weight + per-pair overrides.
+/// Was: `weights::config::FxBrokerEntry`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct FxBrokerYml {
+    #[serde(default)]
+    pub mitch_id: u16,
+    #[serde(default)]
+    pub weight: f64,
+    /// Per-pair weight overrides keyed by canonical "BASE/QUOTE".
+    /// Empty ⇒ broker default applies to every pair.
+    #[serde(default)]
+    pub pair_weights: BTreeMap<String, f64>,
 }
 
 /// `network:` block — UDP + listener cfg. Today these knobs are env-driven via
@@ -271,6 +285,27 @@ pub struct RateLimitsYml {
 /// audit list).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CexsYml {
+    /// Min 24h USD volume for a volatile asset to be eligible (weights scraper).
+    /// Was: `weights::config::default_min_volatile`.
+    #[serde(default)]
+    pub min_volume_volatile_usd: Option<f64>,
+    /// Min 24h USD volume for a stablecoin to be eligible (weights scraper).
+    /// Stablecoin lower bar is intentional (most stable liquidity is on-chain).
+    /// Was: `weights::config::default_min_stable`.
+    #[serde(default)]
+    pub min_volume_stable_usd: Option<f64>,
+    /// Weights scraper poll cadence (minutes). Was:
+    /// `weights::config::default_scrape_interval`.
+    #[serde(default)]
+    pub scrape_interval_minutes: Option<u64>,
+    /// Path to the rendered weights file consumed by the NXR collector.
+    /// Was: `weights::config::default_weights_path`.
+    #[serde(default)]
+    pub weights_path: Option<String>,
+    /// Ticker alias map: non-standard → canonical (e.g. `XBT → BTC`). Was:
+    /// `weights::config::Cexs::aliases`.
+    #[serde(default)]
+    pub aliases: BTreeMap<String, String>,
     /// Stablecoins recognized at runtime (was: `core::weights::BRIDGE_STABLES`,
     /// `series_factory/renko_trailing::STABLE_SYMBOLS`, `mtf_sweep::STABLE_SYMBOLS`).
     #[serde(default)]

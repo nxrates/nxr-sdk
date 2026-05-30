@@ -119,6 +119,31 @@ pub fn classify_ticker(
     }
 }
 
+/// Classify a `<BASE>/<QUOTE>` pair string + numeric `ticker_id` to a
+/// bucket. Single SDK home for the pattern previously inlined in
+/// `series-factory::bin::nxr_calibrate::classify_pair` (and elsewhere).
+///
+/// Uppercase-folds base/quote before delegating to [`classify_ticker`]
+/// (operator lists are case-insensitive but the wire-class check is
+/// driven purely by `TickerId` bits — so this only matters for the
+/// `contains_ci` lookup, which is already case-insensitive). Returns
+/// [`AssetClassBucket::Default`] when the pair is malformed.
+pub fn bucket_for_pair(
+    pair: &str,
+    ticker_id: u64,
+    crypto_majors: &[&str],
+    stablecoins: &[&str],
+    fx_majors: &[&str],
+) -> AssetClassBucket {
+    let Some((base, quote)) = crate::ticker::split_pair(pair) else {
+        return AssetClassBucket::Default;
+    };
+    let base_uc = base.to_uppercase();
+    let quote_uc = quote.to_uppercase();
+    let ticker = TickerId::from_raw(ticker_id);
+    classify_ticker(&ticker, &base_uc, &quote_uc, crypto_majors, stablecoins, fx_majors)
+}
+
 /// Resolve a YAML `Vec<String>` list to `Vec<&str>`, falling back to a
 /// compile-time list only when the YAML field is empty. Callers should
 /// `warn!` on empty YAML so operators notice cfg drift (see

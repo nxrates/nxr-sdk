@@ -34,6 +34,31 @@ pub struct PipelineYml {
     pub server: ServerYml,
 }
 
+/// Source of the default `NXR_CONFIG` fallback path. Determines what
+/// the resolver returns when the env var is unset.
+///
+/// - [`ConfigHint::Runtime`] — long-running cluster services (core sink,
+///   crypto forwarders, REST/WS server). Default = `/etc/nxr/config.yml`
+///   (matches container layout where the chart mounts the values yml).
+/// - [`ConfigHint::Bin`] — offline tools / one-shot binaries
+///   (`nxr_calibrate`, `merge_idx`, `mtf_sweep`, …). Default = `./config.yml`
+///   (matches dev workflow: `cd nx-rates && cargo run --bin …`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigHint {
+    Runtime,
+    Bin,
+}
+
+impl ConfigHint {
+    /// Default path applied when `NXR_CONFIG` is unset.
+    pub const fn default_path(self) -> &'static str {
+        match self {
+            ConfigHint::Runtime => "/etc/nxr/config.yml",
+            ConfigHint::Bin => "config.yml",
+        }
+    }
+}
+
 impl PipelineYml {
     /// Read and parse a pipeline-yaml file from disk. Single source of truth
     /// for the 6+ `serde_yaml::from_str(&fs::read_to_string(p)?)?` callsites
@@ -46,6 +71,21 @@ impl PipelineYml {
             .with_context(|| format!("read pipeline yaml {}", path.display()))?;
         serde_yml::from_str::<Self>(&s)
             .with_context(|| format!("parse pipeline yaml {}", path.display()))
+    }
+
+    /// Resolve the canonical NXR config path: env `NXR_CONFIG` if set,
+    /// else `hint.default_path()`. Single SDK home for the 8+ ad-hoc
+    /// `std::env::var("NXR_CONFIG").unwrap_or_else(...)` callsites in
+    /// `crypto/`, `core/`, and `series-factory/bin/*`.
+    pub fn resolve_path(hint: ConfigHint) -> std::path::PathBuf {
+        std::env::var("NXR_CONFIG")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(hint.default_path()))
+    }
+
+    /// Load using the canonical NXR_CONFIG resolution policy. Phase 59.R3.L1.
+    pub fn load_default(hint: ConfigHint) -> anyhow::Result<Self> {
+        Self::load(&Self::resolve_path(hint))
     }
 }
 

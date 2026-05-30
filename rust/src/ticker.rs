@@ -4,6 +4,27 @@ use mitch::{AssetClass, InstrumentType};
 use mitch::ticker::forex_ticker;
 use tracing::warn;
 
+/// Split a canonical `BASE/QUOTE` pair string into its two legs.
+///
+/// Canonical NXR pair format = `"<BASE>/<QUOTE>"` (uppercase preserved by
+/// caller — this fn does no case folding). Returns `None` when the input
+/// has no `/`, has more than one `/`, or either side is empty.
+///
+/// Single SDK source of truth — was duplicated as
+/// `pair.split('/')` ad-hoc parsing across `core::weights`,
+/// `weights::main`, `series-factory::bin::nxr_calibrate`, `crypto::client`,
+/// `crypto::exchange::upbit`. Phase 59.R3.H4.
+#[inline]
+pub fn split_pair(pair: &str) -> Option<(&str, &str)> {
+    let mut it = pair.split('/');
+    let base = it.next()?;
+    let quote = it.next()?;
+    if base.is_empty() || quote.is_empty() || it.next().is_some() {
+        return None;
+    }
+    Some((base, quote))
+}
+
 /// Resolve and cache MITCH ticker IDs from canonical symbol strings like "BTC/USDT".
 pub struct TickerIdCache {
     cache: DashMap<String, u64>,

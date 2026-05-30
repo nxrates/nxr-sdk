@@ -73,7 +73,7 @@ pub use renko::{RenkoConfig, RenkoGenerator};
 
 // ---- Ticker resolution ----
 
-pub use ticker::{TickerIdCache, resolve_ticker_id};
+pub use ticker::{TickerIdCache, resolve_ticker_id, split_pair};
 pub use resolve::resolve_ticker;
 
 // ---- Provider lookups ----

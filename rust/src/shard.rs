@@ -128,6 +128,18 @@ pub fn date_stem(d: NaiveDate) -> String {
     d.format("%Y-%m-%d").to_string()
 }
 
+/// UTC midnight (start-of-day) epoch-ms for a `NaiveDate`. Single source of
+/// truth for the day-bucket alignment used across the series-factory bins
+/// (mtf_sweep, renko_trailing_from_idx, synth_backfill_from_idx,
+/// synth_sigma_benchmark). Was 4× verbatim local duplicates (phase
+/// 59.R3.C5.C1, 2026-05-30).
+#[inline]
+pub fn day_start_ms(d: NaiveDate) -> i64 {
+    use chrono::{NaiveDateTime, NaiveTime, TimeZone, Utc};
+    let ndt = NaiveDateTime::new(d, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    Utc.from_utc_datetime(&ndt).timestamp_millis()
+}
+
 /// Parse a UTC date in `YYYY-MM-DD` format. Single source of truth for the
 /// 5+ duplicate `parse_date` copies that previously lived in the offline bins.
 #[inline]

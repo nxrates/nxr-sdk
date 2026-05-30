@@ -16,13 +16,31 @@ use tracing::warn;
 /// `crypto::exchange::upbit`. Phase 59.R3.H4.
 #[inline]
 pub fn split_pair(pair: &str) -> Option<(&str, &str)> {
-    let mut it = pair.split('/');
-    let base = it.next()?;
-    let quote = it.next()?;
-    if base.is_empty() || quote.is_empty() || it.next().is_some() {
+    split_pair_multi(pair, &['/'])
+}
+
+/// Like [`split_pair`] but accepts any separator from `seps`. Used by CLI
+/// arg parsers that accept both `BASE/QUOTE` and `BASE-QUOTE` (e.g.
+/// `series-factory` bins, `mtf_sweep`). Returns `None` when no separator
+/// matches, more than one separator is present, or either side is empty.
+///
+/// Phase 59.R3.C3.O4 (2026-05-30) — was duplicated as
+/// `series_factory::split_pair` (find-+-slice) and an inline
+/// `tok.split(['/', '-'])` in `mtf_sweep`.
+#[inline]
+pub fn split_pair_multi<'a>(pair: &'a str, seps: &[char]) -> Option<(&'a str, &'a str)> {
+    let sep_ix = pair.find(|c: char| seps.contains(&c))?;
+    let base = &pair[..sep_ix];
+    let rest = &pair[sep_ix + 1..];
+    if base.is_empty() || rest.is_empty() {
         return None;
     }
-    Some((base, quote))
+    // Reject inputs with more than one separator (matches `split_pair`'s
+    // strict 2-leg contract).
+    if rest.contains(|c: char| seps.contains(&c)) {
+        return None;
+    }
+    Some((base, rest))
 }
 
 /// Resolve and cache MITCH ticker IDs from canonical symbol strings like "BTC/USDT".

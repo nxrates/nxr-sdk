@@ -76,6 +76,9 @@ pub const MS_PER_DAY: i64 = 86_400_000;
 /// Milliseconds per hour. Shared time constant.
 pub const MS_PER_HOUR: i64 = 3_600_000;
 
+/// Milliseconds per minute. Shared time constant (1-min calibration buckets).
+pub const MS_PER_MIN: i64 = 60_000;
+
 /// Seconds per UTC day. Shared time constant.
 pub const SECS_PER_DAY: u64 = 86_400;
 

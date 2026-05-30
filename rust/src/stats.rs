@@ -394,7 +394,7 @@ fn monthly_geo(
     metric: fn(&[(u64, f64)], f64) -> f64,
 ) -> f64 {
     if equity_curve.len() < 2 { return 0.0; }
-    let ms_per_day = 86_400_000u64;
+    let ms_per_day = crate::shard::MS_PER_DAY as u64;
     let mut monthly_curves: Vec<Vec<(u64, f64)>> = Vec::new();
     let mut current_month_key: Option<(u32, u32)> = None;
 

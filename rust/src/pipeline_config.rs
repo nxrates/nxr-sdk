@@ -42,6 +42,24 @@ pub const DEFAULT_ARCHIVE_URL_BYBIT_DAILY: &str = "https://public.bybit.com/spot
 pub const DEFAULT_ARCHIVE_URL_BYBIT_PROBE: &str =
     "https://public.bybit.com/trading/{sym}/{sym}{y:04}-{m:02}.csv.gz";
 
+/// Default Bitget historical-archive URL prefix. Bitget exposes only a
+/// daily (per-sequence) bucket — no monthly archives. Phase 59.R3.C3.O1
+/// (2026-05-30).
+pub const DEFAULT_ARCHIVE_URL_BITGET_MONTHLY: &str = "";
+pub const DEFAULT_ARCHIVE_URL_BITGET_DAILY: &str =
+    "https://img.bitgetimg.com/online/trades/SPBL/{sym}/";
+pub const DEFAULT_ARCHIVE_URL_BITGET_PROBE: &str =
+    "https://img.bitgetimg.com/online/trades/SPBL/{sym}/{ds}_{seq:03}.zip";
+
+/// Default OKX historical-archive URL prefixes. OKX exposes both monthly
+/// and daily traderecords buckets. Phase 59.R3.C3.O1 (2026-05-30).
+pub const DEFAULT_ARCHIVE_URL_OKX_MONTHLY: &str =
+    "https://static.okx.com/cdn/okex/traderecords/trades/monthly/{y:04}{m:02}/";
+pub const DEFAULT_ARCHIVE_URL_OKX_DAILY: &str =
+    "https://static.okx.com/cdn/okex/traderecords/trades/daily/{ds}/";
+pub const DEFAULT_ARCHIVE_URL_OKX_PROBE: &str =
+    "https://static.okx.com/cdn/okex/traderecords/trades/monthly/{y:04}{m:02}/{sym}-trades-{y:04}-{m:02}.zip";
+
 /// Top-level wrapper matching the layout of `nxrates.yml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PipelineYml {

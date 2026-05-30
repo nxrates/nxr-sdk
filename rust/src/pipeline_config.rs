@@ -182,6 +182,15 @@ pub struct ExchangeYml {
     /// loudly is preferable to silently shipping a stale audit-frozen set).
     #[serde(default)]
     pub fallback_markets: Vec<String>,
+    /// Per-exchange symbol-alias map for `normalize_symbol` / `format_symbol`.
+    /// Keyed by the exchange-native code → canonical NXR code (e.g. Kraken
+    /// `XBT → BTC`, Bitfinex `UST → USDT`). `format_symbol` walks the same
+    /// map in reverse. Was hardcoded `.replace("XBT","BTC")` and
+    /// `("UST","USDT")` literal arrays in `kraken.rs` / `bitfinex.rs`
+    /// (phase 59.R3.C2.O3, 2026-05-30). Distinct from the top-level
+    /// `cexs.aliases` map which the weights scraper uses globally.
+    #[serde(default)]
+    pub aliases: BTreeMap<String, String>,
 }
 
 /// `forex:` block — non-CEX broker-forwarded symbols + broker metadata.

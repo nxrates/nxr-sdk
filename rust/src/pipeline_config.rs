@@ -536,43 +536,20 @@ pub struct CalibrationYml {
     pub max_rounds: usize,
     pub tolerance: f64,
     pub mult_bounds: [f64; 2],
+    /// Per-pair `target_bpd` overrides keyed by pair string (e.g. "USDC/USDT"
+    /// → 50). Defaults to flat `target_bpd` if no override matches.
+    /// Phase 60.π (2026-05-31): replaces deprecated `target_bpd_by_class`.
+    /// Operator policy: simple 300 default + manual per-pair override list.
     #[serde(default)]
-    pub target_bpd_by_class: BTreeMap<String, ClassTarget>,
+    pub target_bpd_overrides: BTreeMap<String, f64>,
 }
 
 impl CalibrationYml {
-    /// Resolve `target_bpd` for a given asset-class key (e.g. "crypto_major",
-    /// "fx_cross"). Falls back to the `default` table entry, then to the
-    /// flat top-level `target_bpd`. `None` ⇒ explicit skip via sentinel.
-    pub fn target_for_class(&self, class_key: &str) -> Option<f64> {
-        if let Some(t) = self.target_bpd_by_class.get(class_key) {
-            return t.resolved();
-        }
-        if let Some(t) = self.target_bpd_by_class.get("default") {
-            return t.resolved();
-        }
-        Some(self.target_bpd)
-    }
-}
-
-/// Per-class entry in `target_bpd_by_class`. Either a numeric bpd target or
-/// a sentinel string (e.g. `"skip"`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum ClassTarget {
-    Bpd(f64),
-    Sentinel(String),
-}
-
-impl ClassTarget {
-    /// `None` ⇒ skip this class; `Some(v)` ⇒ use `v` as target bpd.
-    pub fn resolved(&self) -> Option<f64> {
-        match self {
-            ClassTarget::Bpd(v) if *v > 0.0 => Some(*v),
-            ClassTarget::Bpd(_) => None,
-            ClassTarget::Sentinel(s) if s.eq_ignore_ascii_case("skip") => None,
-            ClassTarget::Sentinel(_) => None,
-        }
+    /// Resolve `target_bpd` for a given pair string (e.g. "BTC/USDT").
+    /// Lookup order: per-pair override → flat top-level `target_bpd`.
+    /// Always returns Some (no implicit skip — operator policy: never skip a day).
+    pub fn target_for_pair(&self, pair: &str) -> f64 {
+        self.target_bpd_overrides.get(pair).copied().unwrap_or(self.target_bpd)
     }
 }
 

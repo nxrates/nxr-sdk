@@ -83,9 +83,9 @@ pub struct PipelineYml {
     ///     `sdk/rust/src/synth/pairs.rs::INITIAL_SYNTH_PAIRS`).
     #[serde(default)]
     pub synths: SynthsYml,
-    /// Runtime tuning knobs for the forwarders, fx broker server, and core
+    /// Runtime tuning knobs for the forwarders, fx provider server, and core
     /// REST/WS layer. Phase 59.R3.C2.O5 (2026-05-30) — was hardcoded
-    /// `const FORWARDER_HEARTBEAT_SECS / BROKER_STALE_SECS / FRAME_BUF_MAX
+    /// `const FORWARDER_HEARTBEAT_SECS / PROVIDER_STALE_SECS / FRAME_BUF_MAX
     /// / STALE_SECS / REFRESH_OFFSET_SECS / FLUSH_MS` in
     /// `crypto/src/main.rs`, `crypto/src/bin/fx.rs`,
     /// `core/src/server/{rest,mod,ws}.rs`.
@@ -103,10 +103,10 @@ pub struct RuntimeYml {
     /// `crypto/src/bin/fx.rs:52`.
     #[serde(default)]
     pub forwarder_heartbeat_secs: Option<u64>,
-    /// FX broker liveness staleness threshold (seconds). Was: hardcoded
-    /// `BROKER_STALE_SECS = 30` in `crypto/src/bin/fx.rs:48`.
+    /// FX provider liveness staleness threshold (seconds). Was: hardcoded
+    /// `PROVIDER_STALE_SECS = 30` in `crypto/src/bin/fx.rs:48`.
     #[serde(default)]
-    pub broker_stale_secs: Option<u64>,
+    pub provider_stale_secs: Option<u64>,
     /// Cap on accumulated TCP input awaiting frame parsing (bytes). Defense
     /// in depth against runaway peers. Was: hardcoded
     /// `FRAME_BUF_MAX = 2 * 1024 * 1024` in `crypto/src/bin/fx.rs:254`.
@@ -129,7 +129,7 @@ pub struct RuntimeYml {
 /// Per-callsite runtime defaults. Mirror the prior `const` values so
 /// YAML-silent configs preserve audit-frozen behaviour.
 pub const DEFAULT_RUNTIME_FORWARDER_HEARTBEAT_SECS: u64 = 5;
-pub const DEFAULT_RUNTIME_BROKER_STALE_SECS: u64 = 30;
+pub const DEFAULT_RUNTIME_PROVIDER_STALE_SECS: u64 = 30;
 pub const DEFAULT_RUNTIME_FRAME_BUF_MAX: usize = 2 * 1024 * 1024;
 pub const DEFAULT_RUNTIME_HEALTH_STALE_SECS: u64 = 20;
 pub const DEFAULT_RUNTIME_DAILY_REFRESH_OFFSET_SECS: u64 = 30;
@@ -307,11 +307,11 @@ pub struct ArchiveUrlTemplate {
     pub probe: Option<String>,
 }
 
-/// `forex:` block — non-CEX broker-forwarded symbols + broker metadata.
+/// `forex:` block — non-CEX provider-forwarded symbols + provider metadata.
 /// `symbols` is the slash-separated FX pairs list scraped by nxr-fx /
 /// MT4 forwarders (was hardcoded in `weights/src/scraper/fx.rs` originally).
-/// `broker_symbols` is the no-slash multi-asset list (FX + commodities +
-/// indices + crypto CFDs) the broker forwarders subscribe to and the core
+/// `provider_symbols` is the no-slash multi-asset list (FX + commodities +
+/// indices + crypto CFDs) the provider forwarders subscribe to and the core
 /// sink pre-registers in `symbol_map`. Was: `core::main::FX_SYMBOLS`
 /// (phase 59.R2C.1).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -319,21 +319,21 @@ pub struct ForexYml {
     #[serde(default)]
     pub symbols: Vec<String>,
     #[serde(default)]
-    pub broker_symbols: Vec<String>,
+    pub provider_symbols: Vec<String>,
     #[serde(default)]
-    pub brokers: BTreeMap<String, FxBrokerYml>,
+    pub providers: BTreeMap<String, FxProviderYml>,
 }
 
-/// `forex.brokers.<name>:` per-broker mitch_id + weight + per-pair overrides.
-/// Was: `weights::config::FxBrokerEntry`.
+/// `forex.providers.<name>:` per-provider mitch_id + weight + per-pair overrides.
+/// Was: `weights::config::FxProviderEntry`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct FxBrokerYml {
+pub struct FxProviderYml {
     #[serde(default)]
     pub mitch_id: u16,
     #[serde(default)]
     pub weight: f64,
     /// Per-pair weight overrides keyed by canonical "BASE/QUOTE".
-    /// Empty ⇒ broker default applies to every pair.
+    /// Empty ⇒ provider default applies to every pair.
     #[serde(default)]
     pub pair_weights: BTreeMap<String, f64>,
 }
@@ -483,7 +483,7 @@ pub struct CexsYml {
     /// All scrape-able assets (input list for the weights scraper).
     #[serde(default)]
     pub assets: Vec<String>,
-    /// Cross-currency / cross-base crypto pairs forwarded by upstream brokers
+    /// Cross-currency / cross-base crypto pairs forwarded by upstream providers
     /// (e.g. `BTC/EUR`, `ETH/BTC`, `KZT/USDT`). Was: `core::main::CRYPTO_CROSS_PAIRS`
     /// (phase 59.R2C.2). The core sink pre-registers ticker IDs for each pair
     /// in `symbol_map` so they round-trip through the REST/WS API.

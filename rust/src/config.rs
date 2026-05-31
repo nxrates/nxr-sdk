@@ -20,7 +20,7 @@ use std::env;
 #[derive(Debug, Clone)]
 pub struct NxrConfig {
     pub log_level: String,
-    /// TCP port the aggregator listens on for MITCH frames from broker forwarders
+    /// TCP port the aggregator listens on for MITCH frames from provider forwarders
     pub listen_port: u16,
     /// Aggregation cycle interval in milliseconds (default: 50)
     pub aggregation_interval_ms: u64,
@@ -45,7 +45,7 @@ pub struct NxrConfig {
     pub multicast_addr_b: String,
     /// UDP multicast port for feed B.
     pub multicast_port_b: u16,
-    /// Raw tick cache (exchange dumps, broker tick recordings).
+    /// Raw tick cache (exchange dumps, provider tick recordings).
     pub ticks_dir: String,
     /// Generated bar files (.bars) produced by series-factory.
     pub bars_dir: String,

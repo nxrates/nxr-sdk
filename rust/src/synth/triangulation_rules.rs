@@ -22,7 +22,7 @@
 //! ## Leg symbol convention
 //!
 //! Legs are resolved via `crate::resolve_ticker_id`. FX legs use the 6-char
-//! upper-alpha broker form (`USDJPY`, `EURUSD`) — `resolve_ticker_id` short-circuits
+//! upper-alpha provider form (`USDJPY`, `EURUSD`) — `resolve_ticker_id` short-circuits
 //! to a direct 3+3 split (`USDJPY` → `USD/JPY`, never `JPY/USD`). Crypto legs use
 //! the slash form (`BTC/USDT`).
 //!
@@ -101,7 +101,7 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
 
     // ── <crypto>/USD = <crypto>/USDT × USDT/USD ──
     // Synthesises a USD-quoted reference from CEX USDT liquidity. Last-writer-wins
-    // vs broker BTCUSD/ETHUSD CFD feed (broker VWAP lands first, this overwrites).
+    // vs provider BTCUSD/ETHUSD CFD feed (provider VWAP lands first, this overwrites).
     SynthesisRuleSpec { out_sym: "BTC/USD",  leg1_sym: "BTC/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "ETH/USD",  leg1_sym: "ETH/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "SOL/USD",  leg1_sym: "SOL/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
@@ -115,7 +115,7 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     SynthesisRuleSpec { out_sym: "LTC/USD",  leg1_sym: "LTC/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
 
     // ── <crypto>/EUR + <crypto>/GBP = <crypto>/USDT × (1 / <FX>USD) ──
-    // FX broker symbol (EURUSD, GBPUSD) is inverted: USD/<fiat> = 1 / EURUSD.
+    // FX provider symbol (EURUSD, GBPUSD) is inverted: USD/<fiat> = 1 / EURUSD.
     SynthesisRuleSpec { out_sym: "BTC/EUR",  leg1_sym: "BTC/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
     SynthesisRuleSpec { out_sym: "BTC/GBP",  leg1_sym: "BTC/USDT",  leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
     SynthesisRuleSpec { out_sym: "ETH/EUR",  leg1_sym: "ETH/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
@@ -131,7 +131,7 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     SynthesisRuleSpec { out_sym: "DOGE/EUR", leg1_sym: "DOGE/USDT", leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
     SynthesisRuleSpec { out_sym: "DOGE/GBP", leg1_sym: "DOGE/USDT", leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
 
-    // ── BTC + ETH AUD/CHF crosses (sufficient FX broker depth). ──
+    // ── BTC + ETH AUD/CHF crosses (sufficient FX provider depth). ──
     // AUDUSD inverted → USD/AUD. USDCHF NOT inverted (already USD/CHF).
     SynthesisRuleSpec { out_sym: "BTC/AUD", leg1_sym: "BTC/USDT", leg1_inv: false, leg2_sym: "AUDUSD", leg2_inv: true },
     SynthesisRuleSpec { out_sym: "BTC/CHF", leg1_sym: "BTC/USDT", leg1_inv: false, leg2_sym: "USDCHF", leg2_inv: false },

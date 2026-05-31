@@ -9,9 +9,6 @@ use std::collections::BTreeMap;
 pub struct WeightsFile {
     #[serde(default)]
     pub generated_at: String,
-    /// Stablecoin to USD rates for quote triangulation.
-    #[serde(default)]
-    pub stable_rates: BTreeMap<String, f64>,
     /// cmc_slug -> { "BTC/USDT": volume_usd, ... }
     #[serde(default)]
     pub pair_volumes: BTreeMap<String, BTreeMap<String, f64>>,

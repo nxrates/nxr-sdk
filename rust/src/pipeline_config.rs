@@ -373,6 +373,8 @@ pub struct NetworkYml {
 
 /// `network.bars:` — per-feed multicast addr+port. Empty fields fall back to
 /// the audit-frozen const values to keep deploy stable when YAML is silent.
+/// 2026-06-01: synth shares the same leg as native (operator: "s10_synth and
+/// s10 are the same object") — only 2 legs total now (s10, renko).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct BarsMcastYml {
     #[serde(default)]
@@ -380,17 +382,9 @@ pub struct BarsMcastYml {
     #[serde(default)]
     pub s10_port: Option<u16>,
     #[serde(default)]
-    pub s10_synth_addr: Option<String>,
-    #[serde(default)]
-    pub s10_synth_port: Option<u16>,
-    #[serde(default)]
     pub renko_addr: Option<String>,
     #[serde(default)]
     pub renko_port: Option<u16>,
-    #[serde(default)]
-    pub renko_synth_addr: Option<String>,
-    #[serde(default)]
-    pub renko_synth_port: Option<u16>,
 }
 
 /// `server:` block — REST/WS layer cfg. Phase 59.R2C.5 moved

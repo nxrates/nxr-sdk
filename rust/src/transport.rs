@@ -231,23 +231,22 @@ pub enum BarKind {
 }
 
 impl BarKind {
-    /// Producer label used in metric tags + `BarSource::label()`.
+    /// Producer label used in metric tags. Synth and native share the same
+    /// multicast leg + label (operator 2026-06-01: "s10_synth and s10 are
+    /// the same object"). Consumers filter by ticker_id payload.
     #[inline]
-    pub fn label(self, synth: bool) -> &'static str {
-        match (self, synth) {
-            (BarKind::S10, false) => "s10",
-            (BarKind::S10, true) => "s10_synth",
-            (BarKind::Renko, false) => "renko",
-            (BarKind::Renko, true) => "renko_synth",
+    pub fn label(self) -> &'static str {
+        match self {
+            BarKind::S10 => "s10",
+            BarKind::Renko => "renko",
         }
     }
 
     /// Resolve UDP multicast (addr, port) for this bar feed.
     ///
     /// Reads `NXR_CONFIG` once per process (OnceLock-cached). Falls back to
-    /// audit-frozen defaults when YAML is silent or unparseable. Production
-    /// `config.yml` ships canonical values (phase 59.R2C.6).
-    pub fn resolve_mcast(self, synth: bool) -> ([u8; 4], u16) {
+    /// audit-frozen defaults when YAML is silent or unparseable.
+    pub fn resolve_mcast(self) -> ([u8; 4], u16) {
         use crate::pipeline_config::{BarsMcastYml, ConfigHint, PipelineYml};
         use std::sync::OnceLock;
         static CFG: OnceLock<BarsMcastYml> = OnceLock::new();
@@ -256,45 +255,24 @@ impl BarKind {
                 .map(|p| p.network.bars)
                 .unwrap_or_default()
         });
-        match (self, synth) {
-            (BarKind::S10, false) => (
+        match self {
+            BarKind::S10 => (
                 bars.s10_addr.as_deref().and_then(parse_v4_addr).unwrap_or([239, 0, 42, 3]),
                 bars.s10_port.unwrap_or(40008),
             ),
-            (BarKind::S10, true) => (
-                bars.s10_synth_addr.as_deref().and_then(parse_v4_addr).unwrap_or([239, 0, 42, 5]),
-                bars.s10_synth_port.unwrap_or(40010),
-            ),
-            (BarKind::Renko, false) => (
+            BarKind::Renko => (
                 bars.renko_addr.as_deref().and_then(parse_v4_addr).unwrap_or([239, 0, 42, 4]),
                 bars.renko_port.unwrap_or(40009),
-            ),
-            (BarKind::Renko, true) => (
-                bars.renko_synth_addr.as_deref().and_then(parse_v4_addr).unwrap_or([239, 0, 42, 6]),
-                bars.renko_synth_port.unwrap_or(40011),
             ),
         }
     }
 }
 
 /// Bar producer source: full-fanout `Native` or single-ticker `Synth(id)`.
-/// Shared by `core::bars_s10` + `core::bars_renko` (2026-06-01).
+/// Both flavors share the same multicast leg + label per BarKind; the synth
+/// variant just filters incoming index records to one synth ticker_id.
 #[derive(Debug, Clone, Copy)]
 pub enum BarSource {
     Native,
     Synth(u64),
-}
-
-impl BarSource {
-    /// Producer label for tracing + metrics. Combines synth-mode + bar kind.
-    #[inline]
-    pub fn label(&self, kind: BarKind) -> &'static str {
-        kind.label(matches!(self, BarSource::Synth(_)))
-    }
-
-    /// UDP multicast (addr, port) for this source.
-    #[inline]
-    pub fn mcast_addr(&self, kind: BarKind) -> ([u8; 4], u16) {
-        kind.resolve_mcast(matches!(self, BarSource::Synth(_)))
-    }
 }

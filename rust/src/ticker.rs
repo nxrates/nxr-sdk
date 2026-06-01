@@ -104,13 +104,15 @@ pub fn resolve_ticker_id(symbol: &str) -> u64 {
 }
 
 #[inline]
-fn fnv1a_64(data: &[u8]) -> u64 {
+const fn fnv1a_64(data: &[u8]) -> u64 {
     const FNV_OFFSET: u64 = 14695981039346656037;
     const FNV_PRIME: u64 = 1099511628211;
     let mut hash = FNV_OFFSET;
-    for &byte in data {
-        hash ^= byte as u64;
+    let mut i = 0;
+    while i < data.len() {
+        hash ^= data[i] as u64;
         hash = hash.wrapping_mul(FNV_PRIME);
+        i += 1;
     }
     hash
 }

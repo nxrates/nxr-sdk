@@ -130,6 +130,7 @@ fn rollup_10s_to_60s() {
             let c = o + 0.25;
             Ohlc {
                 ts: base_ms + (i as i64) * TF_10S,
+                close_ts: base_ms + (i as i64) * TF_10S + TF_10S - 1,
                 open: o,
                 high: h,
                 low: l,

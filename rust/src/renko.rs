@@ -238,10 +238,13 @@ impl RenkoGenerator {
     }
 
     fn compute_brick_size(&mut self, price: f64, timestamp_ms: i64, sigma_pct: f64) -> f64 {
-        // K_FLOOR defends against boundary-clamped k from a degenerate
-        // calibration (see docs/internal/renko-synth-audit-2026-05-26.md).
-        let k_eff = (self.config.multiplier as f64).max(K_FLOOR);
-        let raw_pct = k_eff * sigma_pct;
+        let k = self.config.multiplier as f64;
+        if !k.is_finite() || k < K_FLOOR {
+            self.current_brick_size = 0.0;
+            self.current_grid_step = 0.0;
+            return 0.0;
+        }
+        let raw_pct = k * sigma_pct;
         // Floor only — no ceiling (markets be markets, see module doc).
         let clamped_pct = raw_pct.max(self.config.min_pct as f64);
         let raw_brick = price * clamped_pct;

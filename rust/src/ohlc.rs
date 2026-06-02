@@ -41,14 +41,17 @@ use mitch::common::CI_SCALE;
 use crate::tdwap::decode_ci_ubp;
 
 use crate::ipc::record::IndexRecord;
+use std::collections::HashMap;
 
 /// Lightweight OHLC candle for chart / REST output.
 ///
 /// Decode `avg_ci_ubp` via `(avg_ci_ubp / CI_SCALE)^2`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ohlc {
-    /// Bucket-start epoch ms (UTC).
+    /// Bucket-start epoch ms (UTC). For s10 rollup this is the bar open time.
     pub ts: i64,
+    /// Bar close epoch ms (UTC). Used by [`rollup`] straddler policy.
+    pub close_ts: i64,
     /// Open price (first mid in bucket).
     pub open: f64,
     /// High price (max mid in bucket).
@@ -73,6 +76,7 @@ pub struct Ohlc {
 #[derive(Clone, Copy)]
 struct BucketState {
     ts: i64,
+    tf_ms: i64,
     open: f64,
     high: f64,
     low: f64,
@@ -85,9 +89,10 @@ struct BucketState {
 
 impl BucketState {
     #[inline]
-    fn new(ts: i64, mid: f64, vbid: u32, vask: u32, ci_ubp: f64) -> Self {
+    fn new(ts: i64, tf_ms: i64, mid: f64, vbid: u32, vask: u32, ci_ubp: f64) -> Self {
         Self {
             ts,
+            tf_ms,
             open: mid,
             high: mid,
             low: mid,
@@ -119,6 +124,7 @@ impl BucketState {
         let avg_ci_ubp = encode_avg_ci_ubp(self.sum_ci_ubp, self.tick_count);
         Ohlc {
             ts: self.ts,
+            close_ts: self.ts + self.tf_ms - 1,
             open: self.open,
             high: self.high,
             low: self.low,
@@ -196,13 +202,13 @@ pub fn idx_to_ohlc(records: &[IndexRecord], tf_ms: i64) -> Vec<Ohlc> {
             }
             Some(state) if bs > state.ts => {
                 out.push(state.finalize());
-                cur = Some(BucketState::new(bs, mid, vbid, vask, ci_ubp));
+                cur = Some(BucketState::new(bs, tf_ms, mid, vbid, vask, ci_ubp));
             }
             Some(_) => {
                 // bs < state.ts: out-of-order record, skip.
             }
             None => {
-                cur = Some(BucketState::new(bs, mid, vbid, vask, ci_ubp));
+                cur = Some(BucketState::new(bs, tf_ms, mid, vbid, vask, ci_ubp));
             }
         }
     }
@@ -259,14 +265,14 @@ where
                         }
                         Some(state) if bs > state.ts => {
                             let closed = state.clone();
-                            self.cur = Some(BucketState::new(bs, mid, vbid, vask, ci_ubp));
+                            self.cur = Some(BucketState::new(bs, self.tf_ms, mid, vbid, vask, ci_ubp));
                             return Some(closed.finalize());
                         }
                         Some(_) => {
                             // Out-of-order; drop.
                         }
                         None => {
-                            self.cur = Some(BucketState::new(bs, mid, vbid, vask, ci_ubp));
+                            self.cur = Some(BucketState::new(bs, self.tf_ms, mid, vbid, vask, ci_ubp));
                         }
                     }
                 }
@@ -281,9 +287,9 @@ where
 
 /// Roll a TF-N series up to TF-M where M = k·N (k integer ≥ 2).
 ///
-/// OHLC monoid: open=first.open, close=last.close, high=max, low=min,
-/// vbid/vask/tick_count summed. `avg_ci_ubp` is rebuilt by un-compressing
-/// each input bar's stored value, weighting by `tick_count`, and re-encoding.
+/// Straddler policy: when an input bar spans two dst buckets, the open leg
+/// (open/high/low) updates the open bucket and the close leg (close/high/low)
+/// updates the close bucket. Well-formed s10 bars rarely straddle.
 pub fn rollup(series: &[Ohlc], src_tf_ms: i64, dst_tf_ms: i64) -> Vec<Ohlc> {
     assert!(src_tf_ms > 0 && dst_tf_ms > 0, "TFs must be positive");
     assert!(
@@ -294,53 +300,36 @@ pub fn rollup(series: &[Ohlc], src_tf_ms: i64, dst_tf_ms: i64) -> Vec<Ohlc> {
         return Vec::new();
     }
 
-    let mut out: Vec<Ohlc> = Vec::with_capacity(series.len() / 4 + 1);
-    let mut cur: Option<BucketState> = None;
+    let mut buckets: HashMap<i64, BucketState> = HashMap::new();
 
-    for bar in series {
-        let bs = bucket_start(bar.ts, dst_tf_ms);
+    let mut touch = |bs: i64, bar: &Ohlc, open_px: Option<f64>, close_px: Option<f64>| {
         let ci_ubp_bar = decode_ci_ubp(bar.avg_ci_ubp);
-        // Weight ci by tick_count so the rolled-up mean is a true tick-weighted
-        // mean (matches what idx_to_ohlc would compute on the raw records).
         let ci_contrib = ci_ubp_bar * bar.tick_count as f64;
-        match cur.as_mut() {
-            Some(state) if state.ts == bs => {
-                if bar.high > state.high {
-                    state.high = bar.high;
+        match buckets.entry(bs) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let st = e.get_mut();
+                if let Some(c) = close_px {
+                    st.close = c;
                 }
-                if bar.low < state.low {
-                    state.low = bar.low;
+                if bar.high > st.high {
+                    st.high = bar.high;
                 }
-                state.close = bar.close;
-                state.vbid += bar.vbid;
-                state.vask += bar.vask;
-                state.tick_count = state.tick_count.saturating_add(bar.tick_count);
-                state.sum_ci_ubp += ci_contrib;
+                if bar.low < st.low {
+                    st.low = bar.low;
+                }
+                st.vbid += bar.vbid;
+                st.vask += bar.vask;
+                st.tick_count = st.tick_count.saturating_add(bar.tick_count);
+                st.sum_ci_ubp += ci_contrib;
             }
-            Some(state) if bs > state.ts => {
-                out.push(state.finalize());
-                cur = Some(BucketState {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(BucketState {
                     ts: bs,
-                    open: bar.open,
+                    tf_ms: dst_tf_ms,
+                    open: open_px.unwrap_or(bar.open),
                     high: bar.high,
                     low: bar.low,
-                    close: bar.close,
-                    vbid: bar.vbid,
-                    vask: bar.vask,
-                    tick_count: bar.tick_count,
-                    sum_ci_ubp: ci_contrib,
-                });
-            }
-            Some(_) => {
-                // Out-of-order input bar; skip.
-            }
-            None => {
-                cur = Some(BucketState {
-                    ts: bs,
-                    open: bar.open,
-                    high: bar.high,
-                    low: bar.low,
-                    close: bar.close,
+                    close: close_px.unwrap_or(bar.close),
                     vbid: bar.vbid,
                     vask: bar.vask,
                     tick_count: bar.tick_count,
@@ -348,13 +337,24 @@ pub fn rollup(series: &[Ohlc], src_tf_ms: i64, dst_tf_ms: i64) -> Vec<Ohlc> {
                 });
             }
         }
+    };
+
+    for bar in series {
+        let open_bs = bucket_start(bar.ts, dst_tf_ms);
+        let close_bs = bucket_start(bar.close_ts, dst_tf_ms);
+        if open_bs == close_bs {
+            touch(open_bs, bar, Some(bar.open), Some(bar.close));
+        } else {
+            touch(open_bs, bar, Some(bar.open), None);
+            touch(close_bs, bar, None, Some(bar.close));
+        }
     }
 
-    if let Some(state) = cur {
-        out.push(state.finalize());
-    }
-
-    out
+    let mut keys: Vec<i64> = buckets.keys().copied().collect();
+    keys.sort_unstable();
+    keys.into_iter()
+        .filter_map(|bs| buckets.remove(&bs).map(|s| s.finalize()))
+        .collect()
 }
 
 // ── Re-exports for test convenience ─────────────────────────────────────
@@ -375,6 +375,7 @@ pub fn ohlc_ci_ubp(avg_ci_ubp: u16) -> f64 {
 pub fn bar_to_ohlc(b: &mitch::bar::Bar) -> Ohlc {
     Ohlc {
         ts: b.open_time_ms(),
+        close_ts: b.close_time_ms(),
         open: b.open,
         high: b.high,
         low: b.low,

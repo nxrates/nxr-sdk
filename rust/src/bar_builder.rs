@@ -255,9 +255,21 @@ impl Default for BarAccumulator {
     fn default() -> Self { Self::new() }
 }
 
-/// Create a flat (zero-tick) bar at the given timestamp for gap filling.
-/// Uses the reference price for all OHLC fields.
-pub fn flat_bar(epoch_ms: i64, ref_price: f64) -> Bar {
-    let mts = timestamp::from_epoch_ms(epoch_ms);
-    Bar::new_ohlcv(mts, mts, ref_price, ref_price, ref_price, ref_price, 0, 0, 0)
+/// Create a flat (zero-tick) bar for gap filling.
+/// `bucket_open_ms` is the 10 s bucket start; close is `bucket_open + BAR_MS - 1`.
+pub fn flat_bar(bucket_open_ms: i64, ref_price: f64) -> Bar {
+    const BAR_MS: i64 = 10_000;
+    let open_mts = timestamp::from_epoch_ms(bucket_open_ms);
+    let close_mts = timestamp::from_epoch_ms(bucket_open_ms + BAR_MS - 1);
+    Bar::new_ohlcv(
+        open_mts,
+        close_mts,
+        ref_price,
+        ref_price,
+        ref_price,
+        ref_price,
+        0,
+        0,
+        0,
+    )
 }

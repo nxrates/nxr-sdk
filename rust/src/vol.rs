@@ -296,31 +296,65 @@ impl LiveVolRing {
     /// Rolls the s10 bar into the current open 30-min vol bin via the OHLC
     /// monoid: O = first s10.open, H = rolling max(s10.high), L = rolling
     /// min(s10.low), C = latest s10.close. This is byte-identical to the
-    /// offline `ohlc::rollup(10_000, 1_800_000)` aggregation.
+    /// offline `ohlc::rollup(10_000, 1_800_000)` aggregation when open and
+    /// close fall in the same 30-min bucket.
     ///
-    /// Closes and finalizes the prior bin if the bar advanced into a new 30-min
-    /// bucket, then opens/extends the bin for `ts_ms`. Returns `true` if at
-    /// least one bin was finalized (caller may recompute σ on a boundary).
+    /// Prefer [`Self::observe_s10`] for production s10 bars whose
+    /// `close_time_ms` may straddle the next 30-min boundary.
     pub fn observe(&mut self, ts_ms: i64, o: f64, h: f64, l: f64, c: f64) -> bool {
+        self.observe_s10(ts_ms, ts_ms, o, h, l, c)
+    }
+
+    /// Observe one CLOSED s10 bar, mirroring `ohlc::rollup` straddler semantics:
+    /// when `close_ts_ms` lands in the next 30-min bucket, the bar's H/L touch
+    /// both bins; open updates only the open bucket, close only the close bucket.
+    pub fn observe_s10(
+        &mut self,
+        open_ts_ms: i64,
+        close_ts_ms: i64,
+        o: f64,
+        h: f64,
+        l: f64,
+        c: f64,
+    ) -> bool {
         if !(o.is_finite() && h.is_finite() && l.is_finite() && c.is_finite()
             && o > 0.0 && h > 0.0 && l > 0.0 && c > 0.0)
         {
             return false;
         }
-        let bs = Self::bin_start(ts_ms);
+        let open_bs = Self::bin_start(open_ts_ms);
+        let close_bs = Self::bin_start(close_ts_ms);
+        if open_bs == close_bs {
+            return self.touch_bin(open_bs, o, c, h, l, Some(o), Some(c));
+        }
+        let mut finalized = false;
+        finalized |= self.touch_bin(open_bs, o, c, h, l, Some(o), None);
+        finalized |= self.touch_bin(close_bs, o, c, h, l, None, Some(c));
+        finalized
+    }
+
+    fn touch_bin(
+        &mut self,
+        bs: i64,
+        bar_open: f64,
+        bar_close: f64,
+        h: f64,
+        l: f64,
+        set_open: Option<f64>,
+        set_close: Option<f64>,
+    ) -> bool {
         let mut finalized = false;
         match self.open_bin {
             None => {
+                let o = set_open.unwrap_or(bar_open);
+                let c = set_close.unwrap_or(bar_close);
                 self.open_bin = Some((bs, o, h, l, c));
             }
             Some((cur_start, ..)) if bs > cur_start => {
-                // Crossed into a new bin — finalize the closed one. Empty
-                // intervening 30-min slots produce no row, identical to the
-                // offline rollup which only emits buckets it observed (the s10
-                // input itself is gapless, so quiet windows still carry flat
-                // s10 bars and the bins are continuous).
                 self.finalize_open();
                 finalized = true;
+                let o = set_open.unwrap_or(bar_open);
+                let c = set_close.unwrap_or(bar_close);
                 self.open_bin = Some((bs, o, h, l, c));
             }
             Some((cur_start, _o, ref mut bh, ref mut bl, ref mut bc)) => {
@@ -331,7 +365,9 @@ impl LiveVolRing {
                 if l < *bl {
                     *bl = l;
                 }
-                *bc = c; // last s10.close in the bin
+                if let Some(nc) = set_close {
+                    *bc = nc;
+                }
             }
         }
         finalized

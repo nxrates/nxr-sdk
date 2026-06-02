@@ -531,19 +531,41 @@ pub struct CalibrationYml {
     pub tolerance: f64,
     pub mult_bounds: [f64; 2],
     /// Per-pair `target_bpd` overrides keyed by pair string (e.g. "USDC/USDT"
-    /// → 50). Defaults to flat `target_bpd` if no override matches.
-    /// Phase 60.π (2026-05-31): replaces deprecated `target_bpd_by_class`.
-    /// Operator policy: simple 300 default + manual per-pair override list.
+    /// → 50). Highest-priority lookup; reserve for genuine per-pair exceptions
+    /// the class default can't express (a specific LSD/LST, a one-off regime).
     #[serde(default)]
     pub target_bpd_overrides: BTreeMap<String, f64>,
+    /// Per-asset-class `target_bpd` defaults keyed by `AssetClassBucket::as_key`
+    /// (e.g. "crypto_stable" → 50). Applied when no per-pair override matches,
+    /// using the class detected by `asset_class::bucket_for_pair` (which reads
+    /// MITCH wire bits + the `cexs.stablecoins` membership list). Lets every
+    /// stable/stable pair inherit the low target by CLASS, so a newly listed
+    /// stablecoin can't silently fall back to the flat 300 default just because
+    /// nobody added it to the per-pair override list.
+    #[serde(default)]
+    pub target_bpd_by_class: BTreeMap<String, f64>,
 }
 
 impl CalibrationYml {
-    /// Resolve `target_bpd` for a given pair string (e.g. "BTC/USDT").
-    /// Lookup order: per-pair override → flat top-level `target_bpd`.
-    /// Always returns Some (no implicit skip — operator policy: never skip a day).
+    /// Resolve `target_bpd` for a given pair string (e.g. "BTC/USDT") WITHOUT
+    /// class detection. Lookup: per-pair override → flat top-level `target_bpd`.
+    /// Prefer `target_for_pair_classed` where the caller knows the asset class.
     pub fn target_for_pair(&self, pair: &str) -> f64 {
         self.target_bpd_overrides.get(pair).copied().unwrap_or(self.target_bpd)
+    }
+
+    /// Resolve `target_bpd` using the detected asset-class bucket.
+    /// Lookup order: per-pair override → per-class default → flat `target_bpd`.
+    /// `class_key` is `AssetClassBucket::as_key()` (e.g. "crypto_stable").
+    /// Never skips — operator policy: the calibrator always has a target.
+    pub fn target_for_pair_classed(&self, pair: &str, class_key: &str) -> f64 {
+        if let Some(&v) = self.target_bpd_overrides.get(pair) {
+            return v;
+        }
+        if let Some(&v) = self.target_bpd_by_class.get(class_key) {
+            return v;
+        }
+        self.target_bpd
     }
 
     /// Assert the YAML `mult_bounds` agree with the SDK's single-source renko
@@ -588,4 +610,44 @@ pub struct PipelineParamsYml {
     pub exchanges: Vec<String>,
     #[serde(default)]
     pub pairs: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cal() -> CalibrationYml {
+        CalibrationYml {
+            target_bpd: 300.0,
+            k_fit_windows_days: vec![30],
+            min_window_days: 30,
+            max_rounds: 20,
+            tolerance: 0.05,
+            mult_bounds: [0.05, 4.0],
+            target_bpd_overrides: BTreeMap::from([("USDC/USDT".to_string(), 50.0)]),
+            target_bpd_by_class: BTreeMap::from([("crypto_stable".to_string(), 50.0)]),
+        }
+    }
+
+    #[test]
+    fn classed_resolution_order() {
+        let c = cal();
+        // 1. explicit per-pair override wins over everything.
+        assert_eq!(c.target_for_pair_classed("USDC/USDT", "crypto_stable"), 50.0);
+        // 2. no override, but class default applies — the whole point: a stable
+        //    pair NOT in the override list still gets 50 by class detection.
+        assert_eq!(c.target_for_pair_classed("FDUSD/USDT", "crypto_stable"), 50.0);
+        // 3. no override, no class default → flat default.
+        assert_eq!(c.target_for_pair_classed("BTC/USDT", "crypto_major"), 300.0);
+        // unclassified bucket also falls back to flat default.
+        assert_eq!(c.target_for_pair_classed("FOO/BAR", "default"), 300.0);
+    }
+
+    #[test]
+    fn non_classed_helper_unchanged() {
+        let c = cal();
+        // Legacy path: only the per-pair override map, no class layer.
+        assert_eq!(c.target_for_pair("USDC/USDT"), 50.0);
+        assert_eq!(c.target_for_pair("FDUSD/USDT"), 300.0); // not in override map
+    }
 }

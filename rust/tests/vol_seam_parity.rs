@@ -90,16 +90,29 @@ fn offline_sigma_rows(s10: &[Bar], period: usize) -> Vec<f64> {
 }
 
 /// Live σ rows: feed each closed s10 bar into the LiveVolRing using the EXACT
-/// timestamp accessor the production renko producer uses.
-///
-/// R1 PIN: production at `core/src/bars_renko.rs` feeds the vol ring
-/// `bar.open_time_ms()` (open-time binning, matching the offline `.vol`
-/// builder's `ohlc::rollup` → `bucket_start(open_time_ms)`). If anyone flips
-/// that back to `close_time_ms()`, the seam-parity assertions in this test
-/// FAIL — see `live_sigma_rows_close_time` (the negative control) which proves
-/// close-time binning diverges from offline on the non-degenerate fixture.
+/// open/close timestamps the production renko producer uses (`observe_s10`).
 fn live_sigma_rows(s10: &[Bar], period: usize) -> Vec<f64> {
-    live_sigma_rows_with(s10, period, |b| b.open_time_ms())
+    let mut ring = LiveVolRing::new(4096, period);
+    for bar in s10 {
+        ring.observe_s10(
+            bar.open_time_ms(),
+            bar.close_time_ms(),
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+        );
+    }
+    let last = s10.last().unwrap();
+    ring.observe_s10(
+        last.close_time_ms() + MS_PER_30MIN,
+        last.close_time_ms() + MS_PER_30MIN,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    );
+    (0..ring.len()).map(|i| ring.sigma_pct(i)).collect()
 }
 
 /// Negative control: bin the live ring by CLOSE time (the pre-R1-fix production
@@ -133,8 +146,9 @@ fn offline_vol_rows_match_live_ring_over_cooldown_boundary() {
     let offline = offline_sigma_rows(&s10, period);
     let live = live_sigma_rows(&s10, period);
 
-    assert_eq!(offline.len(), n_bins, "offline bin count");
-    assert_eq!(live.len(), n_bins, "live bin count");
+    assert_eq!(offline.len(), live.len(), "offline/live bin count");
+    let expected_bins = n_bins + 1; // last s10 bar straddles into bin n_bins
+    assert_eq!(offline.len(), expected_bins, "offline bin count");
     for (i, (&o, &l)) in offline.iter().zip(live.iter()).enumerate() {
         assert!(
             (o - l).abs() < 1e-12,

@@ -14,10 +14,10 @@
 //! sigma_pct  = sqrt(v.max(0))
 //! ```
 //!
-//! This emits the SAME per-bin std-of-log-price contract the old
-//! `parkinson_sigma()` emitted → downstream EMA(28) → MTF inverse-variance
-//! winsorized blend → `brick_pct = max(k·σ, MIN_BRICK_PCT)` stays byte-stable;
-//! ONLY the per-bin kernel + its input source change.
+//! Emits the same per-bin std-of-log-price contract as the prior Parkinson
+//! kernel → downstream EMA(28) → MTF inverse-variance winsorized blend →
+//! `brick_pct = max(k·σ, MIN_BRICK_PCT)` stays byte-stable; ONLY the per-bin
+//! kernel + its input source change.
 
 /// Rogers-Satchell variance for one OHLC bucket.
 ///

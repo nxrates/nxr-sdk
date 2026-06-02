@@ -85,7 +85,7 @@ pub use providers::{get_market_provider_by_id, get_market_provider_id_by_name};
 // ---- Aggregation primitives ----
 
 pub use agg::{
-    TickAccumulator, RunningStats, is_valid_tick, parkinson_sigma,
+    TickAccumulator, RunningStats, is_valid_tick,
     now_ns, now_ms, now_sec, now_mts,
 };
 

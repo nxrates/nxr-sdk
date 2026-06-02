@@ -107,7 +107,7 @@ pub fn acf(series: &[f64], lag: usize) -> f64 {
 /// Skips bars where `low <= 0` (treated as invalid). Returns 0.0 when no
 /// valid bars are found. Arrays must be the same length.
 ///
-/// For a single-bar estimator see [`crate::parkinson_sigma`].
+/// For per-bin σ over OHLC see [`crate::vol_estimator::rs_sigma_from_ohlc`].
 pub fn parkinson_vol(highs: &[f64], lows: &[f64]) -> f64 {
     let n = highs.len().min(lows.len());
     let mut sum = 0.0;

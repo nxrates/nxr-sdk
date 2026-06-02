@@ -3,7 +3,6 @@
 //! - `TickAccumulator`: buffers raw ticks, flushes to `Index` every aggregation cycle
 //! - `RunningStats`: EMA-based z-score for outlier rejection
 //! - `is_valid_tick`: sanity check on bid/ask
-//! - `parkinson_sigma`: single-observation Parkinson volatility estimator
 //! - Timestamp helpers: `now_ns`, `now_mts`, `now_ms`, `now_sec`
 
 use mitch::Index;
@@ -181,22 +180,4 @@ impl TickAccumulator {
         self.acc_rejected = 0;
         Some(index)
     }
-}
-
-// ---- Volatility ----
-
-/// Single-observation Parkinson volatility estimator.
-///
-/// Given a high and low price for a period, returns the Parkinson sigma estimate:
-///   sigma = |ln(high/low)| / (2 * sqrt(ln(2)))
-///
-/// More efficient than close-to-close estimators because it uses range information.
-/// Returns 0.0 if high <= 0 or low <= 0 or high < low.
-#[inline]
-pub fn parkinson_sigma(high: f64, low: f64) -> f64 {
-    if high <= 0.0 || low <= 0.0 || high < low {
-        return 0.0;
-    }
-    let log_hl = (high / low).ln();
-    log_hl.abs() / (2.0 * std::f64::consts::LN_2.sqrt())
 }

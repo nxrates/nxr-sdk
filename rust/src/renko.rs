@@ -7,9 +7,9 @@
 //! and corresponds to the calibrator-aligned Parkinson σ at 30-min horizon.
 //!
 //! The σ source is the caller's concern — offline callers can resolve it
-//! from a memory-mapped `.vol` file via [`crate::parkinson::MtfParkinsonCalculator`];
+//! from a memory-mapped `.vol` file via [`crate::vol::MtfVolCalculator`];
 //! live callers maintain a Δt-weighted EWMA. The engine itself does not
-//! consult any [`crate::parkinson::VolSource`] — it takes a number.
+//! consult any [`crate::vol::VolSource`] — it takes a number.
 //!
 //! NO upper ceiling on brick % — operator directive 2026-05-24 ("markets be
 //! markets"): an adaptive Renko that caps brick % on high-σ days biases

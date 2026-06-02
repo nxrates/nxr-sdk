@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::parkinson::VolConfig;
+use crate::vol::VolConfig;
 
 /// Default min 24h USD volume below which the core weights builder skips
 /// emitting a synth injection rule (stablecoin- or USD-quoted pairs).

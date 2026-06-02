@@ -89,12 +89,8 @@ fn leg_variance(k: &OhlcLite, est: VarianceEstimator) -> f64 {
             INV_4LN2 * r * r
         }
         VarianceEstimator::RogersSatchell => {
-            // RS is non-negative by construction when H≥max(O,C) and L≤min(O,C).
-            let lhc = (k.h / k.c).ln();
-            let lho = (k.h / k.o).ln();
-            let llc = (k.l / k.c).ln();
-            let llo = (k.l / k.o).ln();
-            lhc * lho + llc * llo
+            // ONE RS kernel for the whole project (offline .vol, live ring, synth).
+            crate::vol_estimator::rs_variance(k.o, k.h, k.l, k.c)
         }
     }
 }

@@ -28,7 +28,6 @@ pub mod logging;
 pub mod memory;
 pub mod metrics;
 pub mod ohlc;
-pub mod parkinson;
 pub mod pipeline_config;
 pub mod providers;
 pub mod publisher;
@@ -40,6 +39,8 @@ pub mod synth;
 pub mod tdwap;
 pub mod ticker;
 pub mod transport;
+pub mod vol;
+pub mod vol_estimator;
 pub mod weights_schema;
 pub mod ws_client;
 
@@ -68,7 +69,8 @@ pub use shard::{BarShardWriter, IdxShardWriter};
 
 // ---- Renko engine (live + offline shared) ----
 
-pub use parkinson::{read_vol_tail, LiveVolRing, MtfParkinsonCalculator, VolConfig, VolSource};
+pub use vol::{read_vol_tail, LiveVolRing, MtfVolCalculator, VolConfig, VolSource};
+pub use vol_estimator::{rs_sigma_from_ohlc, rs_variance};
 pub use renko::{RenkoConfig, RenkoGenerator};
 pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
 

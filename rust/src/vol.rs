@@ -1,18 +1,22 @@
-//! Multi-timeframe Parkinson volatility.
+//! Multi-timeframe volatility blend over Rogers-Satchell s10-OHLC bins.
 //!
-//! Inverse-variance weighted blend of winsorized means across configurable
+//! Canonical per-bin σ = Rogers-Satchell over s10-resampled 30-min OHLC
+//! (see [`crate::vol_estimator`]). This module owns the EMA(28) smoothing +
+//! the inverse-variance-weighted winsorized MTF blend across configurable
 //! lookback windows. Source data (per-bin sigma_pct) is provided by anything
 //! that implements [`VolSource`]: a memory-mapped .vol file (backtest), an
 //! in-memory ring buffer (real-time), or a test fixture.
 //!
 //! The Renko engine itself does not depend on `VolSource`: callers resolve σ
-//! via `MtfParkinsonCalculator` then pass the number into
+//! via `MtfVolCalculator` then pass the number into
 //! `RenkoGenerator::feed_tick_with_sigma`. This trait remains the input
 //! contract for the calculator only.
 
 use serde::{Deserialize, Serialize};
 
-/// Abstract source of per-bin Parkinson sigma values.
+use crate::vol_estimator::rs_sigma_from_ohlc;
+
+/// Abstract source of per-bin sigma values.
 ///
 /// Bins are typically 30 minutes wide. Implementors provide O(1) length and
 /// O(1) sigma lookup, plus binary-search-style timestamp-to-index mapping.
@@ -41,6 +45,18 @@ pub struct VolConfig {
     pub sigma_blend_windows_days: Vec<usize>,
     pub winsorize_pct: [f64; 2],
     pub winsorize_min_samples: usize,
+    /// Minimum interval (ms) between brick-size recalibration recomputes. The
+    /// canonical 12-hour cooldown: the offline `.vol` → `.k` recalibration is
+    /// re-run at most every 12h; the 30-min vol bin is unchanged.
+    #[serde(default = "default_recompute_cooldown_ms")]
+    pub recompute_cooldown_ms: i64,
+}
+
+/// Canonical recalibration cooldown: 12 hours in ms.
+pub const DEFAULT_RECOMPUTE_COOLDOWN_MS: i64 = 43_200_000;
+
+fn default_recompute_cooldown_ms() -> i64 {
+    DEFAULT_RECOMPUTE_COOLDOWN_MS
 }
 
 impl Default for VolConfig {
@@ -50,22 +66,23 @@ impl Default for VolConfig {
             sigma_blend_windows_days: vec![14, 60, 180],
             winsorize_pct: [0.05, 0.95],
             winsorize_min_samples: 5,
+            recompute_cooldown_ms: DEFAULT_RECOMPUTE_COOLDOWN_MS,
         }
     }
 }
 
-/// Multi-timeframe Parkinson sigma blender.
+/// Multi-timeframe sigma blender.
 ///
-/// Reads 30-min Parkinson sigma from a `VolSource`, then blends across
+/// Reads 30-min Rogers-Satchell sigma from a `VolSource`, then blends across
 /// configurable lookback windows using inverse-variance weighting and
 /// winsorized mean for robustness.
-pub struct MtfParkinsonCalculator<'a, S: VolSource + ?Sized> {
+pub struct MtfVolCalculator<'a, S: VolSource + ?Sized> {
     source: &'a S,
     config: VolConfig,
     buf: Vec<f64>,
 }
 
-impl<'a, S: VolSource + ?Sized> MtfParkinsonCalculator<'a, S> {
+impl<'a, S: VolSource + ?Sized> MtfVolCalculator<'a, S> {
     pub fn new(source: &'a S, config: VolConfig) -> Self {
         Self { source, config, buf: Vec::new() }
     }
@@ -87,7 +104,7 @@ impl<'a, S: VolSource + ?Sized> MtfParkinsonCalculator<'a, S> {
         self.source.find_index_for_mts(mts)
     }
 
-    /// Blended Parkinson sigma at bin `hour_idx`.
+    /// Blended sigma at bin `hour_idx`.
     ///
     /// Returns the inverse-variance weighted blend of winsorized means
     /// across all configured lookback windows. Falls back to the bin's
@@ -135,28 +152,15 @@ impl<'a, S: VolSource + ?Sized> MtfParkinsonCalculator<'a, S> {
     }
 }
 
-/// 30 minutes in milliseconds — the canonical Parkinson bin width.
+/// 30 minutes in milliseconds — the canonical vol bin width.
 const VOL_BIN_MS: i64 = 1_800_000;
-
-/// Parkinson sigma from a 30-min bin's high/low.
-///
-/// `sigma = |ln(high/low)| / (2 * sqrt(ln 2))`. Mirrors
-/// `nxr_sdk::agg::parkinson_sigma` (kept inline here so `parkinson` has no
-/// `agg` dependency). Returns 0.0 for degenerate input.
-#[inline]
-fn parkinson_sigma_hl(high: f64, low: f64) -> f64 {
-    if high <= 0.0 || low <= 0.0 || high < low {
-        return 0.0;
-    }
-    (high / low).ln().abs() / (2.0 * std::f64::consts::LN_2.sqrt())
-}
 
 /// Online, in-process [`VolSource`] for the LIVE renko producer.
 ///
 /// This is the real-time twin of the offline `.vol` file ([`VolMmap`] in
-/// series-factory): it stores the SAME EMA-smoothed 30-min Parkinson
+/// series-factory): it stores the SAME EMA-smoothed 30-min Rogers-Satchell
 /// `sigma_pct` rows the offline `vol_builder` writes, so the LIVE renko brick
-/// size — computed via [`MtfParkinsonCalculator::compute_sigma`] over this
+/// size — computed via [`MtfVolCalculator::compute_sigma`] over this
 /// ring — is byte-identical to the offline brick size at the history↔live
 /// seam (given identical [`VolConfig`] and trailing data).
 ///
@@ -168,13 +172,14 @@ fn parkinson_sigma_hl(high: f64, low: f64) -> f64 {
 ///
 /// ## Construction
 ///
-/// Feed live mids via [`Self::observe`]; the ring buckets them into the
-/// current open 30-min HLC and, when a tick crosses into a new bucket,
-/// finalizes the closed bucket into one EMA-smoothed Parkinson row (matching
-/// `vol_builder::write_vol_records_from_hlc` exactly). Prime the trailing
-/// history on open via [`Self::prime_from_slice`] (e.g. from the persistent
-/// `.vol` tail) so the first live bin's blended σ equals the blend the
-/// backfill used for the boundary bin.
+/// Feed CLOSED s10 bars' O/H/L/C via [`Self::observe`]; the ring rolls them up
+/// into the current open 30-min OHLC bin (O = first s10.open, H = max s10.high,
+/// L = min s10.low, C = last s10.close) and, when a bar crosses into a new
+/// 30-min bucket, finalizes the closed bin into one EMA-smoothed
+/// Rogers-Satchell row (matching `vol_builder::build_vol_from_s10` exactly).
+/// Prime the trailing history on open via [`Self::prime_from_slice`] (e.g. from
+/// the persistent `.vol` tail) so the first live bin's blended σ equals the
+/// blend the backfill used for the boundary bin.
 ///
 /// ## Bounded memory
 ///
@@ -184,7 +189,7 @@ fn parkinson_sigma_hl(high: f64, low: f64) -> f64 {
 /// live blend.
 #[derive(Debug, Clone)]
 pub struct LiveVolRing {
-    /// EMA-smoothed Parkinson sigma per closed 30-min bin (oldest..newest).
+    /// EMA-smoothed Rogers-Satchell sigma per closed 30-min bin (oldest..newest).
     sigmas: std::collections::VecDeque<f64>,
     /// 30-min-aligned epoch_ms of each stored bin (parallel to `sigmas`).
     bin_starts: std::collections::VecDeque<i64>,
@@ -195,8 +200,10 @@ pub struct LiveVolRing {
     /// Count of bins ever finalized (drives the expanding-mean EMA seed,
     /// identical to `vol_builder`'s `i < ema_period` branch).
     finalized_count: usize,
-    /// Currently open bucket: (bin_start_ms, high, low). `None` until first obs.
-    open_bin: Option<(i64, f64, f64)>,
+    /// Currently open bin: `(bin_start_ms, open, high, low, close)`. `None`
+    /// until the first observed s10 bar. O = first s10.open, H/L rolling
+    /// max/min, C = latest s10.close.
+    open_bin: Option<(i64, f64, f64, f64, f64)>,
 }
 
 impl LiveVolRing {
@@ -253,16 +260,15 @@ impl LiveVolRing {
         self.open_bin = None;
     }
 
-    /// Finalize the currently open bucket into one EMA-smoothed Parkinson row.
+    /// Finalize the currently open bin into one EMA-smoothed Rogers-Satchell row.
     ///
-    /// Mirrors `vol_builder::write_vol_records_from_hlc`: first `ema_period`
-    /// bins use an expanding mean seed, then a standard EMA with
-    /// `alpha = 2/(ema_period+1)`.
+    /// Mirrors `vol_builder::build_vol_from_s10`: first `ema_period` bins use an
+    /// expanding mean seed, then a standard EMA with `alpha = 2/(ema_period+1)`.
     fn finalize_open(&mut self) {
-        let Some((bin_start, high, low)) = self.open_bin.take() else {
+        let Some((bin_start, open, high, low, close)) = self.open_bin.take() else {
             return;
         };
-        let sigma = parkinson_sigma_hl(high, low);
+        let sigma = rs_sigma_from_ohlc(open, high, low, close);
         let ema = if self.finalized_count < self.ema_period {
             // Expanding-mean seed. We track the running mean via prev_ema and
             // finalized_count to avoid retaining all raw sigmas.
@@ -285,40 +291,47 @@ impl LiveVolRing {
         }
     }
 
-    /// Observe one live mid quote. `high`/`low` should be the tick's ask/bid
-    /// (matching `vol_builder`'s H=ask, L=bid bucketing); pass `mid` for both
-    /// if only a composite price is available.
+    /// Observe one CLOSED s10 bar's OHLC, keyed by its bucket-start `ts_ms`.
     ///
-    /// Closes and finalizes any bins the timestamp has advanced past, then
-    /// opens/extends the bucket for `ts_ms`. Returns `true` if at least one
-    /// bin was finalized (caller may recompute σ on a boundary).
-    pub fn observe(&mut self, ts_ms: i64, high: f64, low: f64) -> bool {
-        if !(high.is_finite() && low.is_finite() && high > 0.0 && low > 0.0) {
+    /// Rolls the s10 bar into the current open 30-min vol bin via the OHLC
+    /// monoid: O = first s10.open, H = rolling max(s10.high), L = rolling
+    /// min(s10.low), C = latest s10.close. This is byte-identical to the
+    /// offline `ohlc::rollup(10_000, 1_800_000)` aggregation.
+    ///
+    /// Closes and finalizes the prior bin if the bar advanced into a new 30-min
+    /// bucket, then opens/extends the bin for `ts_ms`. Returns `true` if at
+    /// least one bin was finalized (caller may recompute σ on a boundary).
+    pub fn observe(&mut self, ts_ms: i64, o: f64, h: f64, l: f64, c: f64) -> bool {
+        if !(o.is_finite() && h.is_finite() && l.is_finite() && c.is_finite()
+            && o > 0.0 && h > 0.0 && l > 0.0 && c > 0.0)
+        {
             return false;
         }
         let bs = Self::bin_start(ts_ms);
         let mut finalized = false;
         match self.open_bin {
             None => {
-                self.open_bin = Some((bs, high.max(low), low.min(high)));
+                self.open_bin = Some((bs, o, h, l, c));
             }
-            Some((cur_start, _, _)) if bs > cur_start => {
-                // Crossed into a new bucket — finalize the closed one. Only the
-                // immediately-prior bucket carries data; any fully-empty
-                // intervening 30-min slots are skipped (no synthetic rows, same
-                // as the offline BTreeMap which only stores observed buckets).
+            Some((cur_start, ..)) if bs > cur_start => {
+                // Crossed into a new bin — finalize the closed one. Empty
+                // intervening 30-min slots produce no row, identical to the
+                // offline rollup which only emits buckets it observed (the s10
+                // input itself is gapless, so quiet windows still carry flat
+                // s10 bars and the bins are continuous).
                 self.finalize_open();
                 finalized = true;
-                self.open_bin = Some((bs, high.max(low), low.min(high)));
+                self.open_bin = Some((bs, o, h, l, c));
             }
-            Some((cur_start, ref mut h, ref mut l)) => {
+            Some((cur_start, _o, ref mut bh, ref mut bl, ref mut bc)) => {
                 debug_assert_eq!(cur_start, bs);
-                if high > *h {
-                    *h = high;
+                if h > *bh {
+                    *bh = h;
                 }
-                if low < *l {
-                    *l = low;
+                if l < *bl {
+                    *bl = l;
                 }
+                *bc = c; // last s10.close in the bin
             }
         }
         finalized
@@ -464,35 +477,40 @@ mod tests {
     #[test]
     fn calc_returns_fallback_on_small_source() {
         let src = StaticSource(vec![0.02]);
-        let mut calc = MtfParkinsonCalculator::new(&src, VolConfig::default());
+        let mut calc = MtfVolCalculator::new(&src, VolConfig::default());
         assert!((calc.compute_sigma(0) - 0.02).abs() < 1e-9);
     }
 
-    /// LiveVolRing must produce EMA-smoothed Parkinson rows byte-identical to
-    /// the offline `vol_builder` path for the same HLC bucket stream. This is
-    /// the seam-parity guarantee: same input bins ⇒ same `.vol` rows ⇒ same σ.
+    /// LiveVolRing must produce EMA-smoothed Rogers-Satchell rows byte-identical
+    /// to the offline `build_vol_from_s10` path for the same s10-OHLC bin
+    /// stream. This is the seam-parity guarantee: same input bins ⇒ same `.vol`
+    /// rows ⇒ same σ. Each 30-min bin here is fed as ONE rolled-up OHLC bar
+    /// (the rollup monoid is exercised separately in the offline path).
     #[test]
-    fn live_vol_ring_matches_offline_ema_parkinson() {
+    fn live_vol_ring_matches_offline_ema_rs() {
         let ema_period = 28usize;
-        // Synthetic 30-min HLC buckets (bin_start, high, low).
+        // Synthetic 30-min OHLC bins (bin_start, o, h, l, c).
         let bin = 1_800_000i64;
-        let mut buckets: Vec<(i64, f64, f64)> = Vec::new();
-        let mut h = 100.0;
+        let mut bins: Vec<(i64, f64, f64, f64, f64)> = Vec::new();
+        let mut px = 100.0;
         for i in 0..200i64 {
-            let lo = h * (1.0 - 0.003 - 0.001 * ((i % 7) as f64));
-            buckets.push((i * bin, h, lo));
-            h *= 1.0 + 0.0005 * (((i % 5) as f64) - 2.0);
+            let o = px;
+            let c = px * (1.0 + 0.0005 * (((i % 5) as f64) - 2.0));
+            let h = o.max(c) * (1.0 + 0.002 + 0.0005 * ((i % 3) as f64));
+            let l = o.min(c) * (1.0 - 0.002 - 0.0005 * ((i % 4) as f64));
+            bins.push((i * bin, o, h, l, c));
+            px = c;
         }
 
-        // Reference: replicate vol_builder's expanding-mean + EMA exactly.
+        // Reference: replicate vol_builder's expanding-mean + EMA over RS σ.
         let alpha = 2.0 / (ema_period as f64 + 1.0);
-        let parkinson = |high: f64, low: f64| (high / low).ln().abs() / (2.0 * std::f64::consts::LN_2.sqrt());
+        let rs = |o: f64, h: f64, l: f64, c: f64| rs_sigma_from_ohlc(o, h, l, c);
         let mut ref_rows: Vec<f64> = Vec::new();
         let mut prev: Option<f64> = None;
-        for (i, &(_, hh, ll)) in buckets.iter().enumerate() {
-            let sigma = parkinson(hh, ll);
+        for (i, &(_, o, h, l, c)) in bins.iter().enumerate() {
+            let sigma = rs(o, h, l, c);
             let ema = if i < ema_period {
-                buckets[..=i].iter().map(|&(_, a, b)| parkinson(a, b)).sum::<f64>() / (i + 1) as f64
+                bins[..=i].iter().map(|&(_, a, b, d, e)| rs(a, b, d, e)).sum::<f64>() / (i + 1) as f64
             } else {
                 alpha * sigma + (1.0 - alpha) * prev.unwrap_or(sigma)
             };
@@ -500,19 +518,15 @@ mod tests {
             ref_rows.push(ema);
         }
 
-        // LiveVolRing: feed one mid-tick at the END of each bucket, plus a tick
-        // in the NEXT bucket to force finalization. We feed (ts, ask=high,
-        // bid=low) twice per bucket so H/L are captured.
+        // LiveVolRing: feed one closed s10-equivalent OHLC bar per 30-min bin,
+        // then advance one extra bin to force-finalize the last open bin.
         let mut ring = LiveVolRing::new(400, ema_period);
-        for &(bs, hh, ll) in &buckets {
-            ring.observe(bs + 1, hh, ll);            // open + set H
-            ring.observe(bs + bin - 1, ll, ll);      // same bucket, no-op on H/L
+        for &(bs, o, h, l, c) in &bins {
+            ring.observe(bs + 1, o, h, l, c);
         }
-        // Force-finalize the last open bucket by advancing into a new bin.
-        ring.observe(buckets.last().unwrap().0 + bin + 1, 1.0, 1.0);
+        ring.observe(bins.last().unwrap().0 + bin + 1, 1.0, 1.0, 1.0, 1.0);
 
-        // Ring should have one finalized row per input bucket.
-        assert_eq!(ring.len(), buckets.len(), "ring bin count mismatch");
+        assert_eq!(ring.len(), bins.len(), "ring bin count mismatch");
         for (i, &expected) in ref_rows.iter().enumerate() {
             let got = ring.sigma_pct(i);
             assert!(
@@ -520,6 +534,23 @@ mod tests {
                 "bin {i}: ring σ {got} != offline σ {expected}"
             );
         }
+    }
+
+    /// OHLC monoid inside the ring: multiple s10 bars within ONE 30-min bin must
+    /// roll up to O=first.open, H=max, L=min, C=last.close before RS σ.
+    #[test]
+    fn live_vol_ring_rolls_up_intrabin_ohlc() {
+        let bin = 1_800_000i64;
+        let mut ring = LiveVolRing::new(8, 28);
+        // 3 s10 bars in bin 0.
+        ring.observe(0, 100.0, 101.0, 99.5, 100.5);
+        ring.observe(10_000, 100.5, 103.0, 100.0, 102.0); // new high
+        ring.observe(20_000, 102.0, 102.5, 98.0, 99.0);   // new low + last close
+        // Advance to bin 1 to finalize bin 0.
+        ring.observe(bin + 1, 99.0, 99.0, 99.0, 99.0);
+        // Expected RS over rolled-up O=100, H=103, L=98, C=99.
+        let expected = rs_sigma_from_ohlc(100.0, 103.0, 98.0, 99.0);
+        assert!((ring.sigma_pct(0) - expected).abs() < 1e-12);
     }
 
     /// Priming from a `.vol` tail must place rows verbatim and continue the EMA.

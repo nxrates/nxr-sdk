@@ -98,6 +98,15 @@ impl RenkoConfig {
 /// Single tripwire shared by live producer and offline calibrator.
 pub const K_FLOOR: f64 = 0.05;
 
+/// Fallback per-tick volatility (σ, as a fraction) used when the σ cache has
+/// no entry for a tick's bin (cold-start gap / out-of-range index). 1% is a
+/// neutral mid-vol prior — high enough to avoid a degenerate near-zero brick,
+/// low enough not to suppress all bricks. Canonical home: the offline
+/// calibrator + the synth-backfill σ readers all shared a copy-pasted
+/// `unwrap_or(0.01)` (5 sites, RCA ROOT2 cleanup 2026-06-01); promote any local
+/// literal to this const.
+pub const SIGMA_FALLBACK: f64 = 0.01;
+
 /// Renko brick-pct safety floor. Guards against σ=0 → div-by-zero / zero
 /// brick degenerate. Mirrors `RenkoConfig::default().min_pct` so live +
 /// offline + calibration share the same floor. Canonical home — promote

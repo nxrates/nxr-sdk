@@ -145,6 +145,46 @@ fn parse_pages(s: &str) -> u64 {
     t.parse::<u64>().unwrap_or(0)
 }
 
+/// Container memory-cgroup limit in bytes, or `None` when unconstrained or
+/// unreadable. In Kubernetes the in-process guard MUST respect the cgroup
+/// limit (`memory.max`), not host RAM — otherwise the cap is computed from the
+/// node's total RAM (e.g. 47 GiB), lands above the container limit (e.g. 16
+/// GiB), and the kernel cgroup OOM-killer fires before our RLIMIT_AS / RSS
+/// watchdog can abort cleanly (observed: nxr-calibrate OOMKilled exit 137).
+pub(crate) fn cgroup_limit_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        // cgroup-v1 stores ~u64::MAX (page-rounded) when unlimited; reject any
+        // value at or above this floor as "no real limit".
+        const UNLIMITED_FLOOR: u64 = 1 << 62;
+        fn parse_limit(s: &str) -> Option<u64> {
+            let t = s.trim();
+            if t.is_empty() || t == "max" {
+                return None;
+            }
+            t.parse::<u64>()
+                .ok()
+                .filter(|&v| v > 0 && v < UNLIMITED_FLOOR)
+        }
+        // Prefer cgroup v2 (`memory.max`), fall back to v1 (`limit_in_bytes`).
+        if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+            if let Some(v) = parse_limit(&s) {
+                return Some(v);
+            }
+            if s.trim() == "max" {
+                return None; // v2 present and explicitly unlimited
+            }
+        }
+        std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+            .ok()
+            .and_then(|s| parse_limit(&s))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Resolve the cap in bytes without applying it. Exposed so callers can log
 /// or validate before (or instead of) calling `apply_safe_cap`.
 pub fn default_cap_bytes() -> u64 {
@@ -161,12 +201,20 @@ pub fn default_cap_bytes() -> u64 {
         .unwrap_or(FALLBACK_CAP_BYTES);
     let available_cap = available_memory_bytes()
         .map(|avail| (avail as f64 * DEFAULT_AVAILABLE_FRACTION) as u64);
-    // The tighter of the two keeps us safe under current pressure without
-    // ever exceeding the long-term share we expect of physical RAM.
-    let cap = match available_cap {
-        Some(a) => physical_cap.min(a),
-        None => physical_cap,
-    };
+    // Container cgroup limit (k8s memory.max). 0.90 leaves headroom for the
+    // allocator/stacks below the hard cgroup ceiling so our guard aborts
+    // before the kernel OOM-killer does.
+    let cgroup_cap = cgroup_limit_bytes().map(|limit| (limit as f64 * 0.90) as u64);
+    // The tightest of physical / available / cgroup keeps us safe under
+    // current pressure and inside the container limit, without ever exceeding
+    // the long-term share we expect of physical RAM.
+    let mut cap = physical_cap;
+    if let Some(a) = available_cap {
+        cap = cap.min(a);
+    }
+    if let Some(c) = cgroup_cap {
+        cap = cap.min(c);
+    }
     cap.max(MIN_CAP_BYTES)
 }
 

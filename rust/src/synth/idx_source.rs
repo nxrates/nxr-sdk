@@ -6,12 +6,11 @@
 //! in-RAM ring populated by the live kernel; prior days are served by
 //! re-deriving from leg `.idx` shards on demand.
 //!
-//! ## Trait shape
+//! ## Shape
 //!
-//! [`IdxSource`] is the abstraction. Implementations:
-//! - [`EphemeralIdxSource`]: in-RAM ring (today's records).
-//! - Future: `ShardedIdxSource` (mmap-backed leg replay for prior days),
-//!   `UnifiedIdxSource` (composes the two).
+//! [`EphemeralIdxSource`]: in-RAM ring (today's records). Prior days are
+//! served by re-deriving from leg `.idx` shards on demand (future work:
+//! `ShardedIdxSource` / `UnifiedIdxSource`).
 //!
 //! ## Capacity sizing
 //!
@@ -24,23 +23,6 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::IndexRecord;
-
-/// Pluggable read source for synth `IndexRecord` streams.
-///
-/// Implementations decide where records come from: an in-RAM ring (live
-/// today), an mmap-backed re-derivation from leg shards (prior days), or a
-/// composition of the two.
-pub trait IdxSource: Send + Sync {
-    /// Yield every record in `[from_ms, to_ms]` (inclusive) in ascending
-    /// timestamp order. Implementations MAY return an iterator that
-    /// allocates (e.g. clones records out of a mutex-guarded ring); callers
-    /// should consume promptly.
-    fn iter_range(
-        &self,
-        from_ms: i64,
-        to_ms: i64,
-    ) -> Box<dyn Iterator<Item = IndexRecord> + Send + '_>;
-}
 
 /// Default ring capacity per `EphemeralIdxSource` (≈ 24h × 5 Hz × 1.5).
 pub const DEFAULT_EPHEMERAL_CAPACITY: usize = 648_000;
@@ -105,16 +87,12 @@ impl EphemeralIdxSource {
     pub fn capacity(&self) -> usize {
         self.capacity
     }
-}
 
-impl Default for EphemeralIdxSource {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl IdxSource for EphemeralIdxSource {
-    fn iter_range(
+    /// Yield every record in `[from_ms, to_ms]` (inclusive) in ascending
+    /// timestamp order. Allocates: clones matching records out of the
+    /// mutex-guarded ring so the lock is released quickly; callers should
+    /// consume promptly.
+    pub fn iter_range(
         &self,
         from_ms: i64,
         to_ms: i64,
@@ -138,6 +116,12 @@ impl IdxSource for EphemeralIdxSource {
             out.push(*rec);
         }
         Box::new(out.into_iter())
+    }
+}
+
+impl Default for EphemeralIdxSource {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

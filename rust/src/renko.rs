@@ -26,9 +26,23 @@
 //! geometry can ignore the flag; consumers training models on tick density
 //! / spread / OFI should filter `(flags & FLAG_RENKO_SYNTHETIC_BRICK) == 0`.
 //!
+//! ## WICK-RENKO high/low (customer decision, 2026-06)
+//!
+//! The brick BODY is `(open, close)` — pure grid geometry, never altered (the
+//! `open[i] = close[i-1]` continuity invariant depends on it). The brick
+//! `high`/`low` carry the **wick**: the TRUE intra-brick mid excursion beyond
+//! the body, measured per-brick in `pending_high`/`pending_low` (the offline
+//! twin of the live `BarAccumulator`'s `high`/`low`):
+//! `high = max(body_high, excursion_high)`, `low = min(body_low,
+//! excursion_low)`. A REAL brick (≥1 intra-brick tick) carries the wick; a
+//! SYNTHETIC brick (2..N of a multi-brick tick — empty excursion window) is
+//! wickless geometry. This is byte-identical to the live producer
+//! (`core::bars_renko::build_wick_brick`) — parity is the correctness gate.
+//!
 //! Design:
 //!   * Streaming, never holds all bars in RAM
-//!   * Continuity invariants enforced (single-sided wick, `open[i] = close[i-1]`)
+//!   * Continuity invariants enforced (`open[i] = close[i-1]`; wick on `high`/
+//!     `low` only, body untouched)
 //!   * Emits `mitch::Bar` with `kind = BarKind::Renko as u8`.
 
 use anyhow::Result;
@@ -146,6 +160,17 @@ pub struct RenkoGenerator {
     last_recompute_period: i64,
     initialized: bool,
     last_close: f64,
+    /// Running TRUE intra-brick mid excursion since the last emitted brick.
+    /// `pending_high`/`pending_low` track max/min of the raw mid stream over the
+    /// ticks that fall inside the current (not-yet-closed) brick — the exact
+    /// twin of the live [`crate::bar_builder::BarAccumulator`]'s `high`/`low`.
+    /// On a brick emit they reset to the empty sentinel (NEG_INFINITY / INFINITY)
+    /// and re-seed lazily on the next real tick, so a brick's wick is measured
+    /// over ITS ticks only (synthetic bricks 2..N of a multi-brick tick see an
+    /// empty window ⇒ wickless geometry). The emitted brick's `high`/`low` are
+    /// `max(body, excursion)` / `min(body, excursion)` — the WICK extends the
+    /// (open, close) body out to the true measured price excursion. This is
+    /// byte-identical to the live producer (parity is the correctness gate).
     pending_high: f64,
     pending_low: f64,
     bar_start_ts: i64,
@@ -168,8 +193,8 @@ impl RenkoGenerator {
             last_recompute_period: i64::MIN,
             initialized: false,
             last_close: 0.0,
-            pending_high: 0.0,
-            pending_low: 0.0,
+            pending_high: f64::NEG_INFINITY,
+            pending_low: f64::INFINITY,
             bar_start_ts: 0,
             tick_count: 0,
             n_bars: 0,
@@ -204,8 +229,11 @@ impl RenkoGenerator {
     /// next tick (when σ is consulted).
     pub fn seed_last_close(&mut self, last_close: f64) {
         self.last_close = last_close;
-        self.pending_high = last_close;
-        self.pending_low = last_close;
+        // Empty excursion window — the first real tick post-restart seeds it.
+        // Mirrors the live producer, whose BarAccumulator is freshly empty after
+        // a warm-restart `last_close` seed (no wick from a synthetic seed price).
+        self.pending_high = f64::NEG_INFINITY;
+        self.pending_low = f64::INFINITY;
         self.initialized = last_close > 0.0;
     }
 
@@ -222,6 +250,35 @@ impl RenkoGenerator {
         self.current_grid_step = grid_step_for_brick(brick_size);
         self.last_recompute_period = timestamp_ms / crate::shard::MS_PER_30MIN;
         brick_size
+    }
+
+    /// WICK-RENKO high/low for a brick whose body is `(open, close)`.
+    ///
+    /// For a REAL brick (`first_in_seq` — at least one real tick fell inside the
+    /// brick window, so `pending_*` are finite) the wick extends the body out to
+    /// the true measured intra-brick mid excursion:
+    /// `high = max(body_high, excursion_high)`, `low = min(body_low,
+    /// excursion_low)`. For a SYNTHETIC brick (2..N of a single multi-brick tick:
+    /// `!first_in_seq`, OR a degenerate empty window) there were no real
+    /// intra-brick ticks, so the body IS the high/low (geometry-only, wickless).
+    ///
+    /// Byte-identical to the live `core::bars_renko::emit_brick` wick logic
+    /// (`pending_*` here is the offline twin of the live `BarAccumulator`'s
+    /// `high`/`low`). Parity is the correctness gate.
+    #[inline]
+    fn brick_high_low(&self, open: f64, close: f64, first_in_seq: bool) -> (f64, f64) {
+        let body_high = open.max(close);
+        let body_low = open.min(close);
+        // `pending_*` finite ⇔ a real tick seeded the window this brick. On a
+        // synthetic brick the window was reset to the empty sentinel and never
+        // re-seeded ⇒ excursion ignored (wickless body).
+        let have_excursion =
+            first_in_seq && self.pending_high.is_finite() && self.pending_low.is_finite();
+        if have_excursion {
+            (body_high.max(self.pending_high), body_low.min(self.pending_low))
+        } else {
+            (body_high, body_low)
+        }
     }
 
     #[inline]
@@ -361,14 +418,23 @@ impl RenkoGenerator {
             }
             bricks_this_tick += 1;
 
-            let low = if first_in_seq { self.pending_low.min(self.last_close) } else { self.last_close };
+            // WICK-RENKO: the brick body is (open=last_close, close). For a REAL
+            // brick (first_in_seq — at least one real tick fell inside it) the
+            // high/low EXTEND the body out to the true intra-brick mid excursion
+            // measured in `pending_high`/`pending_low`. For a SYNTHETIC brick
+            // (2..N of one multi-brick tick — empty excursion window) the body IS
+            // the high/low (geometry-only, wickless). Byte-identical to the live
+            // `emit_brick` (the parity gate).
+            let (high, low) = self.brick_high_low(self.last_close, close, first_in_seq);
             let tick_count_for_bar = if first_in_seq { self.tick_count } else { 0 };
-            self.emit_bar(self.bar_start_ts, ts, self.last_close, close, low, close, tick_count_for_bar, first_in_seq, write_bar)?;
+            self.emit_bar(self.bar_start_ts, ts, self.last_close, high, low, close, tick_count_for_bar, first_in_seq, write_bar)?;
 
             first_in_seq = false;
             self.last_close = close;
-            self.pending_high = close;
-            self.pending_low = close;
+            // Reset the excursion window to empty (re-seeds on the next real
+            // tick). Mirrors `BarAccumulator::reset` after a live brick flush.
+            self.pending_high = f64::NEG_INFINITY;
+            self.pending_low = f64::INFINITY;
             self.bar_start_ts = ts;
             self.tick_count = 0;
         }
@@ -381,14 +447,14 @@ impl RenkoGenerator {
             }
             bricks_this_tick += 1;
 
-            let high = if first_in_seq { self.pending_high.max(self.last_close) } else { self.last_close };
+            let (high, low) = self.brick_high_low(self.last_close, close, first_in_seq);
             let tick_count_for_bar = if first_in_seq { self.tick_count } else { 0 };
-            self.emit_bar(self.bar_start_ts, ts, self.last_close, high, close, close, tick_count_for_bar, first_in_seq, write_bar)?;
+            self.emit_bar(self.bar_start_ts, ts, self.last_close, high, low, close, tick_count_for_bar, first_in_seq, write_bar)?;
 
             first_in_seq = false;
             self.last_close = close;
-            self.pending_high = close;
-            self.pending_low = close;
+            self.pending_high = f64::NEG_INFINITY;
+            self.pending_low = f64::INFINITY;
             self.bar_start_ts = ts;
             self.tick_count = 0;
         }
@@ -441,6 +507,39 @@ mod tests {
         assert!(over_wall.validate().is_err(), "k > MULT_UPPER_BOUND must be rejected");
         let over_old_4_under_10 = RenkoConfig { multiplier: 6.0, min_pct: 0.0001 };
         assert!(over_old_4_under_10.validate().is_err(), "k in (4,10] must now be rejected (was the ceiling-mismatch gap)");
+    }
+
+    #[test]
+    fn wick_extends_body_to_intra_brick_excursion() {
+        // WICK-RENKO: a real brick whose intra-brick mids OVERSHOOT the close
+        // then RETRACE must carry the overshoot as the wick (high > close on an
+        // up brick), and the retrace dip below open as the low. Synthetic bricks
+        // (multi-brick fills) stay wickless.
+        let cfg = RenkoConfig { multiplier: 0.075, min_pct: 0.0001 };
+        let mut r = RenkoGenerator::new(cfg).unwrap();
+        let sigma = 0.02; // brick ≈ 100 * 0.075 * 0.02 = 0.15
+
+        let mut bars: Vec<Bar> = Vec::new();
+        let mut push = |b: &Bar| { bars.push(*b); Ok(()) };
+        // Genesis at 100.
+        r.feed_tick_with_sigma(0, 100.0, sigma, &mut push).unwrap();
+        // Spike up well past one brick close, then retrace below it but still
+        // above last_close — this should emit ONE up brick whose high captures
+        // the spike (> close) and whose low captures the retrace start.
+        r.feed_tick_with_sigma(1, 100.40, sigma, &mut push).unwrap(); // overshoot
+        r.feed_tick_with_sigma(2, 100.12, sigma, &mut push).unwrap(); // retrace (no new brick)
+
+        assert!(!bars.is_empty(), "expected ≥1 brick");
+        let b0 = bars[0];
+        let (open, high, low, close) = (b0.open, b0.high, b0.low, b0.close);
+        assert!(close > open, "first brick should be up");
+        assert!(
+            high > close,
+            "WICK: up-brick high {high} must exceed close {close} (captured the 100.40 spike)"
+        );
+        assert!(high <= 100.40 + 1e-9, "high must not exceed the actual spike");
+        assert!(low <= open + 1e-12, "low must be ≤ open (body floor)");
+        assert_eq!(b0.flags & FLAG_RENKO_SYNTHETIC_BRICK, 0, "first brick not synthetic");
     }
 
     #[test]

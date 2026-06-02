@@ -71,10 +71,3 @@ impl BarFile {
         unsafe { std::slice::from_raw_parts(self.records, self.len) }
     }
 }
-
-/// Write records to a .bars file.
-pub fn write_bars(path: &Path, records: &[Bar]) -> Result<()> {
-    let bytes = bytemuck::cast_slice::<Bar, u8>(records);
-    std::fs::write(path, bytes)?;
-    Ok(())
-}

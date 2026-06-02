@@ -19,7 +19,6 @@ pub mod bar_reader;
 pub mod client;
 pub mod compress;
 pub mod config;
-pub mod consumer;
 pub mod errors;
 pub mod f64_frame;
 pub mod grid;
@@ -61,7 +60,7 @@ pub use ipc::record::IndexRecord;
 //
 // Consumed by external workspaces (btr/prime/crates/bin/*). Keep re-exported;
 // see audit Wave 2.C deferral note.
-pub use bar_reader::{BarFile, write_bars};
+pub use bar_reader::BarFile;
 
 // ---- Daily-shard storage layer ----
 
@@ -70,7 +69,7 @@ pub use shard::{BarShardWriter, IdxShardWriter};
 // ---- Renko engine (live + offline shared) ----
 
 pub use vol::{read_vol_tail, LiveVolRing, MtfVolCalculator, VolConfig, VolSource};
-pub use vol_estimator::{rs_sigma_from_ohlc, rs_variance};
+pub use vol_estimator::rs_sigma_from_ohlc;
 pub use renko::{RenkoConfig, RenkoGenerator};
 pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
 

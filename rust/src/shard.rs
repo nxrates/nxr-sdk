@@ -224,6 +224,20 @@ pub fn shard_path(ticker_dir: &Path, date: NaiveDate, ext: &str) -> PathBuf {
     ticker_dir.join(format!("{}.{}", date_stem(date), ext))
 }
 
+/// Per-ticker volatility (`.vol`) directory, keyed by MITCH id: `<data>/vol`.
+/// Files are id-keyed (`<id>.vol`) so the LIVE renko producer can prime its
+/// in-process Parkinson ring from the same EMA-smoothed σ bins the offline
+/// backfill wrote — the seam-glue path. Mirrors `idx_dir` / `bars_dir`.
+pub fn vol_dir(data_root: &Path) -> PathBuf {
+    data_root.join("vol")
+}
+
+/// Id-keyed persistent `.vol` path: `<data>/vol/<id>.vol`. The offline
+/// backfill writes this and the live producer primes from it.
+pub fn vol_path_for_id(data_root: &Path, ticker_id: u64) -> PathBuf {
+    vol_dir(data_root).join(format!("{}.vol", ticker_id))
+}
+
 /// Manifest path inside a ticker directory.
 pub fn manifest_path(ticker_dir: &Path) -> PathBuf {
     ticker_dir.join("manifest.json")

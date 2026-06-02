@@ -381,13 +381,29 @@ fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
                 return Some((m.asset, remaining.to_string(), "end".into()));
             }
         }
-        // Quote at start
+        // Quote at start.
+        //
+        // For a fiat-fiat / major-major pair written WITHOUT a delimiter (e.g.
+        // "USDJPY", "EURGBP"), the LEFT token is the BASE, not the quote — FX
+        // convention. A naive start-match here inverts base/quote
+        // (USDJPY → quote=USD, base=JPY, which is backwards). Guard: if the
+        // REMAINING (right) token is itself a resolvable quote/fiat symbol,
+        // treat both legs as written-order base/quote — the right token is the
+        // quote, the start token is the base. This surfaces EURUSD / USDJPY /
+        // XAUUSD / US500 correctly (RCA 2026-06-02 FX-surfacing gate).
         if lower.starts_with(q) && lower.len() > q.len() {
             let remaining = lower[q.len()..].trim_start_matches(&['/', '_', '.'][..]);
             if !remaining.is_empty()
-                && let Some(m) = RESOLVER.find(q, 0.95, None)
+                && let Some(start_asset) = RESOLVER.find(q, 0.95, None)
             {
-                return Some((m.asset, remaining.to_string(), "start".into()));
+                // Both legs are quote/fiat majors → written order wins:
+                // base = start token (q), quote = remaining token.
+                if let Some(right_quote) = resolve_quote_token(remaining) {
+                    return Some((right_quote, q.to_string(), "start-fxorder".into()));
+                }
+                // Otherwise the start token is genuinely the quote
+                // (e.g. a crypto-major prefix on a non-major base).
+                return Some((start_asset.asset, remaining.to_string(), "start".into()));
             }
         }
     }
@@ -490,4 +506,39 @@ pub fn resolve_asset_in_class(name: &str, min_confidence: f64, asset_class: Asse
 /// Get asset by exact class and class_id.
 pub fn get_asset_by_id(asset_class: AssetClass, class_id: u16) -> Option<Asset> {
     RESOLVER.by_id.get(&(asset_class, class_id)).cloned()
+}
+
+#[cfg(test)]
+mod fx_surfacing_tests {
+    use super::*;
+    use mitch::common::InstrumentType;
+
+    /// Delimiter-less fiat-fiat pairs must resolve in WRITTEN ORDER
+    /// (left=base, right=quote). Regression for the start-branch inversion
+    /// (USDJPY → quote=USD/base=JPY) that returned [] on /v1/last.
+    #[test]
+    fn fx_pairs_surface_in_written_order() {
+        // (symbol, base-name-substr, quote-name-substr) — asserts written
+        // order, NOT the inverted start-branch result.
+        let cases = [
+            ("EURUSD", "euro", "dollar"),
+            ("USDJPY", "dollar", "yen"),
+            ("EURGBP", "euro", "pound"),
+            ("GBPUSD", "pound", "dollar"),
+        ];
+        for (sym, want_base, want_quote) in cases {
+            let m = resolve_ticker(sym, InstrumentType::SPOT)
+                .unwrap_or_else(|e| panic!("{sym} failed to resolve: {e:?}"));
+            let base = m.ticker.base.name.to_lowercase();
+            let quote = m.ticker.quote.name.to_lowercase();
+            assert!(
+                base.contains(want_base),
+                "{sym}: base '{base}' should contain '{want_base}' (quote='{quote}')"
+            );
+            assert!(
+                quote.contains(want_quote),
+                "{sym}: quote '{quote}' should contain '{want_quote}' (base='{base}')"
+            );
+        }
+    }
 }

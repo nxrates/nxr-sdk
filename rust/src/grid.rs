@@ -17,7 +17,7 @@
 ///   snap_to_25_grid(84234.0) = 84240.0
 ///   snap_to_25_grid(0.00347) = 0.00347
 #[inline]
-pub(crate) fn snap_to_25_grid(value: f64) -> f64 {
+pub fn snap_to_25_grid(value: f64) -> f64 {
     if value <= 0.0 || !value.is_finite() {
         return value;
     }
@@ -39,7 +39,7 @@ pub(crate) fn snap_to_25_grid(value: f64) -> f64 {
 /// Always returns the finer 2*unit step so brick boundaries land on
 /// consistent levels regardless of aggregation start time.
 #[inline]
-pub(crate) fn grid_step_for_brick(brick_size: f64) -> f64 {
+pub fn grid_step_for_brick(brick_size: f64) -> f64 {
     if brick_size <= 0.0 || !brick_size.is_finite() {
         return 1.0;
     }
@@ -49,7 +49,7 @@ pub(crate) fn grid_step_for_brick(brick_size: f64) -> f64 {
 
 /// Snap a price to the nearest multiple of `step`.
 #[inline]
-pub(crate) fn snap_to_grid(price: f64, step: f64) -> f64 {
+pub fn snap_to_grid(price: f64, step: f64) -> f64 {
     if step <= 0.0 {
         return price;
     }

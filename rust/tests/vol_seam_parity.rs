@@ -22,6 +22,14 @@ use nxr_sdk::vol_estimator::rs_sigma_from_ohlc;
 /// Build one gapless s10 Bar stream of `n_bins` 30-min bins worth of bars,
 /// with some quiet (flat) 10s buckets interspersed. Spans > 12h (24 bins of
 /// 30-min = 12h; we use 30 bins = 15h) so the stream crosses the cooldown.
+///
+/// R1 NON-DEGENERACY: every bar carries `open_mts != close_mts`
+/// (`close_mts = open_mts + BAR_MS_S10`, a real 10s bar). The LAST s10 bar of
+/// every 30-min bin therefore straddles the boundary: its `open_time_ms` ∈ bin
+/// N, but its `close_time_ms == bin_end` ∈ bin N+1. So the choice of accessor
+/// (open- vs close-time) used to key the vol bin is now OUTCOME-AFFECTING — the
+/// old fixture (`open_mts == close_mts`) masked the live bug at
+/// `bars_renko.rs` where the ring was fed `close_time_ms()`.
 fn build_s10_stream(n_bins: usize) -> Vec<Bar> {
     let per_bin = (MS_PER_30MIN / BAR_MS_S10) as usize; // 180 s10 bars / bin
     let mut bars = Vec::with_capacity(n_bins * per_bin);
@@ -43,9 +51,13 @@ fn build_s10_stream(n_bins: usize) -> Vec<Bar> {
             };
             let h = o.max(c) * (1.0 + if flat { 0.0 } else { 0.0008 });
             let l = o.min(c) * (1.0 - if flat { 0.0 } else { 0.0008 });
-            let mts = timestamp::from_epoch_ms(ts);
+            // Real 10s bar: open_ts = bucket start, close_ts = bucket end. The
+            // bin's last bar (j == per_bin-1) has close_ts == bin_end → it lands
+            // in bin N by open-time but bin N+1 by close-time.
+            let open_mts = timestamp::from_epoch_ms(ts);
+            let close_mts = timestamp::from_epoch_ms(ts + BAR_MS_S10);
             // kind defaults to Kline (0) — matches s10 producer output.
-            bars.push(Bar::new_ohlcv(mts, mts, o, h, l, c, 0, 0, if flat { 0 } else { 1 }));
+            bars.push(Bar::new_ohlcv(open_mts, close_mts, o, h, l, c, 0, 0, if flat { 0 } else { 1 }));
             px = c;
             ts += BAR_MS_S10;
         }
@@ -77,16 +89,36 @@ fn offline_sigma_rows(s10: &[Bar], period: usize) -> Vec<f64> {
     out
 }
 
-/// Live σ rows: feed each closed s10 bar into the LiveVolRing.
+/// Live σ rows: feed each closed s10 bar into the LiveVolRing using the EXACT
+/// timestamp accessor the production renko producer uses.
+///
+/// R1 PIN: production at `core/src/bars_renko.rs` feeds the vol ring
+/// `bar.open_time_ms()` (open-time binning, matching the offline `.vol`
+/// builder's `ohlc::rollup` → `bucket_start(open_time_ms)`). If anyone flips
+/// that back to `close_time_ms()`, the seam-parity assertions in this test
+/// FAIL — see `live_sigma_rows_close_time` (the negative control) which proves
+/// close-time binning diverges from offline on the non-degenerate fixture.
 fn live_sigma_rows(s10: &[Bar], period: usize) -> Vec<f64> {
+    live_sigma_rows_with(s10, period, |b| b.open_time_ms())
+}
+
+/// Negative control: bin the live ring by CLOSE time (the pre-R1-fix production
+/// wiring). Used only to PROVE the fixture is non-degenerate — close-time
+/// binning must NOT match the offline (open-time) rows.
+fn live_sigma_rows_close_time(s10: &[Bar], period: usize) -> Vec<f64> {
+    live_sigma_rows_with(s10, period, |b| b.close_time_ms())
+}
+
+/// Feed each closed s10 bar into the LiveVolRing keyed by `ts_of(bar)`.
+fn live_sigma_rows_with(s10: &[Bar], period: usize, ts_of: impl Fn(&Bar) -> i64) -> Vec<f64> {
     let mut ring = LiveVolRing::new(4096, period);
     for bar in s10 {
-        let bs = bar.open_time_ms();
+        let bs = ts_of(bar);
         ring.observe(bs, bar.open, bar.high, bar.low, bar.close);
     }
     // Force-finalize the last open 30-min bin by advancing one full bin past
-    // the last observed ts.
-    let last_ts = s10.last().unwrap().open_time_ms();
+    // the last observed ts (using the same accessor under test).
+    let last_ts = ts_of(s10.last().unwrap());
     ring.observe(last_ts + MS_PER_30MIN, 1.0, 1.0, 1.0, 1.0);
     (0..ring.len()).map(|i| ring.sigma_pct(i)).collect()
 }
@@ -115,6 +147,23 @@ fn offline_vol_rows_match_live_ring_over_cooldown_boundary() {
     let seam = (12 * 3600 * 1000 / MS_PER_30MIN) as usize; // = 24
     assert!(seam < n_bins);
     assert!((offline[seam] - live[seam]).abs() < 1e-12, "seam-bin σ mismatch");
+
+    // R1 NEGATIVE CONTROL — proves the fixture actually exercises the bug.
+    // Feeding the ring by CLOSE time (the pre-fix production wiring) misplaces
+    // each bin's last s10 bar into the next bin → different O/H/L/C → different
+    // RS σ. This MUST diverge from the open-time offline rows; if it did NOT,
+    // the fixture would be degenerate (open_mts == close_mts) and would mask R1.
+    let live_close = live_sigma_rows_close_time(&s10, period);
+    let max_div = offline
+        .iter()
+        .zip(live_close.iter())
+        .map(|(&o, &l)| (o - l).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_div > 1e-9,
+        "fixture is degenerate: close-time binning matched offline (max Δ {max_div}). \
+         Build bars with open_mts != close_mts so the bin-key accessor is outcome-affecting."
+    );
 }
 
 #[test]

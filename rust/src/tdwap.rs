@@ -56,19 +56,14 @@ pub use mitch::common::CI_SCALE;
 ///    sqrt space is natural for downstream ops (addition of variances).
 #[inline]
 pub fn encode_ci_ubp(ci_ubp: f64) -> u16 {
-    if !(ci_ubp.is_finite()) || ci_ubp <= 0.0 {
-        return 0;
-    }
-    let v = ci_ubp.sqrt() * CI_SCALE;
-    v.round().clamp(0.0, u16::MAX as f64) as u16
+    mitch::common::ci_encode(ci_ubp)
 }
 
 /// Decode a u16 confidence interval back to micro basis points of mid.
 /// Inverse of `encode_ci_ubp`.
 #[inline]
 pub fn decode_ci_ubp(encoded: u16) -> f64 {
-    let x = encoded as f64 / CI_SCALE;
-    x * x
+    mitch::common::ci_decode(encoded)
 }
 
 /// Per-provider, per-ticker TDWAP metadata.

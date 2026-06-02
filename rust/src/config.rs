@@ -111,16 +111,21 @@ impl NxrConfig {
             ticks_dir,
             bars_dir,
             indexes_dir,
+            // Forwarder subscription manifest. POLICY (operator 2026-06-02): NO
+            // crypto symbol (volatile OR stable) is quoted vs USD natively. All
+            // `<crypto>/USD` are SYNTH, derived `<crypto>/USDT × USDT/USD` (see
+            // `synth::triangulation_rules` — USDT/USD-anchored, ∵ USDT/USD has
+            // 12 providers / $579M depth vs USDC/USD's 5 / $113M). The ONLY
+            // native `/USD` tickers are the two stablecoin anchors USDT/USD and
+            // USDC/USD (real fiat-quoted CEX books on kraken/binance/bitstamp/
+            // gemini/coinbase). Every other stablecoin is quoted vs USDT (e.g.
+            // PYUSD/USDT, FDUSD/USDT) — its /USD is synth-derivable on demand.
             symbols: env_or(
                 "NXR_SYMBOLS",
                 "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,ADA/USDT,DOGE/USDT,\
                  AVAX/USDT,LINK/USDT,DOT/USDT,LTC/USDT,BCH/USDT,TRX/USDT,XMR/USDT,\
                  ZEC/USDT,SUI/USDT,HYPE/USDT,UNI/USDT,XLM/USDT,HBAR/USDT,ETC/USDT,\
                  TON/USDT,PEPE/USDT,SHIB/USDT,\
-                 BTC/USD,ETH/USD,SOL/USD,XRP/USD,BNB/USD,ADA/USD,DOGE/USD,\
-                 AVAX/USD,LINK/USD,DOT/USD,LTC/USD,BCH/USD,TRX/USD,XMR/USD,\
-                 ZEC/USD,SUI/USD,HYPE/USD,UNI/USD,XLM/USD,HBAR/USD,ETC/USD,\
-                 TON/USD,PEPE/USD,SHIB/USD,\
                  BTC/USDC,ETH/USDC,SOL/USDC,XRP/USDC,BNB/USDC,ADA/USDC,DOGE/USDC,\
                  AVAX/USDC,LINK/USDC,DOT/USDC,LTC/USDC,\
                  AAVE/USDT,ARB/USDT,APT/USDT,ONDO/USDT,ENA/USDT,MNT/USDT,\
@@ -130,18 +135,15 @@ impl NxrConfig {
                  ETHFI/USDT,RPL/USDT,CVX/USDT,EUL/USDT,INF/USDT,JTO/USDT,\
                  MET/USDT,ORCA/USDT,PUMP/USDT,XVS/USDT,LISTA/USDT,SOLV/USDT,\
                  HYPER/USDT,\
-                 AAVE/USD,ARB/USD,APT/USD,ONDO/USD,ENA/USD,MNT/USD,\
-                 POL/USD,OP/USD,FIL/USD,ALGO/USD,DASH/USD,\
-                 PAXG/USD,XAUT/USD,GRT/USD,PENDLE/USD,RENDER/USD,WLD/USD,\
                  NEXO/USDT,SKY/USDT,FF/USDT,KMNO/USDT,BARD/USDT,CFG/USDT,\
                  PYTH/USDT,RAY/USDT,FLUID/USDT,COW/USDT,AR/USDT,ZRO/USDT,\
                  AXL/USDT,AERO/USDT,GNO/USDT,SYRUP/USDT,H/USDT,W/USDT,\
                  ZRX/USDT,1INCH/USDT,\
-                 USDT/USD,USDC/USD,USDC/USDT,FDUSD/USD,USDS/USDT,USD1/USDT,USD1/USDC,\
-                 GHO/USDT,GHO/USD,CRVUSD/USDT,USYC/USDC,BUIDL/USDC,USDF/USDT,\
-                 RLUSD/USDT,RLUSD/USD,USDY/USDT,USDTB/USDT,USD0/USDT,\
-                 AUSD/USDT,USDG/USDT,EURC/USDC,EURC/USD,USDD/USDT,PYUSD/USD,\
-                 USDE/USDT,USDE/USDC,USDE/USD",
+                 USDT/USD,USDC/USD,USDC/USDT,FDUSD/USDT,USDS/USDT,USD1/USDT,USD1/USDC,\
+                 GHO/USDT,CRVUSD/USDT,USYC/USDC,BUIDL/USDC,USDF/USDT,\
+                 RLUSD/USDT,USDY/USDT,USDTB/USDT,USD0/USDT,\
+                 AUSD/USDT,USDG/USDT,EURC/USDC,USDD/USDT,PYUSD/USDT,\
+                 USDE/USDT,USDE/USDC",
             ),
             sink_host: env_or("NXR_SINK_HOST", "127.0.0.1"),
             sink_port: env_or("NXR_SINK_PORT", "40010").parse().unwrap_or(40010),

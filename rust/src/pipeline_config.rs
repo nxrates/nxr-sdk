@@ -545,6 +545,35 @@ impl CalibrationYml {
     pub fn target_for_pair(&self, pair: &str) -> f64 {
         self.target_bpd_overrides.get(pair).copied().unwrap_or(self.target_bpd)
     }
+
+    /// Assert the YAML `mult_bounds` agree with the SDK's single-source renko
+    /// ceiling/floor consts (RCA ROOT2a, 2026-06-01). The clamp-detector in the
+    /// calibrator tests `best.0` against `cal.mult_bounds[1]`; the live
+    /// producer's `RenkoConfig::validate` rejects above `MULT_UPPER_BOUND`. If
+    /// the two disagree (config shipped 10.0 while validate capped 4.0), trials
+    /// in the gap produce 0 bricks and the search parks just under the real
+    /// wall while the detector — watching the wrong bound — stays silent.
+    ///
+    /// Returns an error (callers `bail!`/`expect` at startup) rather than
+    /// panicking inline, so config-load surfaces a clean diagnostic.
+    pub fn assert_bounds_consistent(&self) -> Result<(), String> {
+        use crate::renko::{MULT_LOWER_BOUND, MULT_UPPER_BOUND};
+        if (self.mult_bounds[1] - MULT_UPPER_BOUND).abs() > f64::EPSILON {
+            return Err(format!(
+                "calibration.mult_bounds[1]={} disagrees with renko::MULT_UPPER_BOUND={} \
+                 (CEILING MISMATCH, RCA ROOT2a). Set them equal — the validate wall and the \
+                 clamp-detector must watch the same bound.",
+                self.mult_bounds[1], MULT_UPPER_BOUND
+            ));
+        }
+        if (self.mult_bounds[0] - MULT_LOWER_BOUND).abs() > f64::EPSILON {
+            return Err(format!(
+                "calibration.mult_bounds[0]={} disagrees with renko::MULT_LOWER_BOUND={} (K_FLOOR)",
+                self.mult_bounds[0], MULT_LOWER_BOUND
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `series.pipeline:` block — replay / backfill knobs.

@@ -17,12 +17,19 @@ use std::sync::LazyLock;
 
 // ---- String normalization (internal) ----
 
-/// Normalize a string for asset search: lowercase, strip business suffixes, keep alphanumeric.
+/// Normalize a string for asset search: lowercase, strip business suffixes,
+/// keep alphanumeric plus the ticker-significant sigils `+` and `-`.
+///
+/// `+`/`-` are LOAD-BEARING for disambiguation: stripping them collapsed the
+/// alias "ETH+" → "eth" == bare "ETH", so `by_normalized` last-write-wins made
+/// ETH/USDT resolve to "Ethereum Plus" (5701) instead of Ethereum (5801).
+/// Keeping them keeps "eth+" and "eth" distinct keys (RCA ROOT1c, 2026-06-01).
 fn normalize_asset_name(input: &str) -> String {
     let mut s = input.trim().to_lowercase();
 
-    // Strip trailing punctuation
-    while s.ends_with(|c: char| c.is_ascii_punctuation()) {
+    // Strip trailing punctuation that is NOT a ticker-significant sigil.
+    // `+`/`-` are preserved here so "ETH+" survives as a distinct token.
+    while s.ends_with(|c: char| c.is_ascii_punctuation() && c != '+' && c != '-') {
         s.pop();
     }
 
@@ -42,7 +49,7 @@ fn normalize_asset_name(input: &str) -> String {
         }
     }
 
-    s.chars().filter(|c| c.is_alphanumeric()).collect()
+    s.chars().filter(|c| c.is_alphanumeric() || *c == '+' || *c == '-').collect()
 }
 
 // ---- Jaro-Winkler similarity (internal) ----
@@ -187,14 +194,58 @@ impl AssetResolver {
 
             self.by_id.insert((class, class_id), asset.clone());
 
+            // Collision guard (RCA ROOT1c, 2026-06-01): no two assets within the
+            // resolver may share a normalized name OR alias key. A duplicate key
+            // pointing at a DIFFERENT (class, class_id) means last-write-wins
+            // silently mis-resolves one of them (the "Ethereum Plus" 5701 vs
+            // "Ethereum" 5801 incident). Panic at load so the boot CI gate /
+            // collision SLA catches it instead of shipping a ghost id.
+            let mut insert_checked = |norm: String, asset: &Asset| {
+                if let Some(existing) = self.by_normalized.get(&norm)
+                    && (existing.class, existing.class_id) != (asset.class, asset.class_id)
+                {
+                    // Hard gate scoped to CR↔CR (the collision SLA, RCA ROOT1c):
+                    // two DISTINCT crypto assets sharing a normalized name/alias
+                    // is the ghost-id bug (USDN→{Neutrino,Noble}, ETH→{Ethereum,
+                    // Ethereum Plus}). Panic so the boot CI gate catches it.
+                    //
+                    // Cross-class ticker overlaps (e.g. DASH = crypto Dash AND
+                    // equity DoorDash; SOLV = crypto Solv AND equity Solventum)
+                    // are EXPECTED — a crypto and an equity may legitimately
+                    // share a ticker. Those are disambiguated at lookup time by
+                    // `class_filter` (crypto-quote pairs force base=CR), not at
+                    // load time, so they only warn. Pre-existing intra-other-
+                    // class dups (CM "HEATOIL") likewise warn (last-write-wins,
+                    // unchanged legacy behaviour).
+                    if existing.class == AssetClass::CR && asset.class == AssetClass::CR {
+                        panic!(
+                            "crypto asset normalized-key collision: '{}' maps to both \
+                             {:?}/{} ({}) and {:?}/{} ({}) — two CR assets share a \
+                             normalized name/alias; fix crypto-assets.csv (RCA ROOT1c)",
+                            norm,
+                            existing.class, existing.class_id, existing.name,
+                            asset.class, asset.class_id, asset.name,
+                        );
+                    } else {
+                        tracing::warn!(
+                            key = %norm,
+                            existing = %existing.name,
+                            incoming = %asset.name,
+                            "cross-class / non-crypto asset normalized-key collision (last-write-wins; disambiguated by class_filter at lookup)"
+                        );
+                    }
+                }
+                self.by_normalized.insert(norm, asset.clone());
+            };
+
             let norm = normalize_asset_name(entry.name);
             if !norm.is_empty() {
-                self.by_normalized.insert(norm, asset.clone());
+                insert_checked(norm, &asset);
             }
             for alias in entry.aliases.split('|').filter(|s| !s.is_empty()) {
                 let norm_alias = normalize_asset_name(alias);
                 if !norm_alias.is_empty() {
-                    self.by_normalized.insert(norm_alias, asset.clone());
+                    insert_checked(norm_alias, &asset);
                 }
             }
 
@@ -284,8 +335,41 @@ pub const MAJOR_QUOTE_SYMBOLS_LC: &[&str] = &[
 /// Phase 59.R2D moved this from `crypto::exchange::mod::DEFAULT_QUOTE_SUFFIXES`.
 pub const DEFAULT_QUOTE_SUFFIXES: &[&str] = &["USDT", "USDC", "BTC", "ETH", "USD"];
 
+/// Resolve a quote-side token to an Asset. Crypto majors (usdt/usdc/btc/eth)
+/// and USD resolve cross-class; everything else is tried as an FX fiat code
+/// FIRST (RCA ROOT1b, 2026-06-01) so `USDT/THB` → quote=THB(FX), not a
+/// whole-pair fuzz that forced quote=USD and collapsed ~24 fiat pairs onto one
+/// id. Exact match required (conf 1.0); no fuzzy on the quote side.
+fn resolve_quote_token(token: &str) -> Option<Asset> {
+    // FX fiat first for non-crypto-major tokens (THB, BRL, TRY, ...).
+    let is_crypto_major = MAJOR_QUOTE_SYMBOLS_LC.contains(&token);
+    if !is_crypto_major
+        && let Some(m) = RESOLVER.find(token, 1.0, Some(AssetClass::FX))
+        && m.confidence >= 1.0
+    {
+        return Some(m.asset);
+    }
+    // Crypto majors + USD (USD resolves in FX exact too).
+    RESOLVER.find(token, 0.95, None).map(|m| m.asset)
+}
+
 fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
     let lower = symbol.to_lowercase();
+
+    // Explicit-delimiter split takes priority: the RIGHT side is the quote.
+    // Robust for slash/dash/underscore pairs (e.g. "USDT/THB" → base "usdt",
+    // quote "thb"-FX) where a blind major-suffix scan mis-splits.
+    for d in ['/', '_', '-'] {
+        if let Some(pos) = lower.rfind(d) {
+            let base = lower[..pos].trim_matches(|c| c == '/' || c == '_' || c == '-');
+            let quote = lower[pos + 1..].trim_matches(|c| c == '/' || c == '_' || c == '-');
+            if !base.is_empty() && !quote.is_empty()
+                && let Some(q) = resolve_quote_token(quote)
+            {
+                return Some((q, base.to_string(), "delim".into()));
+            }
+        }
+    }
 
     for &q in MAJOR_QUOTE_SYMBOLS_LC {
         // Quote at end
@@ -350,10 +434,15 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
         );
         let class_filter = if cr_quote { Some(AssetClass::CR) } else { None };
 
-        // Resolve remaining as base. Threshold 0.9 (not 0.7) to suppress
-        // weak-similarity matches that misclass new tokens (e.g. ENA matched
-        // "ENA Group SA"). Confident match or skip.
-        if let Some(base) = RESOLVER.find(&remaining, 0.9, class_filter) {
+        // Base-lookup threshold. RCA ROOT1a (2026-06-01): Jaro-Winkler ≥0.9
+        // let 4-char tickers absorb a same-prefix neighbour (SOL→SOLV .942,
+        // HYPE→HYPER .96). Short pure-ticker bases get the strictest gate
+        // (0.95) so only an exact-alias / exact-name hit (conf 1.0, from the
+        // newly-added CSV rows) survives; longer queries keep 0.9.
+        let base_threshold = if remaining.len() <= 4 { 0.95 } else { 0.9 };
+
+        // Resolve remaining as base. Confident match or skip.
+        if let Some(base) = RESOLVER.find(&remaining, base_threshold, class_filter) {
             let tid = TickerId::new(instrument_type, base.asset.class, base.asset.class_id, quote.class, quote.class_id, 0)?;
             let name = format!("{}/{}", base.asset.name, quote.name);
             steps.push(format!("Resolved base asset: {} (confidence: {:.2})", base.asset.name, base.confidence));
@@ -363,9 +452,20 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
                 processing_steps: steps,
             });
         }
+
+        // RCA ROOT1b (2026-06-01): a quote WAS detected but the base failed to
+        // resolve. DO NOT fall through to the whole-pair fuzz below — that path
+        // re-fuzzed the entire pair and forced quote=USD, collapsing ALGO/USD ≡
+        // ALGO/USDT, USDT/{THB,BRL,...}, H/USDT onto one id. A detected-quote
+        // pair with an unresolvable base is an honest failure.
+        return Err(MitchError::InvalidData(format!(
+            "Unable to resolve base '{}' for quote '{}' (pair {})",
+            remaining, quote.name, original
+        )));
     }
 
-    // Step 3: try as single asset with USD quote
+    // Step 3: try as single asset with USD quote. Only reached when NO quote
+    // was detected at all (bare single-asset symbol like "AAPL").
     // Threshold 0.9 (same RCA as base lookup above): suppress weak fuzzy hits.
     if let Some(asset) = RESOLVER.find(&cleaned, 0.9, None) {
         let usd = RESOLVER.find("usd", 0.95, Some(AssetClass::FX))

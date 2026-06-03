@@ -79,6 +79,17 @@ pub const FLAG_RENKO_SYNTHETIC_BRICK: u8 = 0b0000_0100;
 /// bit 3 — free in BOTH the INDEX and the Bar flag spaces.
 pub const FLAG_CONF_FRESHNESS: u8 = 0b0000_1000;
 
+/// `Index.flags` bit 4: this INDEX record was rewritten by the offline
+/// `heal-idx` pass (`series-factory::idx_heal`) — sorted, optionally
+/// 50→100 ms bin-merged, and re-routed to its ts-correct UTC day-shard —
+/// rather than written live by the aggregator. Distinct from
+/// [`FLAG_RENKO_SYNTHETIC_BRICK`] (0x04, *Bar* flag space): heal previously
+/// reused 0x04, which collided with the synthetic-brick bit and caused
+/// healed INDEX rows to be misclassified as synthetic renko bricks by the
+/// synthetic-brick exclusion in calibration/vol. Bit 4 is free in BOTH the
+/// INDEX and the Bar flag spaces (0x01/0x02/0x04/0x08 taken).
+pub const FLAG_IDX_HEALED: u8 = 0b0001_0000;
+
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote
 /// is unchanged. 60s bounds the "is this a gap or just quiet?" ambiguity.
 pub const SENTINEL_INTERVAL_MS: i64 = 60_000;

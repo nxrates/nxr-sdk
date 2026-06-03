@@ -30,12 +30,12 @@ pub mod memory;
 pub mod metrics;
 pub mod ohlc;
 pub mod pipeline_config;
-pub mod price_canonical;
 pub mod providers;
 #[cfg(feature = "transport")]
 pub mod publisher;
 pub mod renko;
 pub mod resolve;
+pub mod series_alias;
 pub mod shard;
 pub mod stats;
 pub mod synth;
@@ -84,10 +84,7 @@ pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
 
 pub use ticker::{TickerIdCache, resolve_ticker_id, split_pair, split_pair_multi};
 pub use resolve::resolve_ticker;
-pub use price_canonical::{
-    alias_kind_for_pair, alias_pairs_to_register, canonical_price_base, canonical_price_pair,
-    canonical_price_symbol, is_price_alias_pair,
-};
+pub use series_alias::series_canonical_ticker_id;
 
 // ---- Provider lookups ----
 

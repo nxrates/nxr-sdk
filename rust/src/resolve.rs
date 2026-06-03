@@ -6,8 +6,6 @@
 //! - `resolve_asset` / `resolve_asset_in_class`: fuzzy asset lookup with Jaro-Winkler scoring
 //! - `get_asset_by_id` / `get_asset_by_global_id`: exact asset lookup by numeric ID
 
-use crate::price_canonical::canonical_price_symbol;
-
 use mitch::common::{AssetClass, InstrumentType, MitchError};
 use mitch::constants::{
     COMMODITIES_DATA, CRYPTO_ASSETS_DATA, EQUITIES_DATA,
@@ -343,19 +341,16 @@ pub const DEFAULT_QUOTE_SUFFIXES: &[&str] = &["USDT", "USDC", "BTC", "ETH", "USD
 /// whole-pair fuzz that forced quote=USD and collapsed ~24 fiat pairs onto one
 /// id. Exact match required (conf 1.0); no fuzzy on the quote side.
 fn resolve_quote_token(token: &str) -> Option<Asset> {
-    // Quote-side index aliases (DAI→USDS, USDT0→USDT) before asset lookup.
-    let canon = canonical_price_symbol(token);
-    let token = canon.to_lowercase();
     // FX fiat first for non-crypto-major tokens (THB, BRL, TRY, ...).
-    let is_crypto_major = MAJOR_QUOTE_SYMBOLS_LC.contains(&token.as_str());
+    let is_crypto_major = MAJOR_QUOTE_SYMBOLS_LC.contains(&token);
     if !is_crypto_major
-        && let Some(m) = RESOLVER.find(&token, 1.0, Some(AssetClass::FX))
+        && let Some(m) = RESOLVER.find(token, 1.0, Some(AssetClass::FX))
         && m.confidence >= 1.0
     {
         return Some(m.asset);
     }
     // Crypto majors + USD (USD resolves in FX exact too).
-    RESOLVER.find(&token, 0.95, None).map(|m| m.asset)
+    RESOLVER.find(token, 0.95, None).map(|m| m.asset)
 }
 
 fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
@@ -462,20 +457,15 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
         // newly-added CSV rows) survives; longer queries keep 0.9.
         let base_threshold = if remaining.len() <= 4 { 0.95 } else { 0.9 };
 
-        // 1:1 wraps + stable synonyms share the canonical index asset.
-        let remaining_canon = canonical_price_symbol(&remaining);
-        let base_lookup = if remaining_canon != remaining.to_uppercase() {
-            steps.push(format!(
-                "Price-canonical base: {} -> {}",
-                remaining, remaining_canon
-            ));
-            remaining_canon.to_lowercase()
-        } else {
-            remaining.clone()
-        };
+        // CAT-1 fungible aliases (MATIC→POL, WETH→ETH, XBT→BTC, …) are folded
+        // into the canonical asset's CSV alias column, so the resolver collapses
+        // them to a single ticker_id here automatically (no code path needed).
+        // CAT-2 custodial BTC wraps (WBTC, cbBTC, …) intentionally do NOT
+        // collapse — they keep distinct ids and share BTC's series only at the
+        // shard chokepoint (see `series_alias::series_canonical_ticker_id`).
 
         // Resolve remaining as base. Confident match or skip.
-        if let Some(base) = RESOLVER.find(&base_lookup, base_threshold, class_filter) {
+        if let Some(base) = RESOLVER.find(&remaining, base_threshold, class_filter) {
             let tid = TickerId::new(instrument_type, base.asset.class, base.asset.class_id, quote.class, quote.class_id, 0)?;
             let name = format!("{}/{}", base.asset.name, quote.name);
             steps.push(format!("Resolved base asset: {} (confidence: {:.2})", base.asset.name, base.confidence));
@@ -500,17 +490,8 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
     // Step 3: try as single asset with USD quote. Only reached when NO quote
     // was detected at all (bare single-asset symbol like "AAPL").
     // Threshold 0.9 (same RCA as base lookup above): suppress weak fuzzy hits.
-    let cleaned_canon = canonical_price_symbol(&cleaned);
-    let asset_lookup = if cleaned_canon != cleaned.to_uppercase() {
-        steps.push(format!(
-            "Price-canonical single asset: {} -> {}",
-            cleaned, cleaned_canon
-        ));
-        cleaned_canon.to_lowercase()
-    } else {
-        cleaned.clone()
-    };
-    if let Some(asset) = RESOLVER.find(&asset_lookup, 0.9, None) {
+    // CAT-1 aliases resolve via CSV; CAT-2 stays distinct (see Step 2 note).
+    if let Some(asset) = RESOLVER.find(&cleaned, 0.9, None) {
         let usd = RESOLVER.find("usd", 0.95, Some(AssetClass::FX))
             .ok_or_else(|| MitchError::InvalidData("Could not resolve USD".into()))?;
         let tid = TickerId::new(instrument_type, asset.asset.class, asset.asset.class_id, usd.asset.class, usd.asset.class_id, 0)?;

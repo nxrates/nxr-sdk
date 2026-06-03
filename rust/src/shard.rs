@@ -175,8 +175,15 @@ pub fn day_range_inclusive(from: NaiveDate, to: NaiveDate) -> Vec<NaiveDate> {
 }
 
 /// Per-ticker indexes directory, keyed by MITCH id: `<data>/indexes/<id>`.
+///
+/// HIDDEN CAT-2 series-share: custodial BTC wraps (WBTC, cbBTC, …) are mapped
+/// through `series_canonical_ticker_id` so their idx data lands in / reads from
+/// BTC's directory while their exposed wire id stays distinct. Cheap const-set
+/// bit op, idempotent for all non-CAT-2 ids. This is the SINGLE tightest
+/// chokepoint for idx shard location (used by both writer-open and readers).
 pub fn idx_dir(data_root: &Path, ticker_id: u64) -> PathBuf {
-    data_root.join("indexes").join(ticker_id.to_string())
+    let id = crate::series_alias::series_canonical_ticker_id(ticker_id);
+    data_root.join("indexes").join(id.to_string())
 }
 
 /// Advisory lock-file path for a ticker's currently-open writer (R1 H9).
@@ -221,8 +228,12 @@ pub fn acquire_idx_writer_lock(ticker_dir: &Path) -> Result<fs::File> {
 }
 
 /// Per-ticker bars directory, keyed by MITCH id: `<data>/bars/<id>`.
+///
+/// HIDDEN CAT-2 series-share: see [`idx_dir`]. Custodial BTC wraps share BTC's
+/// bars (kline + renko) directory via `series_canonical_ticker_id`.
 pub fn bars_dir(data_root: &Path, ticker_id: u64) -> PathBuf {
-    data_root.join("bars").join(ticker_id.to_string())
+    let id = crate::series_alias::series_canonical_ticker_id(ticker_id);
+    data_root.join("bars").join(id.to_string())
 }
 
 /// Shard file path for `(ticker_dir, date, ext)` — ext in {`idx`,`s10`,`renko`}.

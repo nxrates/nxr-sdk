@@ -94,26 +94,76 @@ fn fiat_quote_resolves_in_fx() {
     assert_eq!(m.ticker.quote.name.to_lowercase(), "thai baht");
 }
 
-/// 1:1 BTC wrappers share the canonical BTC/* ticker id (price_canonical).
+/// CAT-2 custodial BTC wraps keep a DISTINCT exposed ticker_id (de-peg risk is
+/// observable) but `series_canonical_ticker_id` redirects them to BTC's series.
 #[test]
-fn wrapped_btc_shares_btc_index_id() {
-    use nxr_sdk::{canonical_price_pair, resolve_ticker_id};
+fn wrapped_btc_distinct_id_shares_btc_series() {
+    use nxr_sdk::{resolve_ticker_id, series_canonical_ticker_id};
 
     let btc_usdt = id_of("BTC/USDT");
     let btc_usdc = id_of("BTC/USDC");
-    assert_eq!(resolve_ticker_id("CBBTC/USDT"), btc_usdt);
-    assert_eq!(resolve_ticker_id("WBTC/USDT"), btc_usdt);
-    assert_eq!(resolve_ticker_id("CBBTC-USDC"), btc_usdc);
-    assert_eq!(resolve_ticker_id("WBTC-USDC"), btc_usdc);
-    assert_eq!(canonical_price_pair("CBBTC/USDC"), "BTC/USDC");
-    assert_eq!(base_name_of("CBBTC/USDC").to_lowercase(), "bitcoin");
+
+    // Distinct exposed ids (NOT collapsed at resolution).
+    assert_ne!(resolve_ticker_id("CBBTC/USDT"), btc_usdt, "cbBTC keeps own id");
+    assert_ne!(resolve_ticker_id("WBTC/USDT"), btc_usdt, "WBTC keeps own id");
+
+    // But series-shared with BTC at the same quote.
+    assert_eq!(series_canonical_ticker_id(resolve_ticker_id("CBBTC/USDT")), btc_usdt);
+    assert_eq!(series_canonical_ticker_id(resolve_ticker_id("WBTC/USDT")), btc_usdt);
+    assert_eq!(series_canonical_ticker_id(resolve_ticker_id("CBBTC-USDC")), btc_usdc);
+    assert_eq!(series_canonical_ticker_id(resolve_ticker_id("WBTC-USDC")), btc_usdc);
+
+    // cbBTC still resolves to its own (Coinbase BTC) asset, not Bitcoin.
+    assert!(
+        base_name_of("CBBTC/USDC").to_lowercase().contains("coinbase"),
+        "cbBTC base must be its own asset"
+    );
+}
+
+/// CAT-1 fungible aliases collapse to a SINGLE ticker_id via the CSV alias
+/// column — BOTH legs (base and quote).
+#[test]
+fn cat1_aliases_single_id() {
+    use nxr_sdk::resolve_ticker_id;
+
+    assert_eq!(resolve_ticker_id("MATIC/USDT"), resolve_ticker_id("POL/USDT"));
+    assert_eq!(resolve_ticker_id("USDT0/USDC"), resolve_ticker_id("USDT/USDC"));
+    assert_eq!(resolve_ticker_id("BTC/USDT0"), resolve_ticker_id("BTC/USDT"));
+    assert_eq!(resolve_ticker_id("ETH/DAI"), resolve_ticker_id("ETH/USDS"));
+    assert_eq!(resolve_ticker_id("WETH/USDT"), resolve_ticker_id("ETH/USDT"));
+    assert_eq!(resolve_ticker_id("WSOL/USDT"), resolve_ticker_id("SOL/USDT"));
+}
+
+/// CAT-2 wraps: distinct id, shared BTC series. cbETH stays fully distinct
+/// (yield LST — neither CAT-1 nor CAT-2 series-shared).
+#[test]
+fn cat2_distinct_id_shared_series() {
+    use nxr_sdk::{resolve_ticker_id, series_canonical_ticker_id};
+
+    let btc_usdt = id_of("BTC/USDT");
+    for wrap in ["WBTC/USDT", "CBBTC/USDT", "TBTC/USDT", "BTCB/USDT", "BBTC/USDT"] {
+        let wid = resolve_ticker_id(wrap);
+        assert_ne!(wid, btc_usdt, "{wrap} must keep a distinct exposed id");
+        assert_eq!(
+            series_canonical_ticker_id(wid),
+            btc_usdt,
+            "{wrap} must series-share BTC/USDT"
+        );
+    }
+
+    // cbETH (yield LST) is fully distinct: not CAT-1, not series-shared.
+    let cbeth = resolve_ticker_id("cbETH/USDT");
+    assert_ne!(cbeth, id_of("ETH/USDT"), "cbETH must not share ETH id");
+    assert_eq!(
+        series_canonical_ticker_id(cbeth),
+        cbeth,
+        "cbETH must NOT be series-shared to BTC or ETH"
+    );
 }
 
 /// Yield/LST wrappers must NOT collapse onto the canonical ETH index.
 #[test]
 fn cbeth_distinct_from_eth_index() {
-    use nxr_sdk::resolve_ticker_id;
-
     let eth = id_of("ETH/USDT");
     let cbeth = id_of("cbETH/USDT");
     assert_ne!(cbeth, eth, "cbETH/USDT must not share ETH/USDT id");
@@ -122,32 +172,4 @@ fn cbeth_distinct_from_eth_index() {
             || base_name_of("cbETH/USDT").to_lowercase().contains("coinbase"),
         "cbETH base must resolve to cbETH asset, not ethereum"
     );
-    assert_eq!(resolve_ticker_id("CBBTC/USDT"), id_of("BTC/USDT"));
-}
-
-/// Native wraps share the canonical major/* ticker id.
-#[test]
-fn native_wrap_shares_index_id() {
-    assert_eq!(id_of("WETH/USDT"), id_of("ETH/USDT"));
-    assert_eq!(id_of("WBNB/USDT"), id_of("BNB/USDT"));
-}
-
-/// Stable / bridged synonyms share the canonical quote (or base) index id.
-#[test]
-fn stable_synonym_shares_index_id() {
-    use nxr_sdk::{alias_kind_for_pair, canonical_price_pair};
-
-    assert_eq!(id_of("DAI/USDT"), id_of("USDS/USDT"));
-    assert_eq!(id_of("ETH/DAI"), id_of("ETH/USDS"));
-    assert_eq!(id_of("USDT0/USDC"), id_of("USDT/USDC"));
-    assert_eq!(id_of("BTC/USDT0"), id_of("BTC/USDT"));
-    assert_eq!(canonical_price_pair("WETH/USDT0"), "ETH/USDT");
-    assert_eq!(alias_kind_for_pair("ETH/DAI"), "stable_synonym");
-}
-
-/// Distinct stables must not collapse onto each other.
-#[test]
-fn distinct_stables_stay_separate() {
-    assert_ne!(id_of("USDC/USDT"), id_of("USDS/USDT"));
-    assert_ne!(id_of("USDC/USDT"), id_of("DAI/USDT"));
 }

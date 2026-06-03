@@ -26,6 +26,17 @@ pub struct NxrConfig {
     pub aggregation_interval_ms: u64,
     /// Duration in ms after which a quote is considered stale (weight decays to zero)
     pub stale_threshold_ms: u64,
+    /// TDWAP per-provider decay-weight recompute cadence, in ms. The throttle
+    /// freezes the normalized weight vector between refreshes so the emitted
+    /// composite Index is byte-identical on a quiet (flat-quote) pair — the
+    /// `.idx` 5-field delta-gate then suppresses the redundant write, which is
+    /// what gives the on-disk diff-compression (otherwise sub-ULP decay drift
+    /// every cycle defeats the gate and quiet pairs write every cycle, up to
+    /// ~3× the disk). `None` ⇒ derive from `stale_threshold_ms`
+    /// (`default_refresh_interval_ms`). Any value (derived or explicit) is hard-
+    /// floored at `3 × aggregation_interval_ms` so the throttle can never
+    /// collapse to per-cycle. Override via `NXR_WEIGHT_REFRESH_MS`.
+    pub weight_refresh_ms: Option<u64>,
     /// Heartbeat interval in ms: when no new ticks arrive, re-emit the last index
     /// at this cadence so WS clients always have recent data. Also drives idx
     /// liveness sentinels on disk (via IdxShardWriter). Default: 1000 (1 Hz).
@@ -99,6 +110,9 @@ impl NxrConfig {
             stale_threshold_ms: env_or("NXR_STALE_THRESHOLD_MS", "10000")
                 .parse()
                 .unwrap_or(10000),
+            // None ⇒ derive from stale_threshold_ms; explicit value is hard-
+            // floored at 3× aggregation_interval_ms in the aggregator.
+            weight_refresh_ms: env_opt("NXR_WEIGHT_REFRESH_MS"),
             heartbeat_interval_ms: env_or("NXR_HEARTBEAT_INTERVAL_MS", "1000")
                 .parse()
                 .unwrap_or(1000),
@@ -182,4 +196,9 @@ impl NxrConfig {
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Read an optional numeric env var. `None` if unset or unparseable.
+fn env_opt<T: std::str::FromStr>(key: &str) -> Option<T> {
+    env::var(key).ok().and_then(|v| v.parse().ok())
 }

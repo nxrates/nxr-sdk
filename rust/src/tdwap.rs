@@ -565,7 +565,17 @@ pub(crate) fn compute_vwap_throttled_at(
 /// Compute the refresh interval for the throttled VWAP path.
 ///
 /// Policy: refresh at `stale_threshold_secs / 5 · 1000` ms, but never faster
-/// than the aggregation cycle itself (else the throttle is a no-op).
+/// than **3× the aggregation cycle** (`3 · aggregation_interval_ms`). The 3×
+/// floor — not the old 1× floor — guarantees the throttle holds the normalized
+/// per-provider weight vector constant across multiple aggregation cycles, so
+/// on a quiet (flat-quote) pair the emitted composite Index is byte-identical
+/// run-to-run and the `.idx` 5-field delta-gate suppresses the redundant
+/// write. With a 1× floor (the previous behaviour) a low `stale_threshold` or
+/// a per-cycle `NXR_TDWAP_THROTTLE=0` could collapse the window to one cycle,
+/// at which point sub-ULP decay drift each cycle defeats the gate and quiet
+/// pairs write every cycle — up to ~3× the on-disk footprint. The explicit
+/// `NXR_WEIGHT_REFRESH_MS` override is clamped to this same 3× floor by the
+/// aggregator before use.
 ///
 /// **Relation to the operator's "weights update ≤ 1/5 agg freq, HL ≥ 5-10×
 /// refresh" rule (Aud-M1):** the half-life used inside `compute_vwap_at` is
@@ -581,15 +591,20 @@ pub(crate) fn compute_vwap_throttled_at(
 /// is replayed verbatim — see `compute_vwap_throttled_at`) but should be
 /// audited if `stale_threshold_secs` is ever pushed below 5 s in prod.
 ///
-/// Examples:
-/// - Production crypto (stale=10s, agg=50ms): refresh = 2000 ms, HL ≤ 5 s.
-/// - Aggressive FX (stale=2s, agg=50ms): refresh = 400 ms, HL ≤ 1 s.
-/// - Pathological tight HL (stale=0.2s, agg=50ms): refresh = 50 ms — falls
-///   back to per-cycle refresh, throttle effectively disabled.
+/// Examples (agg=200ms prod default, 3× floor = 600ms):
+/// - Production crypto (stale=10s, agg=200ms): refresh = 2000 ms, HL ≤ 5 s.
+/// - Aggressive FX (stale=2s, agg=200ms): refresh = max(400, 600) = 600 ms.
+/// - Pathological tight HL (stale=0.2s, agg=200ms): refresh = max(40, 600) =
+///   600 ms — the 3× floor keeps the throttle effective (the old 1× floor
+///   would have dropped to per-cycle here and defeated the delta-gate).
 #[inline]
 pub fn default_refresh_interval_ms(stale_threshold_secs: f64, aggregation_interval_ms: u64) -> u64 {
     let hl_over_5_ms = (stale_threshold_secs * 1000.0 / 5.0).round();
-    let clamped = hl_over_5_ms.max(aggregation_interval_ms as f64);
+    // Hard floor: never faster than 3× the aggregation cycle, so the throttle
+    // always spans multiple cycles and the .idx delta-gate keeps its
+    // diff-compression on quiet pairs.
+    let min_refresh_ms = (aggregation_interval_ms as f64) * 3.0;
+    let clamped = hl_over_5_ms.max(min_refresh_ms);
     clamped.min(u64::MAX as f64) as u64
 }
 
@@ -804,13 +819,19 @@ mod tests {
     }
 
     #[test]
-    fn default_refresh_interval_clamps_to_aggregation_cycle() {
-        // Crypto default: stale=10s, agg=50ms → HL/5 = 2000 ms (using
-        // stale/5, the conservative HL-upper bound), clamped to 50 floor.
+    fn default_refresh_interval_clamps_to_3x_aggregation_cycle() {
+        // Crypto default: stale=10s, agg=50ms → HL/5 = 2000 ms, well above the
+        // 3× floor (150ms) → 2000.
         assert_eq!(default_refresh_interval_ms(10.0, 50), 2000);
-        // Sub-second HL: stale=0.2s, agg=50ms → HL/5 = 40ms, clamped UP to 50.
-        assert_eq!(default_refresh_interval_ms(0.2, 50), 50);
-        // FX-ish: stale=2s, agg=50 → 400ms.
+        // Prod agg=200ms, stale=10s → 2000 ms, above 3× floor (600ms) → 2000.
+        assert_eq!(default_refresh_interval_ms(10.0, 200), 2000);
+        // Sub-second HL: stale=0.2s, agg=50ms → HL/5 = 40ms, clamped UP to the
+        // 3× floor = 150ms (previously 50ms with the 1× floor).
+        assert_eq!(default_refresh_interval_ms(0.2, 50), 150);
+        // FX-ish at prod agg: stale=2s, agg=200ms → HL/5 = 400ms, below the 3×
+        // floor (600ms) → clamped UP to 600.
+        assert_eq!(default_refresh_interval_ms(2.0, 200), 600);
+        // FX-ish at agg=50ms: stale=2s → 400ms, above 3× floor (150ms) → 400.
         assert_eq!(default_refresh_interval_ms(2.0, 50), 400);
     }
 }

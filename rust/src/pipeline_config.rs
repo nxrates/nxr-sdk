@@ -451,6 +451,15 @@ pub struct CexsYml {
     /// `weights::config::Cexs::aliases`.
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
+    /// 1:1 wrapped spot bases → canonical CEX index base for MITCH ticker_id
+    /// resolution (e.g. `CBBTC → BTC`, `WBTC → BTC`). Distinct from
+    /// `aliases` (scraper strings) and MITCH asset IDs (cbBTC stays 03901).
+    #[serde(default)]
+    pub price_canonical: BTreeMap<String, String>,
+    /// Quote legs auto-registered for each `price_canonical` wrapper in the
+    /// core symbol_map (e.g. CBBTC/USDT). Empty ⇒ SDK default list.
+    #[serde(default)]
+    pub price_canonical_quotes: Vec<String>,
     /// Stablecoins recognized at runtime (was: `core::weights::BRIDGE_STABLES`,
     /// `series_factory/renko_trailing::STABLE_SYMBOLS`, `mtf_sweep::STABLE_SYMBOLS`).
     #[serde(default)]
@@ -649,5 +658,36 @@ mod tests {
         // Legacy path: only the per-pair override map, no class layer.
         assert_eq!(c.target_for_pair("USDC/USDT"), 50.0);
         assert_eq!(c.target_for_pair("FDUSD/USDT"), 300.0); // not in override map
+    }
+
+    #[test]
+    fn price_canonical_deserializes() {
+        let yml = r#"
+series:
+  renko: { min_pct: 0.0001 }
+  vol:
+    ema_period: 28
+    sigma_blend_windows_days: [14]
+    winsorize_pct: [0.05, 0.95]
+    winsorize_min_samples: 5
+    recompute_cooldown_ms: 1
+  calibration:
+    target_bpd: 300
+    k_fit_windows_days: [30]
+    min_window_days: 7
+    max_rounds: 12
+    tolerance: 0.05
+    mult_bounds: [0.05, 4.0]
+  pipeline:
+    bootstrap_days: 27
+cexs:
+  price_canonical:
+    CBBTC: BTC
+    WBTC: BTC
+  price_canonical_quotes: [USDT, USDC]
+"#;
+        let p: PipelineYml = serde_yml::from_str(yml).expect("parse");
+        assert_eq!(p.cexs.price_canonical.get("CBBTC").map(String::as_str), Some("BTC"));
+        assert_eq!(p.cexs.price_canonical_quotes, vec!["USDT", "USDC"]);
     }
 }

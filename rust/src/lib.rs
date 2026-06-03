@@ -30,6 +30,7 @@ pub mod memory;
 pub mod metrics;
 pub mod ohlc;
 pub mod pipeline_config;
+pub mod price_canonical;
 pub mod providers;
 #[cfg(feature = "transport")]
 pub mod publisher;
@@ -83,6 +84,9 @@ pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
 
 pub use ticker::{TickerIdCache, resolve_ticker_id, split_pair, split_pair_multi};
 pub use resolve::resolve_ticker;
+pub use price_canonical::{
+    alias_pairs_to_register, canonical_price_base, canonical_price_pair, is_price_alias_pair,
+};
 
 // ---- Provider lookups ----
 

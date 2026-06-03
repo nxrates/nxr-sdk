@@ -85,12 +85,42 @@ fn eth_not_absorbed_by_ethereum_plus() {
     assert_eq!(base_name_of("ETH/USDT").to_lowercase(), "ethereum");
 }
 
-/// USDT/THB must split base=USDT(crypto/Tether), quote=THB(FX) — not collapse
-/// onto a USD-forced whole-pair fuzz (ROOT1b).
+/// Fiat-quote pairs must stay distinct from USD-forced fuzz (ROOT1b).
 #[test]
 fn fiat_quote_resolves_in_fx() {
     let m = resolve_ticker("USDT/THB", InstrumentType::SPOT)
         .expect("USDT/THB must resolve");
     assert_eq!(m.ticker.base.name.to_lowercase(), "tether");
     assert_eq!(m.ticker.quote.name.to_lowercase(), "thai baht");
+}
+
+/// 1:1 BTC wrappers share the canonical BTC/* ticker id (price_canonical).
+#[test]
+fn wrapped_btc_shares_btc_index_id() {
+    use nxr_sdk::{canonical_price_pair, resolve_ticker_id};
+
+    let btc_usdt = id_of("BTC/USDT");
+    let btc_usdc = id_of("BTC/USDC");
+    assert_eq!(resolve_ticker_id("CBBTC/USDT"), btc_usdt);
+    assert_eq!(resolve_ticker_id("WBTC/USDT"), btc_usdt);
+    assert_eq!(resolve_ticker_id("CBBTC-USDC"), btc_usdc);
+    assert_eq!(resolve_ticker_id("WBTC-USDC"), btc_usdc);
+    assert_eq!(canonical_price_pair("CBBTC/USDC"), "BTC/USDC");
+    assert_eq!(base_name_of("CBBTC/USDC").to_lowercase(), "bitcoin");
+}
+
+/// Yield/LST wrappers must NOT collapse onto the canonical ETH index.
+#[test]
+fn cbeth_distinct_from_eth_index() {
+    use nxr_sdk::resolve_ticker_id;
+
+    let eth = id_of("ETH/USDT");
+    let cbeth = id_of("cbETH/USDT");
+    assert_ne!(cbeth, eth, "cbETH/USDT must not share ETH/USDT id");
+    assert!(
+        base_name_of("cbETH/USDT").to_lowercase().contains("staked")
+            || base_name_of("cbETH/USDT").to_lowercase().contains("coinbase"),
+        "cbETH base must resolve to cbETH asset, not ethereum"
+    );
+    assert_eq!(resolve_ticker_id("CBBTC/USDT"), id_of("BTC/USDT"));
 }

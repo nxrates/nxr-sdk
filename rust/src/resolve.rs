@@ -6,6 +6,8 @@
 //! - `resolve_asset` / `resolve_asset_in_class`: fuzzy asset lookup with Jaro-Winkler scoring
 //! - `get_asset_by_id` / `get_asset_by_global_id`: exact asset lookup by numeric ID
 
+use crate::price_canonical::canonical_price_base;
+
 use mitch::common::{AssetClass, InstrumentType, MitchError};
 use mitch::constants::{
     COMMODITIES_DATA, CRYPTO_ASSETS_DATA, EQUITIES_DATA,
@@ -457,8 +459,20 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
         // newly-added CSV rows) survives; longer queries keep 0.9.
         let base_threshold = if remaining.len() <= 4 { 0.95 } else { 0.9 };
 
+        // 1:1 wrapped spot bases share the canonical index asset (CBBTC→BTC).
+        let remaining_canon = canonical_price_base(&remaining);
+        let base_lookup = if remaining_canon != remaining.to_uppercase() {
+            steps.push(format!(
+                "Price-canonical base: {} -> {}",
+                remaining, remaining_canon
+            ));
+            remaining_canon.to_lowercase()
+        } else {
+            remaining.clone()
+        };
+
         // Resolve remaining as base. Confident match or skip.
-        if let Some(base) = RESOLVER.find(&remaining, base_threshold, class_filter) {
+        if let Some(base) = RESOLVER.find(&base_lookup, base_threshold, class_filter) {
             let tid = TickerId::new(instrument_type, base.asset.class, base.asset.class_id, quote.class, quote.class_id, 0)?;
             let name = format!("{}/{}", base.asset.name, quote.name);
             steps.push(format!("Resolved base asset: {} (confidence: {:.2})", base.asset.name, base.confidence));
@@ -483,7 +497,17 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
     // Step 3: try as single asset with USD quote. Only reached when NO quote
     // was detected at all (bare single-asset symbol like "AAPL").
     // Threshold 0.9 (same RCA as base lookup above): suppress weak fuzzy hits.
-    if let Some(asset) = RESOLVER.find(&cleaned, 0.9, None) {
+    let cleaned_canon = canonical_price_base(&cleaned);
+    let asset_lookup = if cleaned_canon != cleaned.to_uppercase() {
+        steps.push(format!(
+            "Price-canonical single asset: {} -> {}",
+            cleaned, cleaned_canon
+        ));
+        cleaned_canon.to_lowercase()
+    } else {
+        cleaned.clone()
+    };
+    if let Some(asset) = RESOLVER.find(&asset_lookup, 0.9, None) {
         let usd = RESOLVER.find("usd", 0.95, Some(AssetClass::FX))
             .ok_or_else(|| MitchError::InvalidData("Could not resolve USD".into()))?;
         let tid = TickerId::new(instrument_type, asset.asset.class, asset.asset.class_id, usd.asset.class, usd.asset.class_id, 0)?;

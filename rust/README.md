@@ -87,7 +87,7 @@ slice cast → owned `Vec<T>`). Metadata defaults to JSON.
 
 ## WS protocol
 
-`ws[s]://<host>/v1/stream` ships an `IndexBatch` frame every 100 ms:
+`ws[s]://<host>/v1/stream` ships an `IndexBatch` frame every 200 ms:
 
 ```text
 [0]    u8   msg_type   (1 = index_batch)

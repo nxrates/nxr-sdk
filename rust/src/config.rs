@@ -22,7 +22,7 @@ pub struct NxrConfig {
     pub log_level: String,
     /// TCP port the aggregator listens on for MITCH frames from provider forwarders
     pub listen_port: u16,
-    /// Aggregation cycle interval in milliseconds (default: 100 = 10 Hz)
+    /// Aggregation cycle interval in milliseconds (default: 200 = 5 Hz)
     pub aggregation_interval_ms: u64,
     /// Duration in ms after which a quote is considered stale (weight decays to zero)
     pub stale_threshold_ms: u64,
@@ -93,9 +93,9 @@ impl NxrConfig {
         Self {
             log_level: env_or("NXR_LOG_LEVEL", "info"),
             listen_port: env_or("NXR_LISTEN_PORT", "9500").parse().unwrap_or(9500),
-            aggregation_interval_ms: env_or("NXR_AGGREGATION_INTERVAL_MS", "100")
+            aggregation_interval_ms: env_or("NXR_AGGREGATION_INTERVAL_MS", "200")
                 .parse()
-                .unwrap_or(50),
+                .unwrap_or(200),
             stale_threshold_ms: env_or("NXR_STALE_THRESHOLD_MS", "10000")
                 .parse()
                 .unwrap_or(10000),

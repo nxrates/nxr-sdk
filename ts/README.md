@@ -117,7 +117,7 @@ open_ts [u8;6] | close_ts [u8;6]
 
 ## WebSocket protocol
 
-`ws://<host>/v1/stream` ships an `IndexBatch` frame every 100 ms:
+`ws://<host>/v1/stream` ships an `IndexBatch` frame every 200 ms:
 
 ```
 [0]     u8   msg_type   (1 = index_batch)

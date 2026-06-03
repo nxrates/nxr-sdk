@@ -146,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
 | `GET /v1/synth/tick/{sym}`            | `synthTick(sym)`     | JSON             | instantaneous synth tick             |
 | `GET /v1/synth/ohlc/{sym}?tf=`        | `synthOhlc(...)`     | JSON             | synth OHLC reconstruction            |
 | `GET /v1/integrity/{sym}?kind=`       | `integrity(sym, k)`  | JSON / 503       | shard-integrity diagnostics          |
-| `WS  /v1/stream`                      | `subscribe(...)`     | binary frames    | live index broadcast (100 ms flush)  |
+| `WS  /v1/stream`                      | `subscribe(...)`     | binary frames    | live index broadcast (200 ms flush)  |
 
 Range opts everywhere: `{ from?, to?, limit?, cursor? }` — all epoch ms. Symbol path
 accepts dash form (`BTC-USDT`), slash form (`BTC%2FUSDT`), or numeric `ticker_id`.
@@ -198,7 +198,7 @@ open_ts [u8;6] | close_ts [u8;6]
                                 ci_ubp, confidence, accepted, rejected
 ```
 
-100 ms flush cadence. `count` is dedup-by-ticker within the window
+200 ms flush cadence. `count` is dedup-by-ticker within the window
 (last-write-wins). Client `subscribe(tickers, cb)` filters records
 client-side by ticker_id (resolved from the cached `/v1/tickers/detail`).
 

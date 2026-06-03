@@ -133,7 +133,7 @@ pub const DEFAULT_RUNTIME_PROVIDER_STALE_SECS: u64 = 30;
 pub const DEFAULT_RUNTIME_FRAME_BUF_MAX: usize = 2 * 1024 * 1024;
 pub const DEFAULT_RUNTIME_HEALTH_STALE_SECS: u64 = 20;
 pub const DEFAULT_RUNTIME_DAILY_REFRESH_OFFSET_SECS: u64 = 30;
-pub const DEFAULT_RUNTIME_WS_FLUSH_MS: u64 = 100;
+pub const DEFAULT_RUNTIME_WS_FLUSH_MS: u64 = 200;
 
 /// `pipeline:` block — offline-tool operator-facing knobs (sweep universe,
 /// future: per-bin overrides). Distinct from `series.pipeline:` (which holds

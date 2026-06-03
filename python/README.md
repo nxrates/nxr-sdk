@@ -151,7 +151,7 @@ ms = nxr_sdk._u48_le_to_ms(
   datagrams into an mpsc queue; the Python iterator pops + decodes only on
   consume. Target: < 10 µs added jitter on top of the kernel UDP recv path.
 - `WsSubscriber` decodes binary frames in pure Python via `struct`; ~200 k
-  records/s end-to-end (the 100 ms server flush keeps frame counts small).
+  records/s end-to-end (the 200 ms server flush keeps frame counts small).
 - Build with `maturin develop --release` for production benchmarks; debug
   builds are ~10x slower.
 

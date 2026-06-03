@@ -239,9 +239,8 @@ impl Client {
     }
 }
 
-/// Convert any symbol form to the URL-safe dash form the NXR API prefers.
-/// `BTC/USDT` → `BTC-USDT`; dash form and numeric ticker_id pass through
-/// unchanged. Matches the server's 3-form `resolve_sym`.
+/// Convert slash form to dash for history-route URLs (`BTC/USDT` → `BTC-USDT`).
+/// Snapshot routes (`/v1/price`, `/v1/last`) require MITCH `ticker_id` decimals.
 fn url_sym(sym: &str) -> String {
     sym.replace('/', "-")
 }

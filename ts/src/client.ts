@@ -703,8 +703,8 @@ export class HistoryBuilder {
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /**
- * URL-encode a symbol for the path segment. Prefers dash form because the
- * server's `resolve_sym` accepts both dash and slash, and dash avoids `%2F`.
+ * URL-encode a symbol for history-route path segments (`/v1/idx`, `/v1/bars`).
+ * Snapshot routes (`/v1/price`, `/v1/last`) require MITCH ticker_id decimals.
  */
 function urlSym(sym: Sym): string {
   return encodeURIComponent(sym.replace('/', '-'));

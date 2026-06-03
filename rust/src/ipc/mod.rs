@@ -1,6 +1,27 @@
 pub mod append_log;
 pub mod record;
 
+use std::sync::Arc;
+
+/// View a value as raw frame bytes for UDP/multicast publishers.
+pub trait AsFrameBytes {
+    fn as_frame_bytes(&self) -> &[u8];
+}
+
+impl AsFrameBytes for Vec<u8> {
+    #[inline]
+    fn as_frame_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl AsFrameBytes for Arc<Vec<u8>> {
+    #[inline]
+    fn as_frame_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
 use std::io::Write;
 use std::path::Path;
 

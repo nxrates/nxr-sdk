@@ -16,6 +16,7 @@ pub mod agg;
 pub mod asset_class;
 pub mod bar_builder;
 pub mod bar_reader;
+#[cfg(feature = "client")]
 pub mod client;
 pub mod compress;
 pub mod config;
@@ -25,10 +26,12 @@ pub mod grid;
 pub mod ipc;
 pub mod logging;
 pub mod memory;
+#[cfg(feature = "server-metrics")]
 pub mod metrics;
 pub mod ohlc;
 pub mod pipeline_config;
 pub mod providers;
+#[cfg(feature = "transport")]
 pub mod publisher;
 pub mod renko;
 pub mod resolve;
@@ -37,10 +40,13 @@ pub mod stats;
 pub mod synth;
 pub mod tdwap;
 pub mod ticker;
+#[cfg(feature = "transport")]
 pub mod transport;
 pub mod vol;
 pub mod vol_estimator;
 pub mod weights_schema;
+pub mod ws_frame;
+#[cfg(feature = "client")]
 pub mod ws_client;
 
 // ---- MITCH types ----
@@ -106,6 +112,7 @@ pub use config::NxrConfig;
 
 // ---- Consumer client (REST + WS) ----
 
+#[cfg(feature = "client")]
 pub use client::NxrClient;
 
 // ---- Plan-tier typed errors ----

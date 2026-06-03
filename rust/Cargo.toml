@@ -7,85 +7,70 @@ description = "NX Rates SDK - MITCH types, IPC primitives, aggregation, resoluti
 repository = "https://github.com/nxrates/nxr-sdk"
 keywords = ["finance", "market-data", "mitch", "hft"]
 
+[features]
+default = []
+# UDP multicast + publisher traits (nxr core aggregator / bar multicast).
+transport = ["dep:socket2", "tokio/net"]
+# REST + binary WS consumer client.
+client = ["transport", "dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util"]
+# Shared axum `/metrics` server (crypto/fx forwarder bins).
+server-metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "tokio/net"]
+
 [dependencies]
-# Canonical MITCH protocol crate. nxr-sdk is designed to be used as a
-# submodule of the nx-rates monorepo; the relative path resolves to
-# nx-rates/mitch/impl/rust when mounted at nx-rates/sdk.
 mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }
 
-# Zero-copy memory types
 bytemuck = { version = "1", features = ["derive"] }
-
-# Zero-copy mmap reader for .bars artifact files (BarFile)
 memmap2 = "0.9"
 
-# Async runtime (consumer-side needs net + rt + macros + time + sync for UDP/WS)
-tokio = { version = "1.52", features = ["net", "rt", "rt-multi-thread", "macros", "time", "sync", "io-util"] }
+tokio = { version = "1.52", default-features = false, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util"] }
 
-# HTTP / REST client
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-
-# Zero-copy bytes (re-exported by reqwest::Bytes; pinned for the public-API surface).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 bytes = "1"
+tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-webpki-roots"], optional = true }
 
-# WebSocket
-tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-webpki-roots"] }
-
-# Serde / JSON / YAML
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yml = "0.0.12"
 
-# Error handling
 anyhow = "1"
+futures-util = { version = "0.3", features = ["sink"], optional = true }
 
-# Async utilities
-futures-util = { version = "0.3", features = ["sink"] }
-
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# Concurrent maps (aggregator / ticker resolution)
 dashmap = "6"
-
-# Compression helpers (gzip exchange frames)
 flate2 = "1"
 
-# Daily-shard storage layer (shard.rs): date math, manifest, shard hashing.
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
 
-# Raw socket options for UDP multicast burst tuning (SO_RCVBUF).
-socket2 = { version = "0.5", features = ["all"] }
-
-# setrlimit(RLIMIT_AS) + sysctl hw.memsize for the shared memory-cap helper
-# (memory::apply_safe_cap). Every binary that ingests the tick cache calls it
-# at startup so a runaway process cannot OOM the host.
+socket2 = { version = "0.5", features = ["all"], optional = true }
 libc = "0.2"
-
-# R1 H9: advisory flock on today's open shard. Lets the live aggregator hold
-# an exclusive LOCK_EX|LOCK_NB on its currently-open .idx so offline tools
-# (migrate, ticks_to_idx replay) can detect "writer already has this shard"
-# and skip today's file instead of producing torn writes.
 fs2 = "0.4"
-
-# Coarse monotonic timestamp used as `ProviderEntry::last_update`. Repr is
-# `transparent(u64)` so the struct is `Copy` + `Pod`-friendly and we avoid
-# the per-cycle `Instant` clone in the aggregator hot path
-# (see core/src/aggregator.rs:312). Resolution is millisecond-class (updated
-# by a 25 ms background thread) which is well below the 50 ms TDWAP cycle
-# and the 1 µs `.clamp(1e-6, 300.0)` floor inside `update_at`.
 coarsetime = "0.1"
 
-# Prometheus metrics: shared across all nxr services (core, fx, crypto) so
-# every binary exposes /metrics on its own port without copy-pasted axum setup.
-metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.17", default-features = false }
-axum = "0.8"
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.17", default-features = false, optional = true }
+axum = { version = "0.8", optional = true }
 
 [dev-dependencies]
 ureq = { version = "2.10", features = ["json"] }
 wiremock = "0.6"
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "fetch_demo"
+required-features = ["client"]
+
+[[example]]
+name = "plan_aware"
+required-features = ["client"]
+
+[[example]]
+name = "quickstart"
+required-features = ["client"]
+
+[[test]]
+name = "client_tests"
+required-features = ["client"]

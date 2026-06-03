@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Canonical Rust SDK provides MITCH types, IPC primitives, ticker resolve,
 # synth composition. Re-exported through this thin pyo3 wrapper.
-nxr-sdk = { path = "../rust" }
+nxr-sdk = { path = "../rust", default-features = false }
 
 # MITCH protocol crate (path-dep matches sdk/rust layout).
 mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }

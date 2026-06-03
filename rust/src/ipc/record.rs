@@ -55,7 +55,7 @@ impl IndexRecord {
     }
 }
 
-impl crate::publisher::AsFrameBytes for IndexRecord {
+impl super::AsFrameBytes for IndexRecord {
     #[inline]
     fn as_frame_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)

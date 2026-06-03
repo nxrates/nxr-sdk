@@ -214,6 +214,12 @@ pub(crate) fn try_acquire_writer_lock(ticker_dir: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
+/// Acquire exclusive `.writer.lock` for offline repair (`heal-idx`). While
+/// held, the live aggregator cannot open `IdxShardWriter` for this ticker.
+pub fn acquire_idx_writer_lock(ticker_dir: &Path) -> Result<fs::File> {
+    try_acquire_writer_lock(ticker_dir)
+}
+
 /// Per-ticker bars directory, keyed by MITCH id: `<data>/bars/<id>`.
 pub fn bars_dir(data_root: &Path, ticker_id: u64) -> PathBuf {
     data_root.join("bars").join(ticker_id.to_string())
@@ -775,6 +781,14 @@ impl IdxShardWriter {
         }
         let date = ts_ms_to_utc_date(ts);
         let new_day = self.cur_date != Some(date);
+        if self.have_last && !new_day && ts < self.last_written_ts {
+            tracing::warn!(
+                ts,
+                last = self.last_written_ts,
+                "IdxShardWriter: dropped out-of-order record"
+            );
+            return Ok(false);
+        }
         // Copy market fields out of the packed body before comparing (no refs).
         // A record is redundant ONLY if the WHOLE market observation repeats:
         // price (bid/ask) AND volume (vbid/vask) AND confidence interval (ci).
@@ -1040,7 +1054,19 @@ impl BarShardWriter {
     /// from `bar.ts_ms()`; producers that want to stagger the rollover should
     /// stamp the bar's close_ts accordingly before calling.
     pub fn append(&mut self, bar: &crate::mitch::bar::Bar) -> Result<()> {
-        let date = ts_ms_to_utc_date(bar.ts_ms());
+        self.append_routed(bar, bar.ts_ms())
+    }
+
+    /// Append `bar` unchanged while routing it to the daily shard for
+    /// `route_ts_ms`. Live producers pass a stagger-shifted route timestamp
+    /// (see `ROLLOVER_SHIFT_MS_*`) so midnight fsync lands off the idx hot
+    /// path, without mutating the persisted bar's `close_ts`.
+    pub fn append_routed(
+        &mut self,
+        bar: &crate::mitch::bar::Bar,
+        route_ts_ms: i64,
+    ) -> Result<()> {
+        let date = ts_ms_to_utc_date(route_ts_ms);
         self.ensure_shard(date)?;
         self.log.as_mut().unwrap().append(bar)?;
         Ok(())
@@ -1378,6 +1404,37 @@ mod tests {
         fs::write(&p, &bytes).unwrap();
         let recs = read_shard_aligned::<IndexRecord>(&p).unwrap();
         assert_eq!(recs.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn append_routed_persists_real_close_ts() {
+        use crate::mitch::bar::{Bar, BarKind};
+        use crate::mitch::timestamp;
+
+        let root = std::env::temp_dir().join("nxr_shard_append_routed_test");
+        let _ = fs::remove_dir_all(&root);
+        let close_ms = t_recent_day_start() + 3_500; // < 4s brick → would invert if shifted
+        let route_ms = close_ms - ROLLOVER_SHIFT_MS_RENKO;
+        let mts_open = timestamp::from_epoch_ms(close_ms - 1_000);
+        let mts_close = timestamp::from_epoch_ms(close_ms);
+        let bar = Bar::new_ohlcv(mts_open, mts_close, 100.0, 100.1, 99.9, 100.05, 1, 1, 5);
+        let mut routed = bar;
+        routed.kind = BarKind::Renko as u8;
+
+        {
+            let mut w = BarShardWriter::open(&root, 704, "renko").unwrap();
+            w.append_routed(&routed, route_ms).unwrap();
+            w.flush().unwrap();
+        }
+
+        let dir = bars_dir(&root, 704);
+        let shards = list_shards(&dir, "renko").unwrap();
+        assert_eq!(shards.len(), 1);
+        let recs = read_shard_aligned::<Bar>(&shards[0].1).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].close_time_ms(), close_ms);
+        assert!(recs[0].open_time_ms() <= recs[0].close_time_ms());
         let _ = fs::remove_dir_all(&root);
     }
 }

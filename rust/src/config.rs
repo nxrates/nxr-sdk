@@ -22,13 +22,13 @@ pub struct NxrConfig {
     pub log_level: String,
     /// TCP port the aggregator listens on for MITCH frames from provider forwarders
     pub listen_port: u16,
-    /// Aggregation cycle interval in milliseconds (default: 50)
+    /// Aggregation cycle interval in milliseconds (default: 100 = 10 Hz)
     pub aggregation_interval_ms: u64,
     /// Duration in ms after which a quote is considered stale (weight decays to zero)
     pub stale_threshold_ms: u64,
     /// Heartbeat interval in ms: when no new ticks arrive, re-emit the last index
-    /// at this cadence so WS clients always have recent data. Wire-only (not stored
-    /// to .idx files). Default: 1000 (1 Hz).
+    /// at this cadence so WS clients always have recent data. Also drives idx
+    /// liveness sentinels on disk (via IdxShardWriter). Default: 1000 (1 Hz).
     pub heartbeat_interval_ms: u64,
     /// HTTP server host
     pub server_host: String,
@@ -93,7 +93,7 @@ impl NxrConfig {
         Self {
             log_level: env_or("NXR_LOG_LEVEL", "info"),
             listen_port: env_or("NXR_LISTEN_PORT", "9500").parse().unwrap_or(9500),
-            aggregation_interval_ms: env_or("NXR_AGGREGATION_INTERVAL_MS", "50")
+            aggregation_interval_ms: env_or("NXR_AGGREGATION_INTERVAL_MS", "100")
                 .parse()
                 .unwrap_or(50),
             stale_threshold_ms: env_or("NXR_STALE_THRESHOLD_MS", "10000")

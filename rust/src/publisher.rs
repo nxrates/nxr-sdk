@@ -29,28 +29,8 @@ use anyhow::Result;
 use tokio::sync::broadcast;
 use tracing::{instrument, warn};
 
+use crate::ipc::AsFrameBytes;
 use crate::transport::FrameSink;
-
-/// View a value as raw frame bytes. Implemented for both pre-serialised byte
-/// buffers (`Vec<u8>`, `Arc<Vec<u8>>`) and for bytemuck-Pod wire structs
-/// (`IndexRecord`) so the publisher can fan out either without an extra copy.
-pub trait AsFrameBytes {
-    fn as_frame_bytes(&self) -> &[u8];
-}
-
-impl AsFrameBytes for Vec<u8> {
-    #[inline]
-    fn as_frame_bytes(&self) -> &[u8] {
-        self
-    }
-}
-
-impl AsFrameBytes for Arc<Vec<u8>> {
-    #[inline]
-    fn as_frame_bytes(&self) -> &[u8] {
-        self
-    }
-}
 
 /// Temporal replay schedule for a publisher instance.
 ///

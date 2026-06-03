@@ -29,18 +29,9 @@ use tokio_tungstenite::{
 };
 use tracing::{debug, info, warn};
 
-/// Binary WS message type for `Index` batches. Must match the producer in
-/// `core::server::ws`.
-pub const MSG_INDEX: u8 = 1;
-
-/// Number of f64 lanes per `Index` record on the wire.
-pub const INDEX_STRIDE: usize = 9;
-
-/// Byte size of one serialised `Index` record (STRIDE × 8 bytes).
-pub const INDEX_RECORD_BYTES: usize = INDEX_STRIDE * 8;
-
-/// 8-byte frame header: `[msg_type, _pad, count_lo, count_hi, _pad × 4]`.
-pub const FRAME_HEADER_BYTES: usize = 8;
+pub use crate::ws_frame::{
+    FRAME_HEADER_BYTES, INDEX_RECORD_BYTES, INDEX_STRIDE, MSG_INDEX,
+};
 
 /// Default WebSocket keepalive. The server has no idle timeout but NAT paths
 /// often do; ping every 30 s so a stateful firewall keeps the connection open.

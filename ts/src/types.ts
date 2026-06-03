@@ -26,7 +26,10 @@ export type Sym = string;
  * - `ci_ubp`: confidence interval in micro basis points (decoded from the sqrt-u16).
  * - `accepted`: # accepted providers in this aggregation window (u8).
  * - `rejected`: # rejected providers (u8).
- * - `confidence`: active provider count (u8, `<= accepted`).
+ * - `confidence`: raw u8 freshness byte. When `FLAG_CONF_FRESHNESS` (flags bit
+ *   3) is set it is Q0.8 fixed-point freshness (use `confidence01 = byte/255`);
+ *   when clear it is the legacy integer active-provider count.
+ * - `confidence01`: `confidence / 255` — the Q0.8 freshness as a float ∈ [0,1].
  */
 export interface IndexRecord {
   ts_ms: number;
@@ -39,6 +42,8 @@ export interface IndexRecord {
   accepted: number;
   rejected: number;
   confidence: number;
+  /** Q0.8 freshness as float ∈ [0,1] (`confidence / 255`). */
+  confidence01: number;
   /** Aggregated bid volume. */
   vbid: number;
   /** Aggregated ask volume. */

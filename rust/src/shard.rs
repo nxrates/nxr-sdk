@@ -66,6 +66,19 @@ pub const FLAG_HISTORICAL_BACKFILL: u8 = 0b0000_0010;
 /// consumers can ignore the flag. Set by `nxr_sdk::renko::RenkoGenerator`.
 pub const FLAG_RENKO_SYNTHETIC_BRICK: u8 = 0b0000_0100;
 
+/// `Index.flags` bit 3: this INDEX record's `confidence` byte (Index body
+/// offset 36) carries a continuous freshness value in Q0.8 fixed-point
+/// (`f = byte / 255 ∈ [0,1]`, ~1 when all providers fresh) rather than the
+/// legacy integer active-provider count. Set by the TDWAP writer
+/// (`nxr_sdk::tdwap::compute_vwap_at`); readers MUST check this bit before
+/// interpreting `confidence` — clear = legacy count, set = Q0.8 freshness.
+///
+/// ⚠ This is the INDEX-record flag space (bits 0/1 = heartbeat/backfill).
+/// Bit 2 is taken by `FLAG_RENKO_SYNTHETIC_BRICK` in the *Bar* flag space,
+/// which shares this module. To avoid any cross-space confusion this uses
+/// bit 3 — free in BOTH the INDEX and the Bar flag spaces.
+pub const FLAG_CONF_FRESHNESS: u8 = 0b0000_1000;
+
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote
 /// is unchanged. 60s bounds the "is this a gap or just quiet?" ambiguity.
 pub const SENTINEL_INTERVAL_MS: i64 = 60_000;

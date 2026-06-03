@@ -239,6 +239,15 @@ where
 
     let mut w_stale_sq_sum = 0.0f64;
 
+    // Freshness (Q0.8) accumulators. `bw_sum` = Σ base_weight over every
+    // VALID-tick provider; `wd_sum` = Σ base_weight·decay. The ratio
+    // `wd_sum/bw_sum ∈ [0,1]` is a continuous freshness: ~1 when all providers
+    // are fresh (decay≈1), falling as components decay. Floored-but-valid
+    // providers still lower freshness via the denominator (they contribute to
+    // `bw_sum` but little to `wd_sum`).
+    let mut bw_sum = 0.0f64;
+    let mut wd_sum = 0.0f64;
+
     for entry in entries {
         if !is_valid_tick(entry.index.bid, entry.index.ask) {
             rejected = rejected.saturating_add(1);
@@ -251,6 +260,12 @@ where
         let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
         let decay_floored = decay.max(0.001);
         let w = entry.base_weight * decay_floored;
+
+        // Freshness numerator/denominator: accumulate for every valid-tick
+        // provider BEFORE the weight-skip below, so floored-but-valid providers
+        // still drag freshness down via the denominator.
+        bw_sum += entry.base_weight;
+        wd_sum += entry.base_weight * decay;
 
         // Active provider: any with non-floored decay >= 10 percent, regardless
         // of whether its weight contributes to TDWAP this cycle. Count, not sum
@@ -301,13 +316,14 @@ where
     let half_spread_agg = (tdwap_ask - tdwap_bid).abs() * 0.5;
     let conf_interval = raw_ci.max(half_spread_agg);
 
-    // `confidence` is the active provider count, clamped to u8. `accepted` is a
-    // u8 incremented only when a provider also contributes weight to the TDWAP
-    // this cycle, so `confidence >= accepted` is possible at the unclamped level
-    // (an active-but-floored provider counts toward active but not accepted).
-    // We must therefore clamp to `accepted` to preserve the schema invariant
-    // enforced by `Index::validate`.
-    let confidence = (active_count.min(255) as u8).min(accepted);
+    // `confidence` is now a CONTINUOUS freshness float in [0,1], stored Q0.8 in
+    // the u8 (byte = round(f·255)). f≈1 ⇒ all providers fresh; falls as
+    // components decay. Independent of `accepted`/`rejected` (which stay raw
+    // COUNTS). The emitted Index sets FLAG_CONF_FRESHNESS so readers know byte36
+    // is Q0.8 freshness, not the legacy active-provider count.
+    let conf_f64 = if bw_sum > 0.0 { (wd_sum / bw_sum).clamp(0.0, 1.0) } else { 0.0 };
+    let confidence = (conf_f64 * 255.0).round() as u8;
+    let _ = active_count; // retained for potential diagnostics; no longer drives confidence
 
     // Guard against crossed market: weighted ask must not be tighter than weighted bid.
     // If crossed, collapse to mid with zero spread (bid == ask == mid).
@@ -323,13 +339,6 @@ where
         0u16
     };
 
-    // Regression guard: confidence must never exceed accepted (Index::validate
-    // rejects otherwise — see the 100%-error ZEC-USDT backfill incident).
-    debug_assert!(
-        confidence <= accepted,
-        "TDWAP confidence ({confidence}) > accepted ({accepted}); active_count={active_count}"
-    );
-
     Some(Index {
         ticker: ticker_id,
         bid: final_bid,
@@ -341,7 +350,9 @@ where
         confidence,
         accepted,
         rejected,
-        flags: 0,
+        // Signal that `confidence` is Q0.8 freshness (byte/255), not a legacy
+        // active-provider count. Single-source bit in `nxr_sdk::shard`.
+        flags: crate::shard::FLAG_CONF_FRESHNESS,
     })
 }
 

@@ -152,7 +152,8 @@ export interface Index {
   vask: number; // u32
   ci: number; // u16 sqrt-encoded
   tickCount: number; // u16
-  confidence: number; // u8 (active provider count, ≤ accepted)
+  confidence: number; // u8 raw freshness byte (Q0.8 when FLAG_CONF_FRESHNESS set)
+  confidence01: number; // confidence / 255 (Q0.8 freshness float ∈ [0,1])
   accepted: number; // u8
   rejected: number; // u8
   flags: number; // u8
@@ -169,6 +170,7 @@ export function readIndex(dv: DataView, off: number): Index {
     ci: dv.getUint16(off + 32, true),
     tickCount: dv.getUint16(off + 34, true),
     confidence: dv.getUint8(off + 36),
+    confidence01: dv.getUint8(off + 36) / 255,
     accepted: dv.getUint8(off + 37),
     rejected: dv.getUint8(off + 38),
     flags: dv.getUint8(off + 39),

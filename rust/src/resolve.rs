@@ -6,7 +6,7 @@
 //! - `resolve_asset` / `resolve_asset_in_class`: fuzzy asset lookup with Jaro-Winkler scoring
 //! - `get_asset_by_id` / `get_asset_by_global_id`: exact asset lookup by numeric ID
 
-use crate::price_canonical::canonical_price_base;
+use crate::price_canonical::canonical_price_symbol;
 
 use mitch::common::{AssetClass, InstrumentType, MitchError};
 use mitch::constants::{
@@ -343,16 +343,19 @@ pub const DEFAULT_QUOTE_SUFFIXES: &[&str] = &["USDT", "USDC", "BTC", "ETH", "USD
 /// whole-pair fuzz that forced quote=USD and collapsed ~24 fiat pairs onto one
 /// id. Exact match required (conf 1.0); no fuzzy on the quote side.
 fn resolve_quote_token(token: &str) -> Option<Asset> {
+    // Quote-side index aliases (DAI→USDS, USDT0→USDT) before asset lookup.
+    let canon = canonical_price_symbol(token);
+    let token = canon.to_lowercase();
     // FX fiat first for non-crypto-major tokens (THB, BRL, TRY, ...).
-    let is_crypto_major = MAJOR_QUOTE_SYMBOLS_LC.contains(&token);
+    let is_crypto_major = MAJOR_QUOTE_SYMBOLS_LC.contains(&token.as_str());
     if !is_crypto_major
-        && let Some(m) = RESOLVER.find(token, 1.0, Some(AssetClass::FX))
+        && let Some(m) = RESOLVER.find(&token, 1.0, Some(AssetClass::FX))
         && m.confidence >= 1.0
     {
         return Some(m.asset);
     }
     // Crypto majors + USD (USD resolves in FX exact too).
-    RESOLVER.find(token, 0.95, None).map(|m| m.asset)
+    RESOLVER.find(&token, 0.95, None).map(|m| m.asset)
 }
 
 fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
@@ -459,8 +462,8 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
         // newly-added CSV rows) survives; longer queries keep 0.9.
         let base_threshold = if remaining.len() <= 4 { 0.95 } else { 0.9 };
 
-        // 1:1 wrapped spot bases share the canonical index asset (CBBTC→BTC).
-        let remaining_canon = canonical_price_base(&remaining);
+        // 1:1 wraps + stable synonyms share the canonical index asset.
+        let remaining_canon = canonical_price_symbol(&remaining);
         let base_lookup = if remaining_canon != remaining.to_uppercase() {
             steps.push(format!(
                 "Price-canonical base: {} -> {}",
@@ -497,7 +500,7 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
     // Step 3: try as single asset with USD quote. Only reached when NO quote
     // was detected at all (bare single-asset symbol like "AAPL").
     // Threshold 0.9 (same RCA as base lookup above): suppress weak fuzzy hits.
-    let cleaned_canon = canonical_price_base(&cleaned);
+    let cleaned_canon = canonical_price_symbol(&cleaned);
     let asset_lookup = if cleaned_canon != cleaned.to_uppercase() {
         steps.push(format!(
             "Price-canonical single asset: {} -> {}",

@@ -124,3 +124,30 @@ fn cbeth_distinct_from_eth_index() {
     );
     assert_eq!(resolve_ticker_id("CBBTC/USDT"), id_of("BTC/USDT"));
 }
+
+/// Native wraps share the canonical major/* ticker id.
+#[test]
+fn native_wrap_shares_index_id() {
+    assert_eq!(id_of("WETH/USDT"), id_of("ETH/USDT"));
+    assert_eq!(id_of("WBNB/USDT"), id_of("BNB/USDT"));
+}
+
+/// Stable / bridged synonyms share the canonical quote (or base) index id.
+#[test]
+fn stable_synonym_shares_index_id() {
+    use nxr_sdk::{alias_kind_for_pair, canonical_price_pair};
+
+    assert_eq!(id_of("DAI/USDT"), id_of("USDS/USDT"));
+    assert_eq!(id_of("ETH/DAI"), id_of("ETH/USDS"));
+    assert_eq!(id_of("USDT0/USDC"), id_of("USDT/USDC"));
+    assert_eq!(id_of("BTC/USDT0"), id_of("BTC/USDT"));
+    assert_eq!(canonical_price_pair("WETH/USDT0"), "ETH/USDT");
+    assert_eq!(alias_kind_for_pair("ETH/DAI"), "stable_synonym");
+}
+
+/// Distinct stables must not collapse onto each other.
+#[test]
+fn distinct_stables_stay_separate() {
+    assert_ne!(id_of("USDC/USDT"), id_of("USDS/USDT"));
+    assert_ne!(id_of("USDC/USDT"), id_of("DAI/USDT"));
+}

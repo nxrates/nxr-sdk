@@ -273,3 +273,20 @@ pub fn flat_bar(bucket_open_ms: i64, ref_price: f64) -> Bar {
         0,
     )
 }
+
+/// Grid-stamp an s10 bar's `open_ts`/`close_ts` to its 10 s bucket boundary.
+///
+/// CANONICAL single source of truth for the s10 grid stamp — the live producer
+/// (`core/src/bars_s10.rs::stamp_s10_bucket`) AND the offline builder
+/// (`series-factory/src/bin/s10_from_idx.rs::stamp_grid`) both call THIS so the
+/// stamp can never drift between hist and live. `bucket_open_ms` is the bucket
+/// start; the close is stamped at `bucket_open + bucket_ms - 1` (the last ms of
+/// the bucket), matching the contiguous-grid contract enforced by
+/// `seam::check_s10_cross_shard`. Any change here recompiles every caller.
+#[inline]
+pub fn stamp_s10_grid(bar: &mut Bar, bucket_open_ms: i64, bucket_ms: i64) {
+    let open_mts = timestamp::from_epoch_ms(bucket_open_ms);
+    let close_mts = timestamp::from_epoch_ms(bucket_open_ms + bucket_ms - 1);
+    bar.open_ts = timestamp::encode_u48(open_mts);
+    bar.close_ts = timestamp::encode_u48(close_mts);
+}

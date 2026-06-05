@@ -471,6 +471,23 @@ pub struct Manifest {
     pub last_ts: i64,
     pub last_updated: i64,
     pub schema_version: u32,
+    /// Renko build-time calibration provenance: the `k` (renko multiplier) the
+    /// shards in this manifest were ACTUALLY built with, as resolved from
+    /// `ticker-params.json` at `renko-from-idx` time. `None` for non-renko
+    /// manifests and for legacy renko manifests written before this field
+    /// existed (serde `default`). The cert asserts this equals the *current*
+    /// `ticker-params.json` k within tolerance — a mismatch ⇒ shards were built
+    /// with a stale k and must be regenerated.
+    #[serde(default)]
+    pub renko_k_used: Option<f64>,
+    /// Unix-seconds `calibrated_at` copied from `ticker-params.json` at the
+    /// time these renko shards were built. The cert flags `shards stale vs
+    /// latest calibration` when the *current* ticker-params `calibrated_at` is
+    /// strictly NEWER than this value (a re-calibration has landed since the
+    /// shards were emitted). `None` for non-renko / legacy / pre-calibration
+    /// manifests (serde `default`).
+    #[serde(default)]
+    pub renko_calibrated_at: Option<i64>,
 }
 
 impl Manifest {
@@ -484,7 +501,20 @@ impl Manifest {
             last_ts: i64::MIN,
             last_updated: 0,
             schema_version: 1,
+            renko_k_used: None,
+            renko_calibrated_at: None,
         }
+    }
+
+    /// Stamp the renko build-time calibration provenance (`k` actually used +
+    /// the `calibrated_at` epoch-seconds copied from `ticker-params.json`).
+    /// Called by `renko-from-idx` right after it resolves the calibrated k so
+    /// the cert can prove "these shards were built with k=X at epoch T". A
+    /// no-op-shaped setter (kept here so the single source of truth for the
+    /// field semantics lives next to the struct).
+    pub fn set_renko_provenance(&mut self, k_used: f64, calibrated_at: Option<i64>) {
+        self.renko_k_used = Some(k_used);
+        self.renko_calibrated_at = calibrated_at;
     }
 
     /// Insert or replace a shard entry by date; keeps shards sorted by date and
@@ -646,7 +676,7 @@ pub struct IdxShardWriter {
     /// Whether to refresh `manifest.json` on rotation/flush. The live aggregator
     /// keeps this on (one rotation per day per ticker — cheap). Bulk migration
     /// turns it OFF: rebuilding+sha256'ing+fsync'ing a growing manifest on every
-    /// one of ~730 daily rotations per ticker is O(n²) fsync churn on DRBD. The
+    /// one of ~730 daily rotations per ticker is O(n²) fsync churn on disk. The
     /// API reader uses `list_shards`, not the manifest, so it is optional for
     /// serving; a manifest can be rebuilt cheaply in one pass afterward.
     manifest: bool,

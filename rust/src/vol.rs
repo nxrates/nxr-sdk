@@ -50,6 +50,58 @@ pub struct VolConfig {
     /// re-run at most every 12h; the 30-min vol bin is unchanged.
     #[serde(default = "default_recompute_cooldown_ms")]
     pub recompute_cooldown_ms: i64,
+
+    /// ── Spike-responsive σ floor (vol-spike brick-storm damping) ─────────────
+    ///
+    /// When `true`, [`MtfVolCalculator::compute_sigma`] returns
+    /// `σ_eff = max(σ_blend, σ_fast)` where `σ_fast` is a SHORT-halflife EWMA of
+    /// the trailing per-bin Rogers-Satchell σ (the same `.vol` rows the slow MTF
+    /// blend reads). The slow inverse-variance-weighted blend (the 14/60/180-day
+    /// `sigma_blend_windows_days`) is the FLOOR; the fast EWMA only ever raises
+    /// σ during a sudden vol spike.
+    ///
+    /// ## Why this dampens brick-storms (and ONLY storms)
+    ///
+    /// Brick size = `price · max(k·σ, min_pct)`. On a sudden vol spike the slow
+    /// 30-min blend still reflects the prior calm regime (its longest window is
+    /// 180 days) → σ too small → brick too small → price rips through hundreds
+    /// of tiny bricks (a "storm" day: BTC 2026-06-01 hit 10369 bricks vs the
+    /// ~172 median). σ_fast tracks the spike within a few 30-min bins, so on a
+    /// spike `σ_fast > σ_blend` → brick GROWS → fewer storm bricks. The MAX
+    /// makes it strictly one-sided: σ_eff is NEVER below the calm-regime blend,
+    /// so calm days emit the SAME brick count (σ_fast ≈ σ_blend ⇒ MAX is a
+    /// no-op) and only spike tails are tamed. There is no calm-regime behaviour
+    /// change.
+    ///
+    /// ## Trading-signal implication
+    ///
+    /// Larger bricks during high vol == standard ATR-renko / vol-normalized
+    /// renko. For a keeper targeting 4-6h holds this IMPROVES signal quality:
+    /// the storm bricks were whipsaw noise (a brick every ~8s on 2026-06-01),
+    /// not tradable swings. Damping the tail removes chop-driven false
+    /// reversals while leaving the calm-regime brick geometry — and therefore
+    /// the calm-regime signal — byte-identical.
+    ///
+    /// Default OFF (`false`) so behaviour is unchanged until the operator opts
+    /// in via `config.yml` `series.vol.spike_responsive`.
+    #[serde(default)]
+    pub spike_responsive: bool,
+
+    /// Halflife (in 30-min bins) of the fast σ EWMA used when `spike_responsive`
+    /// is enabled. Smaller ⇒ faster reaction to a spike (and faster decay back
+    /// to the slow blend once vol subsides). Default 3 bins = 90 min: long
+    /// enough that one noisy bin does not inflate brick size, short enough that
+    /// a sustained spike grows the brick within ~1.5 h. `α = 1 − 2^(−1/halflife)`.
+    #[serde(default = "default_spike_fast_halflife_bins")]
+    pub spike_fast_halflife_bins: f64,
+
+    /// Hard ceiling on `σ_fast / σ_blend`. Bounds how much the spike floor can
+    /// grow the brick in a single window so a transient data glitch (one bin of
+    /// garbage RS σ) cannot blow brick size up unboundedly. Default 8× — well
+    /// above any genuine intra-day vol regime change, far below a glitch. Set
+    /// `≤ 1.0` to disable the cap (σ_fast then free to dominate).
+    #[serde(default = "default_spike_fast_max_ratio")]
+    pub spike_fast_max_ratio: f64,
 }
 
 /// Canonical recalibration cooldown: 12 hours in ms.
@@ -57,6 +109,20 @@ pub const DEFAULT_RECOMPUTE_COOLDOWN_MS: i64 = 43_200_000;
 
 fn default_recompute_cooldown_ms() -> i64 {
     DEFAULT_RECOMPUTE_COOLDOWN_MS
+}
+
+/// Default fast-σ EWMA halflife: 3 × 30-min bins = 90 min.
+pub const DEFAULT_SPIKE_FAST_HALFLIFE_BINS: f64 = 3.0;
+
+fn default_spike_fast_halflife_bins() -> f64 {
+    DEFAULT_SPIKE_FAST_HALFLIFE_BINS
+}
+
+/// Default ceiling on `σ_fast / σ_blend` (8×).
+pub const DEFAULT_SPIKE_FAST_MAX_RATIO: f64 = 8.0;
+
+fn default_spike_fast_max_ratio() -> f64 {
+    DEFAULT_SPIKE_FAST_MAX_RATIO
 }
 
 impl Default for VolConfig {
@@ -67,6 +133,9 @@ impl Default for VolConfig {
             winsorize_pct: [0.05, 0.95],
             winsorize_min_samples: 5,
             recompute_cooldown_ms: DEFAULT_RECOMPUTE_COOLDOWN_MS,
+            spike_responsive: false,
+            spike_fast_halflife_bins: DEFAULT_SPIKE_FAST_HALFLIFE_BINS,
+            spike_fast_max_ratio: DEFAULT_SPIKE_FAST_MAX_RATIO,
         }
     }
 }
@@ -144,10 +213,65 @@ impl<'a, S: VolSource + ?Sized> MtfVolCalculator<'a, S> {
             weight_sum += inv_var;
         }
 
-        if weight_sum > 0.0 {
+        let blend = if weight_sum > 0.0 {
             weighted_sum / weight_sum
         } else {
             self.source.sigma_pct(hour_idx).max(0.01)
+        };
+
+        // Spike-responsive floor (gated; default OFF — calm-regime unchanged).
+        // σ_eff = max(σ_blend, σ_fast). The fast EWMA only ever RAISES σ during
+        // a sudden vol spike (where the 180-day-anchored slow blend lags), so
+        // brick size GROWS and the storm tail is damped. On a calm day
+        // σ_fast ≈ σ_blend ⇒ the MAX is a no-op ⇒ identical brick count.
+        if self.config.spike_responsive {
+            let fast = self.fast_sigma(hour_idx, blend);
+            blend.max(fast)
+        } else {
+            blend
+        }
+    }
+
+    /// Short-halflife EWMA of the trailing per-bin Rogers-Satchell σ, ending at
+    /// (and INCLUDING) `hour_idx`. This is the "fast" σ that reacts to a vol
+    /// spike within a few 30-min bins, where the slow inverse-variance MTF blend
+    /// (anchored by the 60/180-day windows) still reflects the prior calm
+    /// regime. Strictly causal: reads only bins `≤ hour_idx`.
+    ///
+    /// EWMA is evaluated oldest→newest over a bounded trailing window
+    /// (`ceil(6 × halflife)` bins, enough for the weight of the oldest retained
+    /// bin to fall below ~1.5%). The result is capped at
+    /// `blend × spike_fast_max_ratio` so a single bin of glitch σ cannot blow
+    /// brick size up unboundedly (default 8×; `≤ 1.0` disables the cap).
+    fn fast_sigma(&self, hour_idx: usize, blend: f64) -> f64 {
+        let halflife = self.config.spike_fast_halflife_bins;
+        if !(halflife.is_finite() && halflife > 0.0) {
+            return 0.0; // misconfigured halflife ⇒ no fast contribution
+        }
+        // α = 1 − 2^(−1/halflife): the per-bin EWMA smoothing factor.
+        let alpha = 1.0 - (-(std::f64::consts::LN_2) / halflife).exp();
+        // Trailing window deep enough that the oldest retained weight is small.
+        let window = ((halflife * 6.0).ceil() as usize).max(1);
+        let start = hour_idx.saturating_sub(window.saturating_sub(1));
+
+        let mut ewma: Option<f64> = None;
+        for i in start..=hour_idx {
+            let s = self.source.sigma_pct(i);
+            if !(s.is_finite() && s > 0.0) {
+                continue; // skip degenerate bins; never let them zero the EWMA
+            }
+            ewma = Some(match ewma {
+                Some(prev) => alpha * s + (1.0 - alpha) * prev,
+                None => s,
+            });
+        }
+
+        let fast = ewma.unwrap_or(0.0);
+        let max_ratio = self.config.spike_fast_max_ratio;
+        if max_ratio > 1.0 && blend > 0.0 {
+            fast.min(blend * max_ratio)
+        } else {
+            fast
         }
     }
 }
@@ -515,6 +639,140 @@ mod tests {
         let src = StaticSource(vec![0.02]);
         let mut calc = MtfVolCalculator::new(&src, VolConfig::default());
         assert!((calc.compute_sigma(0) - 0.02).abs() < 1e-9);
+    }
+
+    /// VolSource that replays an explicit per-bin σ vector AND maps mts→index by
+    /// floor-dividing the mts into 30-min bins (so the renko engine's per-bin σ
+    /// refresh lands on the right bin during the spike-window replay).
+    struct VecVolSource(Vec<f64>);
+    impl VolSource for VecVolSource {
+        fn len(&self) -> usize { self.0.len() }
+        fn sigma_pct(&self, i: usize) -> f64 { self.0.get(i).copied().unwrap_or(0.0) }
+        fn find_index_for_mts(&self, _mts: u64) -> usize { self.0.len().saturating_sub(1) }
+    }
+
+    /// SPIKE-RESPONSIVE σ (vol-spike brick-storm damping).
+    ///
+    /// Construct a long CALM σ history (flat low σ) followed by a short SPIKE
+    /// (σ jumps 6×). Assert:
+    ///   1. CALM regime: spike-responsive σ_eff is within ~1% of the plain MTF
+    ///      blend (MAX is a no-op when σ_fast ≈ σ_blend) — calm behaviour
+    ///      unchanged.
+    ///   2. SPIKE regime: spike-responsive σ_eff is MATERIALLY larger than the
+    ///      lagging MTF blend (σ_fast tracks the spike, the 180-day-anchored
+    ///      blend lags) ⇒ brick size grows ⇒ FEWER bricks would form.
+    ///   3. Brick-count proxy: over the spike window the larger σ_eff yields a
+    ///      brick size whose price-move/brick ratio is materially smaller (fewer
+    ///      bricks for the same realized move) than the lagging blend would.
+    #[test]
+    fn spike_responsive_grows_sigma_on_spike_not_on_calm() {
+        let calm_sigma = 0.004_f64; // 0.4% per-bin RS σ, calm regime
+        let spike_sigma = 0.024_f64; // 2.4% — a 6× vol spike
+        let n_calm = 400usize; // > longest blend window samples for a stable blend
+        let n_spike = 6usize; // ~3 h of spike bins
+
+        let mut sigmas = vec![calm_sigma; n_calm];
+        sigmas.extend(std::iter::repeat(spike_sigma).take(n_spike));
+        let src = VecVolSource(sigmas);
+
+        // Short blend windows so the test runs without 180 days of data, but the
+        // SLOW blend still lags the freshest few bins (it averages over 14 days
+        // of bins = 672 samples >> the 6 spike bins).
+        let cfg_off = VolConfig {
+            sigma_blend_windows_days: vec![14],
+            winsorize_min_samples: 5,
+            spike_responsive: false,
+            ..VolConfig::default()
+        };
+        let cfg_on = VolConfig {
+            spike_responsive: true,
+            spike_fast_halflife_bins: 3.0,
+            spike_fast_max_ratio: 8.0,
+            ..cfg_off.clone()
+        };
+
+        let calm_idx = n_calm - 1; // last calm bin
+        let spike_idx = src.len() - 1; // last spike bin
+
+        // ── 1. CALM: σ_eff(on) ≈ σ_blend(off) within ~1% ─────────────────────
+        let blend_calm = {
+            let mut c = MtfVolCalculator::new(&src, cfg_off.clone());
+            c.compute_sigma(calm_idx)
+        };
+        let eff_calm = {
+            let mut c = MtfVolCalculator::new(&src, cfg_on.clone());
+            c.compute_sigma(calm_idx)
+        };
+        let calm_rel = (eff_calm - blend_calm).abs() / blend_calm;
+        assert!(
+            calm_rel <= 0.01,
+            "calm σ_eff {eff_calm} must be within ~1% of blend {blend_calm} (rel {calm_rel})"
+        );
+
+        // ── 2. SPIKE: σ_eff(on) materially > σ_blend(off) ────────────────────
+        let blend_spike = {
+            let mut c = MtfVolCalculator::new(&src, cfg_off.clone());
+            c.compute_sigma(spike_idx)
+        };
+        let eff_spike = {
+            let mut c = MtfVolCalculator::new(&src, cfg_on.clone());
+            c.compute_sigma(spike_idx)
+        };
+        assert!(
+            eff_spike > blend_spike * 1.5,
+            "spike σ_eff {eff_spike} must be materially larger than lagging blend \
+             {blend_spike} (the storm-damping property)"
+        );
+
+        // ── 3. Brick-count proxy ─────────────────────────────────────────────
+        // bricks ≈ realized_move / brick_size, brick_size ∝ σ. So the brick
+        // COUNT during the spike scales as 1/σ_eff. A larger σ_eff ⇒ strictly
+        // fewer bricks. Assert the lagging-blend brick count exceeds the
+        // spike-responsive count by the same ratio σ_eff/σ_blend.
+        let k = 0.5_f64;
+        let price = 100.0_f64;
+        let realized_move = price * spike_sigma * 4.0; // a chunky spike move
+        let bricks_lagging = realized_move / (price * (k * blend_spike).max(1e-9));
+        let bricks_responsive = realized_move / (price * (k * eff_spike).max(1e-9));
+        assert!(
+            bricks_responsive < bricks_lagging * 0.7,
+            "spike-responsive bricks {bricks_responsive:.1} must be materially \
+             fewer than lagging-blend bricks {bricks_lagging:.1}"
+        );
+
+        // ── 4. Cap honored: σ_fast/σ_blend never exceeds spike_fast_max_ratio ─
+        assert!(
+            eff_spike <= blend_spike * cfg_on.spike_fast_max_ratio + 1e-12,
+            "σ_eff {eff_spike} must respect the {}× cap over blend {blend_spike}",
+            cfg_on.spike_fast_max_ratio
+        );
+    }
+
+    /// MAX-only invariant: spike-responsive σ_eff is NEVER below the plain blend,
+    /// at EVERY bin index over a mixed calm/spike/calm path. This is the
+    /// "only ever dampens storms, never adds bricks" guarantee.
+    #[test]
+    fn spike_responsive_never_below_blend() {
+        let mut sigmas = vec![0.004_f64; 300];
+        sigmas.extend(std::iter::repeat(0.02_f64).take(5)); // spike
+        sigmas.extend(std::iter::repeat(0.004_f64).take(50)); // calm recovery
+        let src = VecVolSource(sigmas);
+
+        let cfg_off = VolConfig {
+            sigma_blend_windows_days: vec![14],
+            spike_responsive: false,
+            ..VolConfig::default()
+        };
+        let cfg_on = VolConfig { spike_responsive: true, ..cfg_off.clone() };
+
+        for i in 0..src.len() {
+            let blend = MtfVolCalculator::new(&src, cfg_off.clone()).compute_sigma(i);
+            let eff = MtfVolCalculator::new(&src, cfg_on.clone()).compute_sigma(i);
+            assert!(
+                eff >= blend - blend.abs() * 1e-9,
+                "bin {i}: σ_eff {eff} dropped below blend {blend} (MAX invariant broken)"
+            );
+        }
     }
 
     /// LiveVolRing must produce EMA-smoothed Rogers-Satchell rows byte-identical

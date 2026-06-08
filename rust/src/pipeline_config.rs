@@ -544,6 +544,15 @@ pub struct CalibrationYml {
     /// nobody added it to the per-pair override list.
     #[serde(default)]
     pub target_bpd_by_class: BTreeMap<String, f64>,
+    /// PART B4 (2026-06-09): per-pair FORCED renko-k escape hatch keyed by pair
+    /// string (e.g. "BTC/USDT" → 0.42). When present and within
+    /// `[K_FLOOR, MULT_UPPER_BOUND]`, the calibrator EMITS this k directly and
+    /// SKIPS the fit for that pair. Reserved for "structural-floor" tickers the
+    /// staircase prevents the fit from landing within `RENKO_BPD_ACCEPT_TOL` of
+    /// target (surfaced by the per-ticker `achieved_err` log). Empty by default —
+    /// add entries only after the fit log shows a ticker's floor exceeds tol.
+    #[serde(default)]
+    pub renko_k_overrides: BTreeMap<String, f64>,
 }
 
 impl CalibrationYml {
@@ -626,6 +635,7 @@ mod tests {
             mult_bounds: [0.05, 4.0],
             target_bpd_overrides: BTreeMap::from([("USDC/USDT".to_string(), 50.0)]),
             target_bpd_by_class: BTreeMap::from([("crypto_stable".to_string(), 50.0)]),
+            renko_k_overrides: BTreeMap::new(),
         }
     }
 
@@ -649,6 +659,41 @@ mod tests {
         // Legacy path: only the per-pair override map, no class layer.
         assert_eq!(c.target_for_pair("USDC/USDT"), 50.0);
         assert_eq!(c.target_for_pair("FDUSD/USDT"), 300.0); // not in override map
+    }
+
+    /// PART B4 (2026-06-09): the per-pair forced-k escape hatch. The calibrator
+    /// binary short-circuits the fit when `renko_k_overrides` has the pair AND
+    /// the k is in `[K_FLOOR, MULT_UPPER_BOUND]`. This pins the field's
+    /// deserialization + the exact bounds predicate the binary applies.
+    #[test]
+    fn renko_k_override_short_circuits_fit() {
+        use crate::renko::{K_FLOOR, MULT_UPPER_BOUND};
+        // Field deserializes from YAML and defaults to empty when absent.
+        let y: CalibrationYml = serde_yml::from_str(
+            "target_bpd: 300\nk_fit_windows_days: [30]\nmin_window_days: 30\n\
+             max_rounds: 20\ntolerance: 0.03\nmult_bounds: [0.05, 4.0]\n\
+             renko_k_overrides:\n  \"BTC/USDT\": 0.42\n  \"BAD/LOW\": 0.001\n  \"BAD/HI\": 9.0\n",
+        ).expect("parse CalibrationYml with renko_k_overrides");
+
+        // Present + in-bounds ⇒ the binary emits this k and skips the fit.
+        let forced = y.renko_k_overrides.get("BTC/USDT").copied();
+        assert_eq!(forced, Some(0.42));
+        assert!((K_FLOOR..=MULT_UPPER_BOUND).contains(&forced.unwrap()),
+            "in-bounds override short-circuits");
+
+        // Out-of-bounds entries are ignored by the binary (predicate false ⇒
+        // falls through to the normal fit).
+        assert!(!(K_FLOOR..=MULT_UPPER_BOUND)
+            .contains(&y.renko_k_overrides["BAD/LOW"]), "below K_FLOOR ignored");
+        assert!(!(K_FLOOR..=MULT_UPPER_BOUND)
+            .contains(&y.renko_k_overrides["BAD/HI"]), "above MULT_UPPER_BOUND ignored");
+
+        // Absent pair ⇒ no override ⇒ normal fit path.
+        assert!(y.renko_k_overrides.get("ETH/USDT").is_none());
+
+        // Default (field omitted) ⇒ empty map.
+        let c = cal();
+        assert!(c.renko_k_overrides.is_empty());
     }
 
 }

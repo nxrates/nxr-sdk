@@ -26,7 +26,7 @@
 /// log.append(&record).unwrap();
 /// ```
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -40,8 +40,48 @@ use tracing::warn;
 /// `Instant::now()` compare on the hot path).
 pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(5);
 
+/// BufWriter capacity for the OFFLINE buffered variant (`open_buffered`).
+/// 256 KiB amortises the per-record `write_all` syscall over thousands of
+/// 56B/96B records — the big-win for the bulk builders (ticks-to-idx, merge).
+const BUFFERED_CAPACITY: usize = 256 * 1024;
+
+/// Inner sink: either a raw [`File`] (LIVE path — every append is immediately
+/// in the page cache so forwarder readers can tail the shard) or a
+/// [`BufWriter`]-wrapped file (OFFLINE bulk builders — readers never tail a
+/// half-built backfill shard, so coalescing writes is a pure win).
+enum Sink {
+    /// Unbuffered: `write_all` goes straight to the OS page cache. The live
+    /// aggregator REQUIRES this — forwarder readers tail open shards via the
+    /// page cache and buffering would regress reader-visibility.
+    Unbuffered(File),
+    /// Buffered: writes coalesce in a [`BufWriter`] until 256 KiB / flush.
+    /// OFFLINE builders only (ticks-to-idx, merge-idx ShardedWriter).
+    Buffered(BufWriter<File>),
+}
+
+impl Sink {
+    /// Borrow the underlying file (for `sync_data` / `metadata` / `set_len`).
+    /// For the buffered variant this does NOT flush the buffer — callers that
+    /// need durability go through [`AppendLog::flush`] which flushes first.
+    #[inline]
+    fn file(&self) -> &File {
+        match self {
+            Sink::Unbuffered(f) => f,
+            Sink::Buffered(bw) => bw.get_ref(),
+        }
+    }
+
+    #[inline]
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Sink::Unbuffered(f) => f.write_all(bytes),
+            Sink::Buffered(bw) => bw.write_all(bytes),
+        }
+    }
+}
+
 pub struct AppendLog<T: Pod> {
-    file: File,
+    file: Sink,
     path: String,
     last_sync: Instant,
     sync_interval: Duration,
@@ -61,6 +101,30 @@ impl<T: Pod> AppendLog<T> {
     pub fn open_with_sync_interval(
         path: impl AsRef<Path>,
         sync_interval: Duration,
+    ) -> Result<Self> {
+        Self::open_inner(path, sync_interval, false)
+    }
+
+    /// OFFLINE-ONLY buffered variant: wraps the file in a 256 KiB
+    /// [`BufWriter`] so the bulk builders (`ticks_to_idx`, `merge_idx`'s
+    /// `ShardedWriter`) coalesce thousands of 56B/96B per-record writes into a
+    /// handful of syscalls. Default sync cadence.
+    ///
+    /// ⚠ DO NOT use on the LIVE aggregator path ([`IdxShardWriter`] /
+    /// [`BarShardWriter`]): forwarder readers tail open shards through the OS
+    /// page cache, and buffering would hide just-written records from them
+    /// until the buffer flushes. The live writers MUST keep [`AppendLog::open`]
+    /// (unbuffered). On `flush()` / `Drop` the order is
+    /// `buf.flush()` THEN `sync_data()` so durability is never claimed for data
+    /// still sitting in the userspace buffer.
+    pub fn open_buffered(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(path, DEFAULT_SYNC_INTERVAL, true)
+    }
+
+    fn open_inner(
+        path: impl AsRef<Path>,
+        sync_interval: Duration,
+        buffered: bool,
     ) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -98,8 +162,13 @@ impl<T: Pod> AppendLog<T> {
                     .with_context(|| format!("truncate {:?} to alignment", path))?;
             }
         }
+        let sink = if buffered {
+            Sink::Buffered(BufWriter::with_capacity(BUFFERED_CAPACITY, file))
+        } else {
+            Sink::Unbuffered(file)
+        };
         Ok(Self {
-            file,
+            file: sink,
             path: path.to_string_lossy().into_owned(),
             last_sync: Instant::now(),
             sync_interval,
@@ -121,7 +190,15 @@ impl<T: Pod> AppendLog<T> {
             .with_context(|| format!("append to {}", self.path))?;
 
         if self.last_sync.elapsed() >= self.sync_interval {
-            if let Err(e) = self.file.sync_data() {
+            // For the buffered variant, push the userspace buffer to the OS
+            // BEFORE fdatasync — otherwise sync_data would only durably flush
+            // bytes already in the page cache, leaving buffered records at risk.
+            if let Sink::Buffered(bw) = &mut self.file {
+                if let Err(e) = bw.flush() {
+                    warn!(path = %self.path, err = %e, "AppendLog periodic buf flush failed");
+                }
+            }
+            if let Err(e) = self.file.file().sync_data() {
                 warn!(path = %self.path, err = %e, "AppendLog periodic fdatasync failed");
             }
             self.last_sync = Instant::now();
@@ -132,7 +209,15 @@ impl<T: Pod> AppendLog<T> {
     /// Force an `fdatasync` now. Use before a process-level checkpoint or when
     /// a specific record must be durable before returning to the caller.
     pub fn flush(&mut self) -> Result<()> {
+        // Order MUST be buf.flush() THEN sync_data(): push userspace-buffered
+        // bytes into the page cache first, then fdatasync the file. Otherwise
+        // durability would be claimed for records still in the BufWriter.
+        if let Sink::Buffered(bw) = &mut self.file {
+            bw.flush()
+                .with_context(|| format!("buf flush {}", self.path))?;
+        }
         self.file
+            .file()
             .sync_data()
             .with_context(|| format!("sync_data {}", self.path))?;
         self.last_sync = Instant::now();
@@ -145,7 +230,16 @@ impl<T: Pod> Drop for AppendLog<T> {
     /// buffered writes. Errors are swallowed (we can't return from Drop) but
     /// logged so they show up in process teardown traces.
     fn drop(&mut self) {
-        if let Err(e) = self.file.sync_data() {
+        // Order MUST be buf.flush() THEN sync_data() (see `flush`): on a
+        // graceful shutdown of a buffered offline builder, the tail of the
+        // BufWriter must reach the page cache before fdatasync, else the last
+        // <256 KiB of records would be lost on drop.
+        if let Sink::Buffered(bw) = &mut self.file {
+            if let Err(e) = bw.flush() {
+                warn!(path = %self.path, err = %e, "AppendLog drop buf flush failed");
+            }
+        }
+        if let Err(e) = self.file.file().sync_data() {
             warn!(path = %self.path, err = %e, "AppendLog drop fdatasync failed");
         }
     }
@@ -185,6 +279,40 @@ mod tests {
             AppendLog::open_with_sync_interval(&tmp, Duration::MAX).unwrap();
         log.append(&Row { v: 7 }).unwrap();
         log.flush().unwrap();
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn buffered_writes_all_rows_after_drop() {
+        let tmp = std::env::temp_dir().join("nxr_sdk_append_log_buffered.bin");
+        let _ = std::fs::remove_file(&tmp);
+        {
+            let mut log: AppendLog<Row> = AppendLog::open_buffered(&tmp).unwrap();
+            for i in 0..5000u64 {
+                log.append(&Row { v: i }).unwrap();
+            }
+            // Drop flushes the BufWriter then fdatasyncs.
+        }
+        let bytes = std::fs::read(&tmp).unwrap();
+        assert_eq!(bytes.len(), 5000 * std::mem::size_of::<Row>());
+        let rows: &[Row] = bytemuck::cast_slice(&bytes);
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!(r.v, i as u64);
+        }
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn buffered_flush_makes_rows_visible() {
+        let tmp = std::env::temp_dir().join("nxr_sdk_append_log_buffered_flush.bin");
+        let _ = std::fs::remove_file(&tmp);
+        let mut log: AppendLog<Row> = AppendLog::open_buffered(&tmp).unwrap();
+        for i in 0..100u64 {
+            log.append(&Row { v: i }).unwrap();
+        }
+        log.flush().unwrap();
+        let bytes = std::fs::read(&tmp).unwrap();
+        assert_eq!(bytes.len(), 100 * std::mem::size_of::<Row>());
         std::fs::remove_file(&tmp).ok();
     }
 

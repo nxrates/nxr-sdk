@@ -441,6 +441,36 @@ impl<T: Pod> ShardStream<T> {
         self.pos += stride;
         Ok(Some(rec))
     }
+
+    /// Next *chunk* of records as a borrowed slice over the currently-buffered
+    /// region, or `Ok(None)` at EOF. Avoids the per-record 56B/96B copy that
+    /// [`next`](Self::next) does (`*from_bytes`) — the hot offline consumers
+    /// (`s10_from_idx`, both `renko_from_idx` passes, `merge_idx` inputs)
+    /// iterate the returned slice by reference.
+    ///
+    /// Yields the same records in the same order as repeated [`next`] calls:
+    /// it returns `&buf[pos..filled]` reinterpreted as `&[T]` and advances
+    /// `pos` to `filled` so the following call refills. Buffer boundaries are
+    /// an implementation detail (4096 records / refill) — callers MUST treat
+    /// the chunk size as arbitrary and loop until `None`.
+    pub fn next_chunk(&mut self) -> Result<Option<&[T]>> {
+        let stride = core::mem::size_of::<T>();
+        if stride == 0 {
+            return Ok(None);
+        }
+        if self.pos >= self.filled {
+            self.refill()?;
+            if self.pos >= self.filled {
+                return Ok(None);
+            }
+        }
+        // `refill` heals any torn tail so `[pos..filled]` is always a whole
+        // multiple of `stride`. T is `repr(C, packed)` (align 1) for our record
+        // types, so `cast_slice` never trips the alignment check.
+        let slice: &[T] = bytemuck::cast_slice(&self.buf[self.pos..self.filled]);
+        self.pos = self.filled;
+        Ok(Some(slice))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -532,6 +562,34 @@ impl Manifest {
         if let Some(last) = self.shards.last() {
             self.last_ts = last.last_ts;
         }
+        self.last_updated = crate::now_ms() as i64;
+    }
+
+    /// Replace ALL shard entries in one batch: dedup-by-date (last wins),
+    /// sort once, and recompute manifest-level first/last ts. O(n log n) total
+    /// vs `upsert`'s O(n²) (per-call linear find + full re-sort). Use this when
+    /// (re)building a manifest from a known set of shards — the offline
+    /// `*_from_idx` / migration passes that emit every shard up front. The live
+    /// aggregator keeps [`upsert`](Self::upsert) for its single-shard daily
+    /// rotation. Final manifest is identical to feeding the same entries to
+    /// `upsert` one by one.
+    pub fn set_shards_batch(&mut self, mut entries: Vec<ShardEntry>) {
+        // Dedup by date keeping the LAST occurrence (matches upsert's replace
+        // semantics): stable so iteration order decides the winner.
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut deduped: Vec<ShardEntry> = Vec::with_capacity(entries.len());
+        for e in entries.drain(..) {
+            if let Some(&i) = seen.get(&e.date) {
+                deduped[i] = e;
+            } else {
+                seen.insert(e.date.clone(), deduped.len());
+                deduped.push(e);
+            }
+        }
+        deduped.sort_by(|a, b| a.date.cmp(&b.date));
+        self.shards = deduped;
+        self.first_ts = self.shards.first().map(|s| s.first_ts).unwrap_or(i64::MAX);
+        self.last_ts = self.shards.last().map(|s| s.last_ts).unwrap_or(i64::MIN);
         self.last_updated = crate::now_ms() as i64;
     }
 
@@ -698,6 +756,18 @@ pub struct IdxShardWriter {
     /// row so a downstream gap-detection audit can distinguish "quiet market"
     /// from "producer outage". (R1 C2)
     last_written_ts: i64,
+    /// Cached `[start, end)` epoch-ms window of `cur_date`'s UTC day. A record
+    /// whose `ts` falls inside this half-open window is provably same-day, so
+    /// the hot path skips the per-record `ts_ms_to_utc_date` chrono conversion
+    /// and routes with two integer compares. UTC days are exactly
+    /// [`MS_PER_DAY`] ms (no DST, leap seconds absent from unix time), so the
+    /// window ↔ `NaiveDate` mapping is exact. Set in lock-step with `cur_date`
+    /// by [`ensure_shard`](Self::ensure_shard); an out-of-range ts (cold start
+    /// / day rollover / backfill) falls back to the chrono path which then
+    /// refreshes the window. `(MAX, MIN)` sentinel = "no cached day yet" so the
+    /// first append always takes the chrono path.
+    cur_day_start_ms: i64,
+    cur_day_end_ms: i64,
 }
 
 impl IdxShardWriter {
@@ -733,6 +803,10 @@ impl IdxShardWriter {
             last_vask: 0,
             last_ci: 0,
             last_written_ts: 0,
+            // "no cached day" sentinel: forces the first append onto the chrono
+            // path, which sets the real window in ensure_shard.
+            cur_day_start_ms: i64::MAX,
+            cur_day_end_ms: i64::MIN,
             _writer_lock: Some(lock),
         };
         w.seed_from_tail()?;
@@ -792,6 +866,11 @@ impl IdxShardWriter {
         let path = shard_path(&self.dir, date, "idx");
         self.log = Some(AppendLog::open(&path)?);
         self.cur_date = Some(date);
+        // Refresh the cached same-day fast-path window in lock-step with
+        // cur_date. [start, start+MS_PER_DAY) is the exact epoch-ms span that
+        // ts_ms_to_utc_date maps to `date`.
+        self.cur_day_start_ms = day_start_ms(date);
+        self.cur_day_end_ms = self.cur_day_start_ms + MS_PER_DAY;
         Ok(())
     }
 
@@ -844,8 +923,22 @@ impl IdxShardWriter {
                 now_ms - 730 * MS_PER_DAY
             ));
         }
-        let date = ts_ms_to_utc_date(ts);
-        let new_day = self.cur_date != Some(date);
+        // Same-day fast path: if `ts` falls inside the cached UTC-day window of
+        // `cur_date`, it routes to that same shard — skip the per-record chrono
+        // `ts_ms_to_utc_date` conversion and decide `new_day` with two int
+        // compares. Decision-identical to the chrono path: the window is exactly
+        // `[day_start_ms(cur_date), +MS_PER_DAY)`, the unique span ts_ms_to_utc_date
+        // maps to `cur_date`. Out-of-window (cold start / rollover / backfill)
+        // falls back to chrono, which sets `date` and refreshes the window via
+        // ensure_shard. `date` is computed lazily — only the write path needs it.
+        let (new_day, mut date) = if ts >= self.cur_day_start_ms && ts < self.cur_day_end_ms {
+            // In-window ⇒ same UTC day as cur_date (which is Some here, since a
+            // valid window is only ever set alongside cur_date).
+            (false, self.cur_date)
+        } else {
+            let d = ts_ms_to_utc_date(ts);
+            (self.cur_date != Some(d), Some(d))
+        };
         if self.have_last && !new_day && ts < self.last_written_ts {
             tracing::warn!(
                 ts,
@@ -860,13 +953,13 @@ impl IdxShardWriter {
         // Any change is new information (it feeds downstream bar microstructure),
         // so it is kept. Per-cycle metadata (tick_count/confidence/accepted/
         // rejected) is intentionally NOT part of the identity — it churns every
-        // cycle and is not a market observation.
-        let body = rec.index;
-        let bid = body.bid;
-        let ask = body.ask;
-        let vbid = body.vbid;
-        let vask = body.vask;
-        let ci = body.ci;
+        // cycle and is not a market observation. Read fields via `addr_of!` to
+        // avoid copying the whole 40B Index body out of the packed record.
+        let bid = unsafe { core::ptr::addr_of!(rec.index.bid).read_unaligned() };
+        let ask = unsafe { core::ptr::addr_of!(rec.index.ask).read_unaligned() };
+        let vbid = unsafe { core::ptr::addr_of!(rec.index.vbid).read_unaligned() };
+        let vask = unsafe { core::ptr::addr_of!(rec.index.vask).read_unaligned() };
+        let ci = unsafe { core::ptr::addr_of!(rec.index.ci).read_unaligned() };
         let changed = !self.have_last
             || bid != self.last_bid
             || ask != self.last_ask
@@ -875,7 +968,11 @@ impl IdxShardWriter {
             || ci != self.last_ci;
 
         if !self.gate || changed || new_day {
-            self.ensure_shard(date)?;
+            // Resolve the shard date: fast path supplied `Some(cur_date)`; the
+            // chrono path supplied `Some(d)`. The `unwrap_or_else` is a
+            // never-taken defensive fallback (date is always Some by here).
+            let d = *date.get_or_insert_with(|| ts_ms_to_utc_date(ts));
+            self.ensure_shard(d)?;
             self.log.as_mut().unwrap().append(rec)?;
             self.last_bid = bid;
             self.last_ask = ask;
@@ -893,7 +990,8 @@ impl IdxShardWriter {
         if self.have_last && ts - self.last_written_ts >= SENTINEL_INTERVAL_MS {
             let mut sentinel = *rec;
             sentinel.index.flags |= FLAG_HEARTBEAT_SENTINEL;
-            self.ensure_shard(date)?;
+            let d = *date.get_or_insert_with(|| ts_ms_to_utc_date(ts));
+            self.ensure_shard(d)?;
             self.log.as_mut().unwrap().append(&sentinel)?;
             // Do NOT update last_{bid,ask,...} — those track the last real
             // market state, and a sentinel by definition carries the same
@@ -1288,6 +1386,41 @@ mod tests {
     }
 
     #[test]
+    fn cached_day_window_routes_identically_across_rollover() {
+        // Regression for the ITEM-7 same-day fast path: an in-day record, a
+        // rollover, and another in-day record on the new day must each route
+        // to the correct UTC shard exactly as the per-record chrono path did.
+        let root = std::env::temp_dir().join("nxr_shard_daywindow_test");
+        let _ = fs::remove_dir_all(&root);
+        let day1 = t_recent_day_start() - MS_PER_DAY;
+        let day2 = day1 + MS_PER_DAY;
+        {
+            let mut w = IdxShardWriter::open(&root, 704, true).unwrap();
+            // day1 first (chrono path: no window yet) → shard A
+            assert!(w.append(&rec(day1, 100.0, 101.0)).unwrap());
+            // day1 mid (fast path in-window) price move → same shard A
+            assert!(w.append(&rec(day1 + MS_PER_HOUR, 100.5, 101.5)).unwrap());
+            // day1 late edge (fast path, ts = end-1ms) price move → shard A
+            assert!(w
+                .append(&rec(day1 + MS_PER_DAY - 1, 100.6, 101.6))
+                .unwrap());
+            // day2 start (out-of-window → chrono path, new_day) → shard B
+            assert!(w.append(&rec(day2, 100.6, 101.6)).unwrap());
+            // day2 mid (fast path against refreshed window) → shard B
+            assert!(w.append(&rec(day2 + MS_PER_HOUR, 100.7, 101.7)).unwrap());
+            w.flush().unwrap();
+        }
+        let dir = idx_dir(&root, 704);
+        let shards = list_shards(&dir, "idx").unwrap();
+        assert_eq!(shards.len(), 2, "two daily shards");
+        let a = read_shard_aligned::<IndexRecord>(&shards[0].1).unwrap();
+        let b = read_shard_aligned::<IndexRecord>(&shards[1].1).unwrap();
+        assert_eq!(a.len(), 3, "day1 shard has its 3 records");
+        assert_eq!(b.len(), 2, "day2 shard has its 2 records");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn seed_from_tail_survives_restart() {
         let root = std::env::temp_dir().join("nxr_shard_restart_test");
         let _ = fs::remove_dir_all(&root);
@@ -1404,6 +1537,46 @@ mod tests {
         assert_eq!(m.shards.len(), 2);
         assert_eq!(m.kind, "idx");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn set_shards_batch_matches_sequential_upsert() {
+        // The batch builder must produce a manifest identical to feeding the
+        // same entries (incl. a duplicate-date replacement) to upsert one by one.
+        let mk = |date: &str, first: i64, last: i64, n: u64| ShardEntry {
+            date: date.to_string(),
+            first_ts: first,
+            last_ts: last,
+            n_records: n,
+            size_bytes: n * 56,
+            sha256: format!("h{date}{n}"),
+        };
+        // Out-of-order input with a duplicate date (later one wins).
+        let input = vec![
+            mk("2024-05-22", 200, 299, 2),
+            mk("2024-05-20", 0, 99, 1),
+            mk("2024-05-21", 100, 199, 1),
+            mk("2024-05-21", 100, 199, 9), // duplicate date → replaces above
+        ];
+        let mut seq = Manifest::new("X".into(), 1, "idx");
+        for e in input.clone() {
+            seq.upsert(e);
+        }
+        let mut batch = Manifest::new("X".into(), 1, "idx");
+        batch.set_shards_batch(input);
+        assert_eq!(batch.shards.len(), seq.shards.len());
+        for (a, b) in batch.shards.iter().zip(seq.shards.iter()) {
+            assert_eq!(a.date, b.date);
+            assert_eq!(a.first_ts, b.first_ts);
+            assert_eq!(a.last_ts, b.last_ts);
+            assert_eq!(a.n_records, b.n_records);
+            assert_eq!(a.sha256, b.sha256);
+        }
+        assert_eq!(batch.first_ts, seq.first_ts);
+        assert_eq!(batch.last_ts, seq.last_ts);
+        // Duplicate date resolved to the LATER entry (n=9) in both.
+        let d21 = batch.shards.iter().find(|s| s.date == "2024-05-21").unwrap();
+        assert_eq!(d21.n_records, 9);
     }
 
     #[test]

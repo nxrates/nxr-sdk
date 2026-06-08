@@ -108,6 +108,14 @@ pub struct NxrConfig {
 
 impl NxrConfig {
     pub fn from_env() -> Self {
+        Self::from_env_with_hint(crate::pipeline_config::ConfigHint::Runtime)
+    }
+
+    /// Like [`from_env`](Self::from_env) but with an explicit [`ConfigHint`]
+    /// so offline tools (`ConfigHint::Bin`, default `./config.yml`) resolve the
+    /// SAME YAML the long-running services do (`ConfigHint::Runtime`,
+    /// `/etc/nxr/config.yml`) when `NXR_CONFIG` is unset.
+    pub fn from_env_with_hint(hint: crate::pipeline_config::ConfigHint) -> Self {
         let data_root = env_or("NXR_DATA_ROOT", "/data");
         let ticks_dir = env_or("NXR_DATA_TICKS", &format!("{}/ticks", data_root));
         let bars_dir = env_or("NXR_DATA_BARS", &format!("{}/bars", data_root));
@@ -121,9 +129,17 @@ impl NxrConfig {
         Self {
             log_level: env_or("NXR_LOG_LEVEL", "info"),
             listen_port: env_or("NXR_LISTEN_PORT", "9500").parse().unwrap_or(9500),
-            aggregation_interval_ms: env_or("NXR_AGGREGATION_INTERVAL_MS", "200")
-                .parse()
-                .unwrap_or(200),
+            // SINGLE SOURCE OF TRUTH for the 5Hz/200ms aggregation cadence. The
+            // live path (this config) and the backfill path (`backfill_all.rs`)
+            // MUST resolve the cadence from the SAME `network.aggregation_interval_ms`
+            // in `config.yml`, else the rebuilt `.idx` density diverges from live
+            // and renko bpd calibrates off by the cadence ratio (the 100ms-vs-200ms
+            // split-brain that produced ~2× target bpd). YAML is authoritative;
+            // the `NXR_AGGREGATION_INTERVAL_MS` env var is a fallback used ONLY
+            // when the YAML is absent (dev / no `/etc/nxr/config.yml`). When BOTH
+            // are present and DISAGREE, `resolve_aggregation_interval_ms` panics at
+            // boot (drift is fatal, never silent).
+            aggregation_interval_ms: resolve_aggregation_interval_ms(hint),
             stale_threshold_ms: env_or("NXR_STALE_THRESHOLD_MS", "10000")
                 .parse()
                 .unwrap_or(10000),
@@ -217,6 +233,60 @@ impl NxrConfig {
     }
 }
 
+/// Default aggregation cadence (ms) when NEITHER the YAML
+/// `network.aggregation_interval_ms` NOR `NXR_AGGREGATION_INTERVAL_MS` is set.
+/// 200 ms = 5 Hz = the production cadence.
+pub const DEFAULT_AGGREGATION_INTERVAL_MS: u64 = 200;
+
+/// Resolve the aggregation cadence from the SINGLE source of truth and assert
+/// the live/backfill representations can never silently diverge.
+///
+/// Resolution order:
+///   1. YAML `network.aggregation_interval_ms` (authoritative — the exact value
+///      `backfill_all.rs` reads, so live and historical `.idx` density match).
+///   2. `NXR_AGGREGATION_INTERVAL_MS` env var (fallback, dev / YAML-absent).
+///   3. [`DEFAULT_AGGREGATION_INTERVAL_MS`].
+///
+/// BOOT ASSERTION: when the YAML value AND the env var are BOTH present and
+/// DISAGREE, this panics at startup (modeled on
+/// `CalibrationYml::assert_bounds_consistent`). A cadence mismatch between the
+/// two unlinked representations is exactly the split-brain that built backfill
+/// `.idx` at 2× live density → renko bpd ratio-of-two. Failing fast at boot is
+/// strictly better than shipping a divergent series.
+fn resolve_aggregation_interval_ms(hint: crate::pipeline_config::ConfigHint) -> u64 {
+    use crate::pipeline_config::PipelineYml;
+
+    let env_val: Option<u64> = env_opt("NXR_AGGREGATION_INTERVAL_MS");
+    let yaml_val: Option<u64> = PipelineYml::load_default(hint)
+        .ok()
+        .and_then(|y| y.network.aggregation_interval_ms);
+
+    reconcile_aggregation_interval_ms(env_val, yaml_val)
+}
+
+/// Pure reconciliation core (no IO) for [`resolve_aggregation_interval_ms`].
+/// Extracted so the boot-assertion semantics are unit-testable without env /
+/// filesystem state. PANICS when both sources are present and disagree.
+fn reconcile_aggregation_interval_ms(env_val: Option<u64>, yaml_val: Option<u64>) -> u64 {
+    if let (Some(e), Some(y)) = (env_val, yaml_val) {
+        if e != y {
+            panic!(
+                "aggregation cadence SPLIT-BRAIN: env NXR_AGGREGATION_INTERVAL_MS={e} \
+                 disagrees with YAML network.aggregation_interval_ms={y}. These are TWO \
+                 representations of ONE value (live aggregator vs backfill); a mismatch \
+                 builds backfill .idx at a different density than live and skews renko bpd \
+                 by the cadence ratio. Set them equal (YAML is authoritative) or unset the \
+                 env var.",
+            );
+        }
+    }
+
+    // YAML wins (single source); env is the YAML-absent fallback; const last.
+    yaml_val
+        .or(env_val)
+        .unwrap_or(DEFAULT_AGGREGATION_INTERVAL_MS)
+}
+
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -224,4 +294,32 @@ fn env_or(key: &str, default: &str) -> String {
 /// Read an optional numeric env var. `None` if unset or unparseable.
 fn env_opt<T: std::str::FromStr>(key: &str) -> Option<T> {
     env::var(key).ok().and_then(|v| v.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregation_yaml_is_single_source_of_truth() {
+        // YAML present ⇒ YAML wins, even alongside an (equal) env value.
+        assert_eq!(reconcile_aggregation_interval_ms(Some(200), Some(200)), 200);
+        // YAML present, env absent ⇒ YAML.
+        assert_eq!(reconcile_aggregation_interval_ms(None, Some(200)), 200);
+        // YAML absent, env present ⇒ env fallback.
+        assert_eq!(reconcile_aggregation_interval_ms(Some(150), None), 150);
+        // Neither ⇒ the 200ms/5Hz default const.
+        assert_eq!(
+            reconcile_aggregation_interval_ms(None, None),
+            DEFAULT_AGGREGATION_INTERVAL_MS
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "SPLIT-BRAIN")]
+    fn aggregation_split_brain_panics_at_boot() {
+        // env=200 (live) vs YAML=100 (backfill) — the exact prod drift that
+        // built backfill .idx at 2× live density. MUST be fatal at boot.
+        reconcile_aggregation_interval_ms(Some(200), Some(100));
+    }
 }

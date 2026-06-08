@@ -87,6 +87,23 @@ pub struct NxrConfig {
     /// median_t for a ticker, log a `weights_anomaly_high_vol` warn. Useful for
     /// spotting CMC scrape errors or genuine wash-trading. Default: 5.0.
     pub anomaly_vol_ratio: f64,
+    /// Hot-path PRICE-sanity reject band (fraction). On ingest, a provider quote
+    /// whose mid deviates from the robust median of the ticker's OTHER live
+    /// provider mids by more than this fraction is REJECTED (not merged into
+    /// aggregator state) and the `nxr_quotes_rejected_total` counter is bumped.
+    /// This is the live counterpart to the `mid jump` / degenerate-CI signature
+    /// the cert (`integrity-check idx`) flags after the fact — it stops a single
+    /// bad forwarder (e.g. the 2026-05-28..06-02 SOL/USDT $1784/$643 garbage)
+    /// from poisoning the composite and the `.idx` history in the first place.
+    /// Mirrors the `max_weight_per_source` wash-vol cap idiom (a per-source
+    /// guard on the consolidated composite). Default: 0.20 (20%).
+    pub reject_band_pct: f64,
+    /// Minimum number of OTHER live providers (with a finite, positive mid) for
+    /// the ticker before the price-sanity reject band is enforced. Below this,
+    /// the median reference is too thin to trust, so the gate is skipped and the
+    /// quote is admitted (thin coverage is itself the bottleneck — same rationale
+    /// as `min_providers_for_cap`). Default: 2.
+    pub reject_min_providers: usize,
 }
 
 impl NxrConfig {
@@ -171,6 +188,12 @@ impl NxrConfig {
             anomaly_vol_ratio: env_or("NXR_ANOMALY_VOL_RATIO", "5.0")
                 .parse()
                 .unwrap_or(5.0),
+            reject_band_pct: env_or("NXR_REJECT_BAND_PCT", "0.20")
+                .parse()
+                .unwrap_or(0.20),
+            reject_min_providers: env_or("NXR_REJECT_MIN_PROVIDERS", "2")
+                .parse()
+                .unwrap_or(2),
         }
     }
 

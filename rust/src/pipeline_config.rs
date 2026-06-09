@@ -625,6 +625,44 @@ pub struct PipelineParamsYml {
     pub exchanges: Vec<String>,
     #[serde(default)]
     pub pairs: Vec<String>,
+    /// Disk-footprint guard knobs for the backfill orchestrator. Single-source
+    /// YAML (operator mandate, no hardcoded magic in the binary). See
+    /// `backfill-all`'s pre-flight headroom guard + monthly stream-and-delete.
+    #[serde(default)]
+    pub backfill: BackfillDiskYml,
+}
+
+/// `series.pipeline.backfill:` — disk-footprint guard knobs for `backfill-all`.
+///
+/// The orchestrator now fetches raw `.ticks` one calendar month at a time,
+/// folds each month into the per-provider `.idx`, then deletes that month's
+/// raw `.ticks` before fetching the next. Peak raw footprint is therefore
+/// bounded to ~1 month × n_exchanges (not the full backfill range). These
+/// knobs drive the pre-flight headroom guard that aborts the run if the
+/// projected monthly raw peak would not fit the free space on the data PVC.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackfillDiskYml {
+    /// Conservative estimate of raw `.ticks` bytes produced per exchange per
+    /// calendar day for a liquid pair (binance/bybit monthly aggTrades for a
+    /// top pair run ~1-2 GiB/month ≈ 30-70 MiB/day; we size for the worst
+    /// liquid pair). Used by the pre-flight guard to project the monthly peak.
+    pub bytes_per_exchange_day: u64,
+    /// Safety factor applied to free space in the headroom guard: the run
+    /// aborts unless `projected_peak <= free_bytes * safety_factor`. `< 1.0`
+    /// leaves a margin (e.g. 0.8 = require 25% headroom above the projection).
+    pub headroom_safety_factor: f64,
+}
+
+impl Default for BackfillDiskYml {
+    fn default() -> Self {
+        // Defaults sized for the launch universe (binance/bybit liquid pairs).
+        // ~70 MiB/exch/day is a conservative upper bound for the heaviest
+        // monthly aggTrades; safety_factor 0.8 keeps 20% slack on free space.
+        Self {
+            bytes_per_exchange_day: 70 * 1024 * 1024,
+            headroom_safety_factor: 0.8,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -234,6 +234,27 @@ impl RenkoGenerator {
         self.last_close
     }
 
+    /// Hot-update the brick `multiplier` (k) without resetting brick state.
+    ///
+    /// Used by the LIVE producer when the calibrate cron publishes a fresh k via
+    /// the params watch. The new k does NOT resize the current window's brick
+    /// immediately — `current_brick_size` is held FIXED until the next 30-min
+    /// boundary, when `compute_brick_size` re-reads `config.multiplier` (matching
+    /// the offline window-fixed cadence). A k below `K_FLOOR` is clamped up to it
+    /// (calibrate never publishes below the floor; clamp defensively so the
+    /// engine never sees a degenerate multiplier). No-op if unchanged.
+    #[inline]
+    pub fn set_multiplier(&mut self, multiplier: f64) {
+        let m = multiplier.max(K_FLOOR) as f32;
+        self.config.multiplier = m;
+    }
+
+    /// Current brick `multiplier` (k).
+    #[inline]
+    pub fn multiplier(&self) -> f64 {
+        self.config.multiplier as f64
+    }
+
     /// Force-seed `last_close` and `initialized=true`. Used on warm restart:
     /// the wrapper reads the previous brick close off disk and primes the
     /// engine so the first post-restart tick can immediately decide whether

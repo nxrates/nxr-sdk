@@ -183,6 +183,25 @@ pub fn parse_utc_date_or_today(s: &str) -> anyhow::Result<NaiveDate> {
     parse_utc_date(s)
 }
 
+/// Current UTC calendar date. Single source of truth for the "today" boundary
+/// the offline rewrite tools use to skip the LIVE-OPEN shard.
+///
+/// ⚠ LIVE-SHARD SAFETY (data-corruption guard): the current UTC day's `.idx`
+/// shard is the file the live aggregator (`IdxShardWriter`) currently holds
+/// open in append mode. Any tool that atomically replaces a shard in place
+/// (`rename <date>.idx → <date>.idx.bak`, then `<date>.new → <date>.idx`) MUST
+/// NOT touch today's shard: the live writer's open fd follows the ORIGINAL
+/// inode — now named `.idx.bak` — so it keeps appending live ticks to the
+/// `.bak` file while readers/API see the frozen, resampled `.idx`. Confirmed
+/// prod incident 2026-06-10 (BTC/ETH/BNB/SOL/USDC-USDT served ~16h-stale idx,
+/// live data hidden in `.bak`). Compare a shard's date against this and SKIP
+/// when equal. Only closed past-day shards (`shard_date < today_utc()`) are
+/// safe to rewrite offline.
+#[inline]
+pub fn today_utc() -> NaiveDate {
+    chrono::Utc::now().date_naive()
+}
+
 /// Inclusive set of UTC dates in `[from, to]` (ascending). Single source of
 /// truth for the duplicate `day_range` copies in the offline bins.
 pub fn day_range_inclusive(from: NaiveDate, to: NaiveDate) -> Vec<NaiveDate> {

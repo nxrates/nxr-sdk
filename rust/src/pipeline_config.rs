@@ -520,15 +520,33 @@ pub struct RenkoYml {
     pub min_pct: f32,
 }
 
+fn default_rolling_window_days() -> usize { 365 }
+fn default_bracket_max_iters() -> usize { 12 }
+fn default_accept_tol() -> f64 { 0.05 }
+
 /// `series.calibration:` block. Mirrors `series_factory::bar_construction::
 /// calibrate::CalibrationConfig` plus the per-class target table.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CalibrationYml {
     pub target_bpd: f64,
-    pub k_fit_windows_days: Vec<usize>,
+    /// Single trailing window (days) over which the per-UTC-day brick-count
+    /// MEDIAN is computed and driven to `target_bpd`. Replaces the legacy MTF
+    /// `k_fit_windows_days` blend — one window, one median, one engine
+    /// (`docs/renko-methodology.md` §3). Default 365 (one full bull/bear/chop
+    /// rotation; 2× the longest σ-blend window).
+    #[serde(default = "default_rolling_window_days")]
+    pub rolling_window_days: usize,
     pub min_window_days: usize,
-    pub max_rounds: usize,
-    pub tolerance: f64,
+    /// Iteration cap for the BOUNDED log-k bracket fallback inside
+    /// `scale_to_target_k` (the wrong-tread safety net; methodology §4 step 6).
+    /// Renamed from `max_rounds`. Default 12.
+    #[serde(default = "default_bracket_max_iters", alias = "max_rounds")]
+    pub bracket_max_iters: usize,
+    /// Warm-start accept tolerance: the direct scale-to-target step accepts when
+    /// `|median/target − 1| ≤ accept_tol`. ALSO the advisory achieved-err warn
+    /// threshold (NOT a ticker-drop gate — methodology §4 step 8). Default 0.05.
+    #[serde(default = "default_accept_tol", alias = "tolerance")]
+    pub accept_tol: f64,
     pub mult_bounds: [f64; 2],
     /// Per-pair `target_bpd` overrides keyed by pair string (e.g. "USDC/USDT"
     /// → 50). Highest-priority lookup; reserve for genuine per-pair exceptions
@@ -672,10 +690,10 @@ mod tests {
     fn cal() -> CalibrationYml {
         CalibrationYml {
             target_bpd: 300.0,
-            k_fit_windows_days: vec![30],
+            rolling_window_days: 365,
             min_window_days: 30,
-            max_rounds: 20,
-            tolerance: 0.05,
+            bracket_max_iters: 12,
+            accept_tol: 0.05,
             mult_bounds: [0.05, 4.0],
             target_bpd_overrides: BTreeMap::from([("USDC/USDT".to_string(), 50.0)]),
             target_bpd_by_class: BTreeMap::from([("crypto_stable".to_string(), 50.0)]),
@@ -716,8 +734,8 @@ mod tests {
         // Field deserializes from YAML and defaults to empty when absent.
         // "BIG/HI": 9.0 is now ACCEPTED (above the old 4.0 wall, below safety cap).
         let y: CalibrationYml = serde_yml::from_str(
-            "target_bpd: 300\nk_fit_windows_days: [30]\nmin_window_days: 30\n\
-             max_rounds: 20\ntolerance: 0.03\nmult_bounds: [0.05, 4.0]\n\
+            "target_bpd: 300\nrolling_window_days: 365\nmin_window_days: 30\n\
+             bracket_max_iters: 12\naccept_tol: 0.05\nmult_bounds: [0.05, 4.0]\n\
              renko_k_overrides:\n  \"BTC/USDT\": 0.42\n  \"BAD/LOW\": 0.001\n  \"BIG/HI\": 9.0\n",
         ).expect("parse CalibrationYml with renko_k_overrides");
 
@@ -742,4 +760,37 @@ mod tests {
         assert!(c.renko_k_overrides.is_empty());
     }
 
+    /// Lean calibration field set (2026-06-10, `docs/renko-methodology.md`):
+    /// the new `rolling_window_days` / `accept_tol` / `bracket_max_iters` parse,
+    /// the legacy `max_rounds`/`tolerance` keys still deserialize via serde
+    /// `alias` (forward-compat with un-migrated yml), and omitted fields take the
+    /// documented defaults (365 / 0.05 / 12).
+    #[test]
+    fn lean_calibration_fields_parse_with_defaults_and_aliases() {
+        // New canonical keys.
+        let y: CalibrationYml = serde_yml::from_str(
+            "target_bpd: 300\nrolling_window_days: 365\nmin_window_days: 30\n\
+             bracket_max_iters: 12\naccept_tol: 0.05\nmult_bounds: [0.05, 4.0]\n",
+        ).expect("parse lean CalibrationYml");
+        assert_eq!(y.rolling_window_days, 365);
+        assert_eq!(y.bracket_max_iters, 12);
+        assert!((y.accept_tol - 0.05).abs() < 1e-12);
+
+        // Legacy aliases: an un-migrated yml using `max_rounds` / `tolerance`
+        // still deserializes into the renamed fields.
+        let legacy: CalibrationYml = serde_yml::from_str(
+            "target_bpd: 300\nrolling_window_days: 365\nmin_window_days: 30\n\
+             max_rounds: 20\ntolerance: 0.08\nmult_bounds: [0.05, 4.0]\n",
+        ).expect("parse legacy-aliased CalibrationYml");
+        assert_eq!(legacy.bracket_max_iters, 20, "max_rounds aliases bracket_max_iters");
+        assert!((legacy.accept_tol - 0.08).abs() < 1e-12, "tolerance aliases accept_tol");
+
+        // Omitted optional fields → documented defaults.
+        let minimal: CalibrationYml = serde_yml::from_str(
+            "target_bpd: 300\nmin_window_days: 30\nmult_bounds: [0.05, 4.0]\n",
+        ).expect("parse minimal CalibrationYml");
+        assert_eq!(minimal.rolling_window_days, 365);
+        assert_eq!(minimal.bracket_max_iters, 12);
+        assert!((minimal.accept_tol - 0.05).abs() < 1e-12);
+    }
 }

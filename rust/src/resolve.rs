@@ -341,15 +341,29 @@ pub const DEFAULT_QUOTE_SUFFIXES: &[&str] = &["USDT", "USDC", "BTC", "ETH", "USD
 /// whole-pair fuzz that forced quote=USD and collapsed ~24 fiat pairs onto one
 /// id. Exact match required (conf 1.0); no fuzzy on the quote side.
 fn resolve_quote_token(token: &str) -> Option<Asset> {
-    // FX fiat first for non-crypto-major tokens (THB, BRL, TRY, ...).
-    let is_crypto_major = MAJOR_QUOTE_SYMBOLS_LC.contains(&token);
-    if !is_crypto_major
+    // FX fiat first for non-major tokens (THB, BRL, TRY, ...).
+    let is_major = MAJOR_QUOTE_SYMBOLS_LC.contains(&token);
+    if !is_major
         && let Some(m) = RESOLVER.find(token, 1.0, Some(AssetClass::FX))
         && m.confidence >= 1.0
     {
         return Some(m.asset);
     }
-    // Crypto majors + USD (USD resolves in FX exact too).
+    // Major quotes resolve class-pinned: crypto majors → CR, fiat majors → FX.
+    // An unfiltered lookup lets an exact alias collision in another class win:
+    // indices.csv "Ethereum Index" carries alias ETH, so quote "eth" resolved
+    // to Indices:2101 — misclassing every ETH-quoted pair (BNB/ETH, SOL/ETH)
+    // and breaking their target_bpd class bucket (RCA 2026-06-09). Mirrors the
+    // base-side cr_quote class filter.
+    if is_major {
+        let class = match token {
+            "usdt" | "usdc" | "btc" | "eth" => AssetClass::CR,
+            _ => AssetClass::FX,
+        };
+        if let Some(m) = RESOLVER.find(token, 0.95, Some(class)) {
+            return Some(m.asset);
+        }
+    }
     RESOLVER.find(token, 0.95, None).map(|m| m.asset)
 }
 
@@ -376,9 +390,9 @@ fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
         if lower.ends_with(q) && lower.len() > q.len() {
             let remaining = lower[..lower.len() - q.len()].trim_end_matches(&['/', '_', '.'][..]);
             if !remaining.is_empty()
-                && let Some(m) = RESOLVER.find(q, 0.95, None)
+                && let Some(asset) = resolve_quote_token(q)
             {
-                return Some((m.asset, remaining.to_string(), "end".into()));
+                return Some((asset, remaining.to_string(), "end".into()));
             }
         }
         // Quote at start.
@@ -394,7 +408,7 @@ fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
         if lower.starts_with(q) && lower.len() > q.len() {
             let remaining = lower[q.len()..].trim_start_matches(&['/', '_', '.'][..]);
             if !remaining.is_empty()
-                && let Some(start_asset) = RESOLVER.find(q, 0.95, None)
+                && let Some(start_asset) = resolve_quote_token(q)
             {
                 // Both legs are quote/fiat majors → written order wins:
                 // base = start token (q), quote = remaining token.
@@ -403,7 +417,7 @@ fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
                 }
                 // Otherwise the start token is genuinely the quote
                 // (e.g. a crypto-major prefix on a non-major base).
-                return Some((start_asset.asset, remaining.to_string(), "start".into()));
+                return Some((start_asset, remaining.to_string(), "start".into()));
             }
         }
     }
@@ -547,6 +561,29 @@ mod fx_surfacing_tests {
                 quote.contains(want_quote),
                 "{sym}: quote '{quote}' should contain '{want_quote}' (base='{base}')"
             );
+        }
+    }
+
+    /// Crypto-major quote tokens must resolve class-pinned to CR. Regression
+    /// for indices.csv "Ethereum Index" (alias ETH) winning the unfiltered
+    /// quote lookup — every ETH-quoted pair (BNB/ETH, SOL/ETH) got quote
+    /// class Indices:2101 instead of CR:5801, misrouting its target_bpd
+    /// class bucket (RCA 2026-06-09).
+    #[test]
+    fn crypto_major_quotes_resolve_to_cr() {
+        use mitch::common::AssetClass;
+        for sym in ["BNB/ETH", "SOL/ETH", "ETH/BTC", "BNBETH", "ETHBTC"] {
+            let m = resolve_ticker(sym, InstrumentType::SPOT)
+                .unwrap_or_else(|e| panic!("{sym} failed to resolve: {e:?}"));
+            let tid = mitch::ticker::TickerId::from_raw(m.ticker.id);
+            assert_eq!(
+                tid.quote_asset_class(),
+                AssetClass::CR,
+                "{sym}: quote class must be CR, got {:?} (quote='{}')",
+                tid.quote_asset_class(),
+                m.ticker.quote.name
+            );
+            assert_eq!(tid.base_asset_class(), AssetClass::CR, "{sym}: base class must be CR");
         }
     }
 }

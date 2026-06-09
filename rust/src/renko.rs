@@ -71,18 +71,30 @@ impl Default for RenkoConfig {
     }
 }
 
-/// Canonical upper bound on the renko `multiplier` (k). SINGLE SOURCE OF TRUTH
-/// for the ceiling: `RenkoConfig::validate` enforces it, and `config.yml`'s
-/// `series.calibration.mult_bounds[1]` MUST equal it (asserted by
-/// `CalibrationYml::assert_bounds_consistent`).
+/// INITIAL upper bracket HINT for the calibrator's full-history log-k bisection
+/// (`config.yml`'s `series.calibration.mult_bounds[1]`). NOT a hard ceiling on
+/// k anymore.
 ///
-/// Was previously a literal `4.0` in `validate` while `config.yml` shipped
-/// `10.0` — the CEILING MISMATCH (RCA ROOT2a, 2026-06-01). Binary-search trials
-/// in (4, 10] produced 0 bricks (validate rejected the trial config), so the
-/// search parked just under the wall at k≈3.9954 (a lattice artifact) and the
-/// clamp-detector — testing against 10.0, not the real 4.0 wall — never fired.
-/// Collapsing both to this one const makes the wall and the detector agree.
+/// Operator directive 2026-06-09 ("do not clamp K. K should not have a max.
+/// Maybe a minimum, but not a maximum"): a storming crypto whose median==target
+/// crossing sits ABOVE this value must STILL calibrate — the bisection's bracket
+/// auto-EXPANDS upward (doubling the hi bound) until the crossing is bracketed
+/// or the numeric safety cap [`K_MAX_SAFETY`] is reached. `RenkoConfig::validate`
+/// therefore no longer rejects `k > MULT_UPPER_BOUND`; it only guards against the
+/// degenerate `k=0` floor and the numeric blow-up at [`K_MAX_SAFETY`].
+///
+/// History: was a hard `4.0` ceiling collapsed from a config/validate mismatch
+/// (RCA ROOT2a, 2026-06-01). The mismatch is gone; the value now seeds the
+/// bisection bracket only.
 pub const MULT_UPPER_BOUND: f64 = 4.0;
+
+/// Numeric safety cap on k. NOT a market/calibration ceiling — a guard against
+/// the bisection's upward bracket auto-expansion running away to infinity on a
+/// degenerate (flat-σ, near-constant-price) series where median(k) never drops
+/// below target. `validate` rejects `k > K_MAX_SAFETY` and the calibrator stops
+/// doubling `k_hi` once it reaches this. 1e6 is astronomically beyond any real
+/// fitted k (storming crypto floors empirically at single digits) yet finite.
+pub const K_MAX_SAFETY: f64 = 1e6;
 
 /// Lower bound on the renko `multiplier` (k). Mirrors [`K_FLOOR`] and
 /// `config.yml`'s `series.calibration.mult_bounds[0]`.
@@ -90,14 +102,14 @@ pub const MULT_LOWER_BOUND: f64 = K_FLOOR;
 
 impl RenkoConfig {
     pub fn validate(&self) -> Result<()> {
-        // Upper bound is the single-source [`MULT_UPPER_BOUND`] (= 4.0), which
-        // mirrors `CalibrationConfig.mult_bounds[1]`. Binary search may
-        // legitimately converge above 1.0 on high-vol regimes (e.g. SOL/USDT
-        // 2026-05-20: geo_mean=1.18 → 298 bpd, err=0.4%). Capping at 1.0 here
-        // aborted the run entirely. Operator policy: "markets be markets". The
-        // floor stays at 0.001 (guards against k=0 degenerate; distinct from
-        // the higher calibration-time K_FLOOR=0.05 reject).
-        if !(0.001..=MULT_UPPER_BOUND).contains(&(self.multiplier as f64)) {
+        // NO UPPER CEILING on k (operator directive 2026-06-09: "K should not
+        // have a max"). A storming crypto whose median==target crossing sits
+        // beyond the old 4.0 wall is a VALID fit — the calibrator auto-expands
+        // its bracket upward to find it. validate now only enforces:
+        //   - lower guard 0.001 (against k=0 degenerate; distinct from the
+        //     higher calibration-time K_FLOOR=0.05 reject), and
+        //   - the numeric safety cap K_MAX_SAFETY (against runaway/blow-up).
+        if !(0.001..=K_MAX_SAFETY).contains(&(self.multiplier as f64)) {
             anyhow::bail!("multiplier out of range: {}", self.multiplier);
         }
         if self.min_pct < 0.0 {
@@ -499,17 +511,19 @@ mod tests {
     }
 
     #[test]
-    fn upper_bound_is_single_sourced() {
-        // The wall is MULT_UPPER_BOUND (4.0), not the old config 10.0. A k just
-        // under the wall validates; just over it is rejected. This is what lets
-        // the calibrator's clamp-detector fire at the real bound (RCA ROOT2a).
-        assert_eq!(MULT_UPPER_BOUND, 4.0);
-        let at_wall = RenkoConfig { multiplier: MULT_UPPER_BOUND as f32, min_pct: 0.0001 };
-        assert!(at_wall.validate().is_ok());
-        let over_wall = RenkoConfig { multiplier: (MULT_UPPER_BOUND as f32) + 0.5, min_pct: 0.0001 };
-        assert!(over_wall.validate().is_err(), "k > MULT_UPPER_BOUND must be rejected");
-        let over_old_4_under_10 = RenkoConfig { multiplier: 6.0, min_pct: 0.0001 };
-        assert!(over_old_4_under_10.validate().is_err(), "k in (4,10] must now be rejected (was the ceiling-mismatch gap)");
+    fn no_upper_ceiling_on_k() {
+        // Operator directive 2026-06-09: "K should not have a max." A k above the
+        // old 4.0 wall is a VALID fit (storming crypto). validate must ACCEPT it
+        // — only the numeric safety cap K_MAX_SAFETY and the lower guard remain.
+        let at_old_wall = RenkoConfig { multiplier: MULT_UPPER_BOUND as f32, min_pct: 0.0001 };
+        assert!(at_old_wall.validate().is_ok());
+        let above_old_wall = RenkoConfig { multiplier: (MULT_UPPER_BOUND as f32) + 0.5, min_pct: 0.0001 };
+        assert!(above_old_wall.validate().is_ok(), "k > old 4.0 ceiling must now VALIDATE (no max)");
+        let way_above = RenkoConfig { multiplier: 50.0, min_pct: 0.0001 };
+        assert!(way_above.validate().is_ok(), "large k (storming crypto) is valid");
+        // The ONLY upper guard is the numeric safety cap.
+        let over_safety = RenkoConfig { multiplier: (K_MAX_SAFETY as f32) * 2.0, min_pct: 0.0001 };
+        assert!(over_safety.validate().is_err(), "k > K_MAX_SAFETY rejected (runaway guard)");
     }
 
     #[test]

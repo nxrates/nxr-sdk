@@ -546,8 +546,9 @@ pub struct CalibrationYml {
     pub target_bpd_by_class: BTreeMap<String, f64>,
     /// PART B4 (2026-06-09): per-pair FORCED renko-k escape hatch keyed by pair
     /// string (e.g. "BTC/USDT" → 0.42). When present and within
-    /// `[K_FLOOR, MULT_UPPER_BOUND]`, the calibrator EMITS this k directly and
-    /// SKIPS the fit for that pair. Reserved for "structural-floor" tickers the
+    /// `[K_FLOOR, K_MAX_SAFETY]` (no upper market ceiling — only the numeric
+    /// safety cap), the calibrator EMITS this k directly and SKIPS the fit for
+    /// that pair. Reserved for "structural-floor" tickers the
     /// staircase prevents the fit from landing within `RENKO_BPD_ACCEPT_TOL` of
     /// target (surfaced by the per-ticker `achieved_err` log). Empty by default —
     /// add entries only after the fit log shows a ticker's floor exceeds tol.
@@ -577,30 +578,35 @@ impl CalibrationYml {
         self.target_bpd
     }
 
-    /// Assert the YAML `mult_bounds` agree with the SDK's single-source renko
-    /// ceiling/floor consts (RCA ROOT2a, 2026-06-01). The clamp-detector in the
-    /// calibrator tests `best.0` against `cal.mult_bounds[1]`; the live
-    /// producer's `RenkoConfig::validate` rejects above `MULT_UPPER_BOUND`. If
-    /// the two disagree (config shipped 10.0 while validate capped 4.0), trials
-    /// in the gap produce 0 bricks and the search parks just under the real
-    /// wall while the detector — watching the wrong bound — stays silent.
+    /// Assert the YAML `mult_bounds` are sane bracket bounds for the calibrator.
+    ///
+    /// LOWER bound is a hard floor: `mult_bounds[0]` MUST equal
+    /// `renko::MULT_LOWER_BOUND` (= K_FLOOR). The bisection does NOT auto-expand
+    /// downward — a too-flat asset that can't reach target even at K_FLOOR is
+    /// legitimately dropped (operator directive 2026-06-09: "Maybe a minimum").
+    ///
+    /// UPPER bound is now only the INITIAL bracket HINT for the full-history
+    /// log-k bisection — NOT a ceiling. The bisection auto-EXPANDS `k_hi` upward
+    /// (doubling) when the median==target crossing sits above `mult_bounds[1]`,
+    /// so a storming crypto calibrates beyond the old 4.0 wall (operator
+    /// directive: "K should not have a max"). We therefore only require it to be
+    /// a positive, above-the-floor seed — no equality to a fixed ceiling.
     ///
     /// Returns an error (callers `bail!`/`expect` at startup) rather than
     /// panicking inline, so config-load surfaces a clean diagnostic.
     pub fn assert_bounds_consistent(&self) -> Result<(), String> {
-        use crate::renko::{MULT_LOWER_BOUND, MULT_UPPER_BOUND};
-        if (self.mult_bounds[1] - MULT_UPPER_BOUND).abs() > f64::EPSILON {
-            return Err(format!(
-                "calibration.mult_bounds[1]={} disagrees with renko::MULT_UPPER_BOUND={} \
-                 (CEILING MISMATCH, RCA ROOT2a). Set them equal — the validate wall and the \
-                 clamp-detector must watch the same bound.",
-                self.mult_bounds[1], MULT_UPPER_BOUND
-            ));
-        }
+        use crate::renko::MULT_LOWER_BOUND;
         if (self.mult_bounds[0] - MULT_LOWER_BOUND).abs() > f64::EPSILON {
             return Err(format!(
                 "calibration.mult_bounds[0]={} disagrees with renko::MULT_LOWER_BOUND={} (K_FLOOR)",
                 self.mult_bounds[0], MULT_LOWER_BOUND
+            ));
+        }
+        if !(self.mult_bounds[1] > self.mult_bounds[0]) {
+            return Err(format!(
+                "calibration.mult_bounds[1]={} must be > mult_bounds[0]={} (it seeds the \
+                 bisection's INITIAL upper bracket; the search auto-expands it upward as needed)",
+                self.mult_bounds[1], self.mult_bounds[0]
             ));
         }
         Ok(())
@@ -663,30 +669,32 @@ mod tests {
 
     /// PART B4 (2026-06-09): the per-pair forced-k escape hatch. The calibrator
     /// binary short-circuits the fit when `renko_k_overrides` has the pair AND
-    /// the k is in `[K_FLOOR, MULT_UPPER_BOUND]`. This pins the field's
+    /// the k is in `[K_FLOOR, K_MAX_SAFETY]` (no upper market ceiling — operator
+    /// directive: "K should not have a max"). This pins the field's
     /// deserialization + the exact bounds predicate the binary applies.
     #[test]
     fn renko_k_override_short_circuits_fit() {
-        use crate::renko::{K_FLOOR, MULT_UPPER_BOUND};
+        use crate::renko::{K_FLOOR, K_MAX_SAFETY};
         // Field deserializes from YAML and defaults to empty when absent.
+        // "BIG/HI": 9.0 is now ACCEPTED (above the old 4.0 wall, below safety cap).
         let y: CalibrationYml = serde_yml::from_str(
             "target_bpd: 300\nk_fit_windows_days: [30]\nmin_window_days: 30\n\
              max_rounds: 20\ntolerance: 0.03\nmult_bounds: [0.05, 4.0]\n\
-             renko_k_overrides:\n  \"BTC/USDT\": 0.42\n  \"BAD/LOW\": 0.001\n  \"BAD/HI\": 9.0\n",
+             renko_k_overrides:\n  \"BTC/USDT\": 0.42\n  \"BAD/LOW\": 0.001\n  \"BIG/HI\": 9.0\n",
         ).expect("parse CalibrationYml with renko_k_overrides");
 
         // Present + in-bounds ⇒ the binary emits this k and skips the fit.
         let forced = y.renko_k_overrides.get("BTC/USDT").copied();
         assert_eq!(forced, Some(0.42));
-        assert!((K_FLOOR..=MULT_UPPER_BOUND).contains(&forced.unwrap()),
+        assert!((K_FLOOR..=K_MAX_SAFETY).contains(&forced.unwrap()),
             "in-bounds override short-circuits");
 
-        // Out-of-bounds entries are ignored by the binary (predicate false ⇒
-        // falls through to the normal fit).
-        assert!(!(K_FLOOR..=MULT_UPPER_BOUND)
+        // Below K_FLOOR is still ignored (the floor is preserved).
+        assert!(!(K_FLOOR..=K_MAX_SAFETY)
             .contains(&y.renko_k_overrides["BAD/LOW"]), "below K_FLOOR ignored");
-        assert!(!(K_FLOOR..=MULT_UPPER_BOUND)
-            .contains(&y.renko_k_overrides["BAD/HI"]), "above MULT_UPPER_BOUND ignored");
+        // Above the OLD 4.0 ceiling is now ACCEPTED (no upper market cap).
+        assert!((K_FLOOR..=K_MAX_SAFETY)
+            .contains(&y.renko_k_overrides["BIG/HI"]), "k above old 4.0 wall now accepted");
 
         // Absent pair ⇒ no override ⇒ normal fit path.
         assert!(y.renko_k_overrides.get("ETH/USDT").is_none());

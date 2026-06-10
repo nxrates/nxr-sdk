@@ -51,7 +51,7 @@ pub mod tick;
 pub mod triangulation_rules;
 
 pub use idx_source::{EphemeralIdxSource, DEFAULT_EPHEMERAL_CAPACITY};
-pub use replay::{compute_synth_index, LEG_STALE_TTL_MS, SYNTH_KERNEL_PROVIDER_ID};
+pub use replay::{compute_synth_index, SynthReplayState, LEG_STALE_TTL_MS, SYNTH_KERNEL_PROVIDER_ID};
 
 pub use bar::{
     build_rolling_rho_cache, reconstruct_synth_bar_series,

@@ -450,11 +450,12 @@ fn monthly_geo(
         let s = metric(curve, bars_per_year);
         // Skip NaN/inf and clamp-sentinel values (flat curves clamp to +/- 100).
         if !s.is_finite() || s.abs() >= 99.9 { continue; }
-        let shifted = 1.0 + s / 10.0;
-        if shifted > 0.0 {
-            log_sum += shifted.ln();
-            n_months += 1;
-        }
+        // Include ALL months: a catastrophic month (metric ≤ -10 → shifted ≤ 0)
+        // must drag the geo-mean down, not be silently dropped. Floor the
+        // shifted value so ln() stays defined while keeping the month counted.
+        let shifted = (1.0 + s / 10.0).max(0.01);
+        log_sum += shifted.ln();
+        n_months += 1;
     }
     if n_months < 2 { return 0.0; }
     let geo_shifted = (log_sum / n_months as f64).exp();
@@ -550,6 +551,32 @@ mod tests {
     fn monthly_geo_empty_is_zero() {
         assert_eq!(monthly_geo_sharpe(&[], 252.0), 0.0);
         assert_eq!(monthly_geo_sortino(&[], 252.0), 0.0);
+    }
+
+    #[test]
+    fn monthly_geo_includes_catastrophic_months() {
+        // 3 months of daily points: months 0-1 rise steadily, month 2 collapses
+        // hard (sharply negative sharpe, previously DROPPED when shifted ≤ 0).
+        // Including the bad month must drag the geo-mean well below the
+        // two-good-month value.
+        let ms_per_day = crate::shard::MS_PER_DAY as u64;
+        let mut curve: Vec<(u64, f64)> = Vec::new();
+        let mut eq = 10_000.0f64;
+        for day in 0..90u64 {
+            if day < 60 {
+                eq *= if day % 2 == 0 { 1.003 } else { 1.001 };
+            } else {
+                // collapse with dispersion so sharpe is finite (not the ±100
+                // clamp sentinel): mean −2%/day, σ 2%/day → sharpe ≈ −19.
+                eq *= if day % 2 == 0 { 0.96 } else { 1.0 };
+            }
+            curve.push((day * ms_per_day, eq));
+        }
+        let s = monthly_geo_sharpe(&curve, 365.0);
+        // Two good months alone would be strongly positive; with the
+        // catastrophic month floored at shifted=0.01 the result must be
+        // decisively negative.
+        assert!(s < 0.0, "catastrophic month must not be dropped: got {s}");
     }
 
     #[test]

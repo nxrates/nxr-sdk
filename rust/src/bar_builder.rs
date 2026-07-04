@@ -130,7 +130,12 @@ impl BarAccumulator {
 
         // Spread (bps of mid). Guard against zero mid; track sample count
         // separately so the divisor in flush() mirrors the numerator's scope.
-        if mid > 0.0 {
+        // NO-SYNTHETIC-SPREAD (operator 2026-07-04): only REAL books sample the
+        // spread — trade-derived records carry bid == ask (honest_tick /
+        // FLAG_NO_BOOK) and locked/degenerate books have no meaningful spread;
+        // both are excluded. A bar with zero book samples publishes
+        // avg_spread_bps = NaN (absent), never a fabricated constant.
+        if mid > 0.0 && ask > bid {
             self.sum_spread_bps += ((ask - bid) / mid) * 10_000.0;
             self.n_spread_samples += 1;
         }
@@ -194,10 +199,12 @@ impl BarAccumulator {
         };
 
         // mid<=0 guard skipped from numerator; mirror in denominator.
+        // Zero book samples ⇒ spread is ABSENT: NaN, never 0.0 (0 is a real
+        // observable for a locked book-carrying bar; NaN means "no book data").
         let avg_spread_bps = if self.n_spread_samples > 0 {
             (self.sum_spread_bps / self.n_spread_samples as f64) as f32
         } else {
-            0.0
+            f32::NAN
         };
 
         let vol_imbalance = if self.ofi_total_vol > 0.0 {

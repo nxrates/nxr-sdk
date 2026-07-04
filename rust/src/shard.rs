@@ -90,6 +90,18 @@ pub const FLAG_CONF_FRESHNESS: u8 = 0b0000_1000;
 /// INDEX and the Bar flag spaces (0x01/0x02/0x04/0x08 taken).
 pub const FLAG_IDX_HEALED: u8 = 0b0001_0000;
 
+/// Bit 5 (free in BOTH the INDEX and Bar flag spaces): NO REAL ORDER BOOK
+/// backs this record's bid/ask.
+///
+/// Operator ruling 2026-07-04: executed trades are the only truth; order
+/// books are spoofable and partial — and NOTHING may fabricate a synthetic
+/// book (the retired `infer_tick` ±0.5bp fabrication poisoned 23 months of
+/// avg_spread_bps). Trade-derived records set `bid == ask == trade_px` and
+/// carry this flag; bar builders MUST exclude flagged ticks from spread
+/// sampling (a bar with zero book samples publishes `avg_spread_bps = NaN`
+/// and sets this bit in the Bar flag space). Absence is flagged, never faked.
+pub const FLAG_NO_BOOK: u8 = 0b0010_0000;
+
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote
 /// is unchanged. 60s bounds the "is this a gap or just quiet?" ambiguity.
 pub const SENTINEL_INTERVAL_MS: i64 = 60_000;

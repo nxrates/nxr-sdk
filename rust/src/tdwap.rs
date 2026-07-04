@@ -256,6 +256,16 @@ where
 
         // Inline effective-weight computation so `exp` and the age read happen once.
         let age = now.duration_since(entry.last_update).as_f64();
+        // CORPSE EVICTION (audit F-01, 2026-07-04): a provider silent for
+        // > 6x the stale threshold is DEAD, not stale — exclude it from
+        // EVERYTHING (blend, freshness numerator/denominator, active count,
+        // stale-uncertainty). Before this, dead entries lingered forever
+        // (decay floored at 0.001) and their unbounded stale_unc =
+        // half_spread*sqrt(age/ipi) inflated published ci 400-1500x on
+        // healthy majors, which then propagated into every cross/synth.
+        if age > stale_threshold_secs * 6.0 {
+            continue;
+        }
         let half_life = (IPI_K * entry.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
         let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
         let decay_floored = decay.max(0.001);
@@ -294,7 +304,11 @@ where
         w_sum = w_new;
 
         let ipi = entry.ema_ipi_secs.max(1e-6);
-        let stale_unc = half_spread * (age / ipi).sqrt();
+        // Staleness multiplier CAPPED at 3.0 (audit F-04): sqrt(age/ipi) is a
+        // sane short-horizon widening but must not grow without bound between
+        // the last tick and eviction — an uncapped multiplier makes ci useless
+        // as an outlier gate (a 50bp fat-finger passes a corpse-widened band).
+        let stale_unc = half_spread * (age / ipi).sqrt().min(3.0);
         w_stale_sq_sum += w * stale_unc * stale_unc;
 
         total_bid_vol += entry.index.vbid as u64;

@@ -36,6 +36,26 @@ const IPI_ALPHA: f64 = 0.1;
 /// Larger values -> more tolerance for stale quotes.
 const IPI_K: f64 = 3.0;
 
+/// No-book effective-spread reconstruction (operator 2026-07-05): when the
+/// composite has no real book (trades-only / honest_tick), the effective
+/// half-spread = this K x cross-venue price dispersion (`sqrt(m2/w_sum)`).
+/// Provisional 1.0 (full spread = 2 x dispersion) — the value measured as the
+/// floor-bound majority of live records. Overridable via `NXR_SPREAD_DISAGREE_K`.
+/// ponytail: provisional single global K; upgrade path = per-pair zero-intercept
+/// regression of REAL live avg_spread_bps on 2 x dispersion over the post-heal
+/// overlap (dispersion→spread map is per-pair; measured range K∈[1.6,2] full).
+/// Read once (env parsed on first use) — this is on the per-cycle hot path.
+fn disagree_to_half_spread_k() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        std::env::var("NXR_SPREAD_DISAGREE_K")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| *v >= 0.0 && v.is_finite())
+            .unwrap_or(1.0)
+    })
+}
+
 /// Scale factor for the sqrt-compressed CI u16 encoding.
 ///
 /// Canonical definition lives in [`mitch::common::CI_SCALE`]; re-exported here
@@ -339,12 +359,28 @@ where
     let confidence = (conf_f64 * 255.0).round() as u8;
     let _ = active_count; // retained for potential diagnostics; no longer drives confidence
 
-    // Guard against crossed market: weighted ask must not be tighter than weighted bid.
-    // If crossed, collapse to mid with zero spread (bid == ask == mid).
+    // Composite bid/ask resolution (operator ruling 2026-07-05 — NO order books,
+    // trades only). Three cases:
+    //  1. Crossed (tdwap_ask < tdwap_bid): collapse to mid.
+    //  2. Real book present (tdwap_ask > tdwap_bid): keep it — venue books are
+    //     ground truth; never overwrite (preserves the live calibration overlap).
+    //  3. NO book (tdwap_ask == tdwap_bid: trades-only / honest_tick, every
+    //     venue's bid==ask==trade_px): reconstruct the effective half-spread from
+    //     CROSS-VENUE PRICE DISAGREEMENT — the venues still disagree, and that
+    //     dispersion IS the real execution uncertainty (recovers cross-pair
+    //     spreads a single-venue high-low/Roll estimator cannot). Only with ≥2
+    //     disagreeing venues; a single no-book venue stays collapsed so the bar
+    //     builder emits NaN + FLAG_NO_BOOK (honest absence, never fabricated).
+    let sigma_disagree = sigma_disagree_sq.max(0.0).sqrt();
     let (final_bid, final_ask) = if tdwap_ask < tdwap_bid {
         (vwap_mid, vwap_mid)
-    } else {
+    } else if tdwap_ask > tdwap_bid {
         (tdwap_bid, tdwap_ask)
+    } else if sigma_disagree > 0.0 && accepted >= 2 {
+        let hs = disagree_to_half_spread_k() * sigma_disagree;
+        (vwap_mid - hs, vwap_mid + hs)
+    } else {
+        (vwap_mid, vwap_mid)
     };
 
     let ci = if vwap_mid > 0.0 {
@@ -767,6 +803,44 @@ mod tests {
         // refreshes (the math reruns), but value equality is the natural
         // invariant for identical inputs at uniform age.
         assert!(idx_eq_bytewise(first, refreshed) || (first.bid - refreshed.bid).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_book_spread_from_cross_venue_dispersion() {
+        // Trades-only / honest_tick: every venue reports bid==ask==trade_px, so
+        // there is NO book — but the venues DISAGREE, and that dispersion must
+        // become the composite effective spread (operator ruling 2026-07-05).
+        let t0 = Instant::now();
+        // Two venues, each a locked quote at its own trade price: 100.00 vs 100.10.
+        let p_a = mk_entry(100.00, 100.00, 1_000, 1_000, 1.0, t0);
+        let p_b = mk_entry(100.10, 100.10, 1_000, 1_000, 1.0, t0);
+        let entries: Vec<(u16, ProviderEntry)> = vec![(1, p_a), (2, p_b)];
+        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, t0)
+            .expect("composite");
+        // Copy packed fields to locals before use (packed struct → no field refs).
+        let (bid, ask) = (idx.bid, idx.ask);
+        // mid ~100.05, and a real (non-degenerate) spread synthesized from the
+        // 0.10 cross-venue disagreement — NOT collapsed to bid==ask.
+        assert!(ask > bid, "no-book multi-venue must synthesize a spread, got bid={bid} ask={ask}");
+        let mid = (bid + ask) * 0.5;
+        assert!((mid - 100.05).abs() < 0.02, "mid off: {mid}");
+        // half-spread = k * sqrt(m2/w_sum); with equal weights the mid variance
+        // is 0.05^2, so sqrt = 0.05, half-spread = k*0.05 (k default 1.0).
+        let hs = (ask - bid) * 0.5;
+        assert!(hs > 0.0 && hs < 0.20, "half-spread out of expected band: {hs}");
+    }
+
+    #[test]
+    fn no_book_single_venue_stays_collapsed() {
+        // A single no-book venue has zero dispersion ⇒ must NOT fabricate a
+        // spread; bid==ask so the bar builder emits NaN + FLAG_NO_BOOK.
+        let t0 = Instant::now();
+        let p = mk_entry(100.00, 100.00, 1_000, 1_000, 1.0, t0);
+        let entries: Vec<(u16, ProviderEntry)> = vec![(1, p)];
+        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, t0)
+            .expect("composite");
+        let (bid, ask) = (idx.bid, idx.ask);
+        assert_eq!(bid.to_bits(), ask.to_bits(), "single no-book venue must stay collapsed (honest absence)");
     }
 
     #[test]

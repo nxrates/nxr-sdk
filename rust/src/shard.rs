@@ -970,6 +970,22 @@ impl IdxShardWriter {
             let d = ts_ms_to_utc_date(ts);
             (self.cur_date != Some(d), Some(d))
         };
+        // A LIVE writer never rotates BACKWARD (audit D11, 2026-07-05): a
+        // near-midnight straggler carrying a prior-day ts used to compute
+        // new_day=true, bypass the out-of-order drop below, and re-open
+        // yesterday's shard for an out-of-order append (non-monotone record
+        // + day-misrouted writer churn). Prior-day shards are closed history.
+        if let (Some(cur), Some(d)) = (self.cur_date, date) {
+            if new_day && d < cur {
+                tracing::warn!(
+                    ts,
+                    record_date = %d,
+                    current_date = %cur,
+                    "IdxShardWriter: dropped prior-day straggler (backward rotation forbidden)"
+                );
+                return Ok(false);
+            }
+        }
         if self.have_last && !new_day && ts < self.last_written_ts {
             tracing::warn!(
                 ts,

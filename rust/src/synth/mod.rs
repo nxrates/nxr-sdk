@@ -41,9 +41,11 @@
 //! are verbatim ports.
 
 pub mod bar;
+pub mod cross_expand;
 pub mod idx_source;
 pub mod ohlc;
 pub mod pairs;
+pub mod pipeline_pairs;
 pub mod paths;
 pub mod replay;
 pub mod rolling;

@@ -160,11 +160,11 @@ pub struct PairSpec {
     pub quote: String,
 }
 
-/// `synths:` block — synth-pair registry.
+/// `synths:` block — optional manual override for synth-pipeline pairs.
+/// Leave `initial_pairs` empty: the live kernel derives crosses from
+/// `cexs.cross_pairs` via [`crate::synth::cross_expand`].
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SynthsYml {
-    /// Initial / launch synth pairs. Empty ⇒ fall back to
-    /// [`crate::synth::pairs::DEFAULT_INITIAL_SYNTH_PAIRS`].
     #[serde(default)]
     pub initial_pairs: Vec<SynthPairYml>,
 }

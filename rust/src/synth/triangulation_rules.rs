@@ -68,7 +68,7 @@ pub struct InjectionRuleSpec {
 /// Sections:
 /// 1. USDT/<fiat> = USDT/USD × USD<FIAT>          (26 entries)
 /// 2. <crypto>/USD = <crypto>/USDT × USDT/USD     (18 entries: 11 majors +
-///    gold PAXG/XAUT + priority stables USDS/USD1/USDE/USDG/PYUSD)
+///    gold XAUT + priority stables USDS/USD1/USDE/USDG/PYUSD)
 /// 3. <crypto>/EUR, <crypto>/GBP via inverse FX   (14 entries)
 /// 4. BTC + ETH /AUD /CHF crosses                 (4 entries)
 pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
@@ -117,7 +117,6 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     // Gold + priority stablecoins /USD = <sym>/USDT × USDT/USD (operator
     // 2026-06-02: no native crypto/USD; these were dropped from the manifest
     // and are now synth-derived on the USDT/USD anchor like the majors above).
-    SynthesisRuleSpec { out_sym: "PAXG/USD", leg1_sym: "PAXG/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "XAUT/USD", leg1_sym: "XAUT/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "USDS/USD", leg1_sym: "USDS/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "USD1/USD", leg1_sym: "USD1/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },

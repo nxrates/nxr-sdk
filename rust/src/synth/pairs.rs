@@ -39,7 +39,7 @@ pub const DEFAULT_SWEEP_PAIRS: &[(&str, &str)] = &[
     ("ETH", "USDT"),
     ("BNB", "USDT"),
     ("SOL", "USDT"),
-    ("PAXG", "USDT"),
+    ("XAUT", "USDT"),
     // Crypto crosses (operator priority)
     ("ETH", "BTC"),
     ("BNB", "ETH"),

@@ -102,6 +102,16 @@ pub const FLAG_IDX_HEALED: u8 = 0b0001_0000;
 /// and sets this bit in the Bar flag space). Absence is flagged, never faked.
 pub const FLAG_NO_BOOK: u8 = 0b0010_0000;
 
+/// Bit 6 (Bar flag space): this s10 bar is a GAP-FILL FLAT BAR — emitted by
+/// the producer when a 10 s bucket received ZERO ingested composite changes
+/// (OHLC pinned to the previous close, tick_count == 0). One bit converts
+/// the "gapless" contract from unfalsifiable to testable and lets consumers
+/// distinguish quiet-market fill from real bars: render as doji/continuation,
+/// never drop the candle (dropping is what produced the 2026-07-07 staircase
+/// charts). Set by `bar_builder::flat_bar`; certifiers exempt flagged bars
+/// from microstructure gates. (Fable DQ audit GATE-3, 2026-07-07.)
+pub const FLAG_S10_FLAT_FILL: u8 = 0b0100_0000;
+
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote
 /// is unchanged. 60s bounds the "is this a gap or just quiet?" ambiguity.
 pub const SENTINEL_INTERVAL_MS: i64 = 60_000;

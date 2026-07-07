@@ -207,7 +207,9 @@ mod tests {
     fn expected_rule_counts() {
         // Locks the legacy hardcoded universe size — bump explicitly when rules
         // are added/removed so reviewers notice the registry change.
-        assert_eq!(SYNTHESIS_RULES.len(), 26 + 18 + 14 + 4);
+        // 2026-07-07: 62 -> 61 after the cross_pairs expansion consolidated one
+        // duplicate rule (81dfa27); count re-verified against the live registry.
+        assert_eq!(SYNTHESIS_RULES.len(), 61);
         assert_eq!(INJECTION_RULES.len(), 11);
     }
 }

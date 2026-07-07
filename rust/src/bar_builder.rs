@@ -268,7 +268,7 @@ pub fn flat_bar(bucket_open_ms: i64, ref_price: f64) -> Bar {
     const BAR_MS: i64 = 10_000;
     let open_mts = timestamp::from_epoch_ms(bucket_open_ms);
     let close_mts = timestamp::from_epoch_ms(bucket_open_ms + BAR_MS - 1);
-    Bar::new_ohlcv(
+    let mut b = Bar::new_ohlcv(
         open_mts,
         close_mts,
         ref_price,
@@ -278,7 +278,11 @@ pub fn flat_bar(bucket_open_ms: i64, ref_price: f64) -> Bar {
         0,
         0,
         0,
-    )
+    );
+    // Provenance (GATE-3): mark gap-fill so consumers can render (doji) or
+    // exempt (certifier) instead of guessing from tick_count == 0.
+    b.flags |= crate::shard::FLAG_S10_FLAT_FILL;
+    b
 }
 
 /// Grid-stamp an s10 bar's `open_ts`/`close_ts` to its 10 s bucket boundary.

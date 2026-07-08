@@ -101,6 +101,15 @@ pub struct PipelineYml {
 /// `nxr-oracle` forwarder (Pyth via self-hosted Hermes SSE today).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct OraclesYml {
+    /// Oracle forwarder flush cadence (ms). Pythnet publishes ~400 ms slots,
+    /// so oracles run their own (slower) cadence than the CEX 200 ms one.
+    /// Default 1000 when absent.
+    #[serde(default)]
+    pub aggregation_interval_ms: Option<u64>,
+    /// Relay catalog re-scan period (secs) for `watch` auto-onboarding.
+    /// Default 3600 when absent.
+    #[serde(default)]
+    pub catalog_refresh_secs: Option<u64>,
     #[serde(default)]
     pub providers: BTreeMap<String, OracleProviderYml>,
 }
@@ -115,6 +124,12 @@ pub struct OracleProviderYml {
     /// Canonical "BASE/QUOTE" → provider feed id (Pyth: hex, no 0x).
     #[serde(default)]
     pub symbols: BTreeMap<String, String>,
+    /// Coming-soon feeds: canonical NXR symbol → provider CATALOG symbol
+    /// (Pyth: e.g. "Metal.XCU/USD"). The forwarder re-scans the relay
+    /// catalog every `catalog_refresh_secs` and auto-subscribes the moment
+    /// a watched feed goes live. Keys must resolve strictly at boot.
+    #[serde(default)]
+    pub watch: BTreeMap<String, String>,
 }
 
 /// `runtime:` block — forwarder + server tuning knobs. All `Option<…>`

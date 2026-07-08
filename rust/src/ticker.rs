@@ -88,19 +88,23 @@ fn resolve_fx6_ticker_id(symbol: &str) -> Option<u64> {
         .map(|t| t.raw)
 }
 
-pub fn resolve_ticker_id(symbol: &str) -> u64 {
+/// Strict resolution: fx6 shortcut then full resolver, NO FNV fallback.
+/// `None` = unresolvable symbol. Boot-time config validation (nxr-oracle)
+/// uses this to fail loud instead of sharding under a phantom hash id.
+pub fn try_resolve_ticker_id(symbol: &str) -> Option<u64> {
     // For 6-char pure-alpha FX pairs (EURUSD, USDJPY, USDCAD, ...), use a direct 3+3
     // base/quote split to match the MT4 MQL4 resolver encoding.
     if let Some(id) = resolve_fx6_ticker_id(symbol) {
-        return id;
+        return Some(id);
     }
-    match resolve_ticker(symbol, InstrumentType::SPOT) {
-        Ok(m) => m.ticker.id,
-        Err(_) => {
-            warn!(symbol, "mitch resolver failed, using FNV fallback");
-            fnv1a_64(symbol.as_bytes())
-        }
-    }
+    resolve_ticker(symbol, InstrumentType::SPOT).ok().map(|m| m.ticker.id)
+}
+
+pub fn resolve_ticker_id(symbol: &str) -> u64 {
+    try_resolve_ticker_id(symbol).unwrap_or_else(|| {
+        warn!(symbol, "mitch resolver failed, using FNV fallback");
+        fnv1a_64(symbol.as_bytes())
+    })
 }
 
 #[inline]

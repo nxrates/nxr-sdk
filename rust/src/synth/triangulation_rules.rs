@@ -121,7 +121,8 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     // golden source for stable pegs) — a synth rule here would overwrite the
     // oracle composite every cycle (last-writer-wins). USDG/USD kept: no
     // pyth feed wired.
-    SynthesisRuleSpec { out_sym: "XAUT/USD", leg1_sym: "XAUT/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
+    // XAUT/USD rule removed 2026-07-08 (same wave as the stables): pyth
+    // publishes native Crypto.XAUT/USD - synth would overwrite it each cycle.
     SynthesisRuleSpec { out_sym: "USDG/USD", leg1_sym: "USDG/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
 
     // ── <crypto>/EUR + <crypto>/GBP = <crypto>/USDT × (1 / <FX>USD) ──
@@ -210,8 +211,9 @@ mod tests {
         // 2026-07-07: 62 -> 61 after the cross_pairs expansion consolidated one
         // duplicate rule (81dfa27); count re-verified against the live registry.
         // 2026-07-08: 61 -> 57 — USDS/USD1/USDE/PYUSD `/USD` synth rules removed,
-        // fed natively by the pyth oracle relay (nxr-oracle).
-        assert_eq!(SYNTHESIS_RULES.len(), 57);
+        // fed natively by the pyth oracle relay (nxr-oracle); then 57 -> 56
+        // (XAUT/USD native via pyth too).
+        assert_eq!(SYNTHESIS_RULES.len(), 56);
         assert_eq!(INJECTION_RULES.len(), 11);
     }
 }

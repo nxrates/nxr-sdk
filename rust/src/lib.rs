@@ -82,7 +82,7 @@ pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
 
 // ---- Ticker resolution ----
 
-pub use ticker::{TickerIdCache, resolve_ticker_id, split_pair, split_pair_multi};
+pub use ticker::{TickerIdCache, resolve_ticker_id, split_pair, split_pair_multi, try_resolve_ticker_id};
 pub use resolve::resolve_ticker;
 pub use series_alias::series_canonical_ticker_id;
 

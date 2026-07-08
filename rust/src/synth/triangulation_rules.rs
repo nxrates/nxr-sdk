@@ -125,6 +125,27 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     // publishes native Crypto.XAUT/USD - synth would overwrite it each cycle.
     SynthesisRuleSpec { out_sym: "USDG/USD", leg1_sym: "USDG/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
 
+    // ── STABLE/USDC = STABLE/USD × (USDC/USD)⁻¹ (2026-07-08) ──
+    // BTR Stable Core pools denominate in USDC: the keeper quotes every pool
+    // asset against USDC in real time, with full .idx/s10/renko parity. Both
+    // legs are pyth-native /USD pegs (golden source), so the cross is
+    // oracle-consistent end to end. USDT/USDC deliberately ABSENT: it has a
+    // deep native CEX book (12 providers) that a synth would overwrite.
+    // USD1/USDC + USDE/USDC DO have (thin) native CEX books - the synth
+    // overwrites them each cycle, same last-writer-wins posture as BTC/USD
+    // vs the CFD feed above; pyth wins for stable pegs.
+    SynthesisRuleSpec { out_sym: "USD1/USDC",  leg1_sym: "USD1/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "USDE/USDC",  leg1_sym: "USDE/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "PYUSD/USDC", leg1_sym: "PYUSD/USD", leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "RLUSD/USDC", leg1_sym: "RLUSD/USD", leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "TUSD/USDC",  leg1_sym: "TUSD/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "USDD/USDC",  leg1_sym: "USDD/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "USDS/USDC",  leg1_sym: "USDS/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "DAI/USDC",   leg1_sym: "DAI/USD",   leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "FDUSD/USDC", leg1_sym: "FDUSD/USD", leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "GHO/USDC",   leg1_sym: "GHO/USD",   leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+    SynthesisRuleSpec { out_sym: "SUSDE/USDC", leg1_sym: "SUSDE/USD", leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
+
     // ── <crypto>/EUR + <crypto>/GBP = <crypto>/USDT × (1 / <FX>USD) ──
     // FX provider symbol (EURUSD, GBPUSD) is inverted: USD/<fiat> = 1 / EURUSD.
     SynthesisRuleSpec { out_sym: "BTC/EUR",  leg1_sym: "BTC/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
@@ -212,8 +233,9 @@ mod tests {
         // duplicate rule (81dfa27); count re-verified against the live registry.
         // 2026-07-08: 61 -> 57 — USDS/USD1/USDE/PYUSD `/USD` synth rules removed,
         // fed natively by the pyth oracle relay (nxr-oracle); then 57 -> 56
-        // (XAUT/USD native via pyth too).
-        assert_eq!(SYNTHESIS_RULES.len(), 56);
+        // (XAUT/USD native via pyth too). 56 -> 67: +11 STABLE/USDC crosses
+        // for the BTR Stable Core keeper (USDC-denominated pools).
+        assert_eq!(SYNTHESIS_RULES.len(), 67);
         assert_eq!(INJECTION_RULES.len(), 11);
     }
 }

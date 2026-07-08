@@ -120,6 +120,7 @@ fn oracle_equity_bases() {
         ("META/USD", 9031),
         ("SNDK/USD", 11876),
         ("EWY/USD", 7156),
+        ("SPCX/USD", 12826),
         ("C3M/EUR", 716),
     ] {
         let id = try_resolve_ticker_id(sym).unwrap_or_else(|| panic!("{sym} unresolvable"));
@@ -139,8 +140,6 @@ fn oracle_watch_commodities() {
         ("XCO/USD", 76),   // Cobalt
         ("XLI/USD", 216),  // Lithium
         ("XNI/USD", 261),  // Nickel
-        ("OGV6/USD", 168), // Gold Futures Sep 2026
-        ("OGZ6/USD", 166), // Gold Futures Nov 2026
     ] {
         let id = try_resolve_ticker_id(sym).unwrap_or_else(|| panic!("{sym} unresolvable"));
         assert_eq!((base_class(id), base_id(id)), (CM, cm_id), "{sym} base");

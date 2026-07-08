@@ -402,7 +402,16 @@ where
         rejected,
         // Signal that `confidence` is Q0.8 freshness (byte/255), not a legacy
         // active-provider count. Single-source bit in `nxr_sdk::shard`.
-        flags: crate::shard::FLAG_CONF_FRESHNESS,
+        // FLAG_NO_BOOK when NO provider carried depth (oracle relays publish
+        // price±conf without book sizes): honest absence marker so the
+        // integrity/dq phantom-quote gates don't flag oracle tickers. A
+        // healthy multi-provider CEX composite always sums nonzero depth.
+        flags: crate::shard::FLAG_CONF_FRESHNESS
+            | if total_bid_vol == 0 && total_ask_vol == 0 {
+                crate::shard::FLAG_NO_BOOK
+            } else {
+                0
+            },
     })
 }
 

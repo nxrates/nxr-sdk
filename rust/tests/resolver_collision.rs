@@ -129,7 +129,11 @@ fn cat1_aliases_single_id() {
     assert_eq!(resolve_ticker_id("MATIC/USDT"), resolve_ticker_id("POL/USDT"));
     assert_eq!(resolve_ticker_id("USDT0/USDC"), resolve_ticker_id("USDT/USDC"));
     assert_eq!(resolve_ticker_id("BTC/USDT0"), resolve_ticker_id("BTC/USDT"));
-    assert_eq!(resolve_ticker_id("ETH/DAI"), resolve_ticker_id("ETH/USDS"));
+    // DAI un-aliased from USDS 2026-07-08: pyth publishes DISTINCT DAI/USD
+    // and USDS/USD pegs (~5 bps basis) and BTR stable pools price the two
+    // tokens separately on-chain - DAI now owns crypto-assets.csv id 04801.
+    assert_ne!(resolve_ticker_id("ETH/DAI"), resolve_ticker_id("ETH/USDS"));
+    assert_ne!(resolve_ticker_id("DAI/USD"), resolve_ticker_id("USDS/USD"));
     assert_eq!(resolve_ticker_id("WETH/USDT"), resolve_ticker_id("ETH/USDT"));
     assert_eq!(resolve_ticker_id("WSOL/USDT"), resolve_ticker_id("SOL/USDT"));
 }

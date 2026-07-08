@@ -4,11 +4,14 @@
 //!
 //! ## Two-category symbol model (operator-locked)
 //!
-//! - **CAT-1 — truly fungible** (MATIC→POL, USDT0→USDT, DAI→USDS, WETH→ETH,
+//! - **CAT-1 — truly fungible** (MATIC→POL, USDT0→USDT, WETH→ETH,
 //!   WSOL→SOL, WBNB→BNB, XBT/XXBT→BTC, XETH→ETH): folded into the canonical
 //!   asset's `aliases` column in `mitch/ids/crypto-assets.csv`. The resolver
 //!   collapses BOTH legs to a SINGLE MITCH `ticker_id` automatically. There is
 //!   NO code path here for CAT-1 — it is pure CSV data.
+//!   (DAI un-aliased from USDS 2026-07-08: pyth publishes distinct DAI/USD
+//!   vs USDS/USD pegs (~5 bps basis) and BTR pools price the tokens
+//!   separately — DAI owns crypto-assets.csv id 04801. Do NOT re-fold.)
 //!
 //! - **CAT-2 — custodial BTC wraps with de-peg risk** (WBTC, cbBTC/CBBTC,
 //!   TBTC, BTCB, BBTC): KEEP their distinct crypto-assets.csv rows + distinct

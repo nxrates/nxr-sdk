@@ -91,6 +91,30 @@ pub struct PipelineYml {
     /// `core/src/server/{rest,mod,ws}.rs`.
     #[serde(default)]
     pub runtime: RuntimeYml,
+    /// Oracle price relays (`nxr-oracle` forwarder). Keyed by market-provider
+    /// name (must exist in `mitch/ids/market-providers.csv`, e.g. `pyth`).
+    #[serde(default)]
+    pub oracles: OraclesYml,
+}
+
+/// `oracles:` block — push-based oracle relay providers consumed by the
+/// `nxr-oracle` forwarder (Pyth via self-hosted Hermes SSE today).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct OraclesYml {
+    #[serde(default)]
+    pub providers: BTreeMap<String, OracleProviderYml>,
+}
+
+/// `oracles.providers.<name>:` — one relay endpoint + its feed manifest.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct OracleProviderYml {
+    /// Relay base URL (Hermes: `http://host:8080`; forwarder appends
+    /// `/v2/updates/price/stream`). Env `NXR_ORACLE_URL_<NAME>` overrides.
+    #[serde(default)]
+    pub url: String,
+    /// Canonical "BASE/QUOTE" → provider feed id (Pyth: hex, no 0x).
+    #[serde(default)]
+    pub symbols: BTreeMap<String, String>,
 }
 
 /// `runtime:` block — forwarder + server tuning knobs. All `Option<…>`

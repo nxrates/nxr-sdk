@@ -114,15 +114,15 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     SynthesisRuleSpec { out_sym: "LINK/USD", leg1_sym: "LINK/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "DOT/USD",  leg1_sym: "DOT/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "LTC/USD",  leg1_sym: "LTC/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    // Gold + priority stablecoins /USD = <sym>/USDT × USDT/USD (operator
-    // 2026-06-02: no native crypto/USD; these were dropped from the manifest
-    // and are now synth-derived on the USDT/USD anchor like the majors above).
+    // Gold /USD = XAUT/USDT × USDT/USD (operator 2026-06-02: no native
+    // crypto/USD; synth-derived on the USDT/USD anchor like the majors).
+    // Stablecoin /USD rules (USDS/USD1/USDE/PYUSD) removed 2026-07-08: those
+    // tickers are now fed NATIVELY by the pyth oracle relay (`nxr-oracle`,
+    // golden source for stable pegs) — a synth rule here would overwrite the
+    // oracle composite every cycle (last-writer-wins). USDG/USD kept: no
+    // pyth feed wired.
     SynthesisRuleSpec { out_sym: "XAUT/USD", leg1_sym: "XAUT/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDS/USD", leg1_sym: "USDS/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USD1/USD", leg1_sym: "USD1/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDE/USD", leg1_sym: "USDE/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "USDG/USD", leg1_sym: "USDG/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "PYUSD/USD", leg1_sym: "PYUSD/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
 
     // ── <crypto>/EUR + <crypto>/GBP = <crypto>/USDT × (1 / <FX>USD) ──
     // FX provider symbol (EURUSD, GBPUSD) is inverted: USD/<fiat> = 1 / EURUSD.
@@ -209,7 +209,9 @@ mod tests {
         // are added/removed so reviewers notice the registry change.
         // 2026-07-07: 62 -> 61 after the cross_pairs expansion consolidated one
         // duplicate rule (81dfa27); count re-verified against the live registry.
-        assert_eq!(SYNTHESIS_RULES.len(), 61);
+        // 2026-07-08: 61 -> 57 — USDS/USD1/USDE/PYUSD `/USD` synth rules removed,
+        // fed natively by the pyth oracle relay (nxr-oracle).
+        assert_eq!(SYNTHESIS_RULES.len(), 57);
         assert_eq!(INJECTION_RULES.len(), 11);
     }
 }

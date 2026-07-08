@@ -158,15 +158,16 @@ impl NxrConfig {
             ticks_dir,
             bars_dir,
             indexes_dir,
-            // Forwarder subscription manifest. POLICY (operator 2026-06-02): NO
-            // crypto symbol (volatile OR stable) is quoted vs USD natively. All
-            // `<crypto>/USD` are SYNTH, derived `<crypto>/USDT × USDT/USD` (see
-            // `synth::triangulation_rules` — USDT/USD-anchored, ∵ USDT/USD has
-            // 12 providers / $579M depth vs USDC/USD's 5 / $113M). The ONLY
-            // native `/USD` tickers are the two stablecoin anchors USDT/USD and
-            // USDC/USD (real fiat-quoted CEX books on kraken/binance/bitstamp/
-            // gemini/coinbase). Every other stablecoin is quoted vs USDT (e.g.
-            // PYUSD/USDT, FDUSD/USDT) — its /USD is synth-derivable on demand.
+            // Forwarder subscription manifest. POLICY (operator 2026-06-02,
+            // amended 2026-07-08): NO VOLATILE crypto symbol is quoted vs USD
+            // natively — `<crypto>/USD` stays SYNTH `<crypto>/USDT × USDT/USD`
+            // (see `synth::triangulation_rules`, USDT/USD-anchored). Native
+            // `/USD` tickers are (a) the CEX fiat-book anchors USDT/USD +
+            // USDC/USD (kraken/binance/bitstamp/gemini/coinbase, listed here),
+            // and (b) STABLECOIN/USD pegs fed by the pyth oracle relay — the
+            // golden source for stable pegs — declared in `config.yml
+            // oracles.providers.pyth.symbols`, NOT in this manifest (this env
+            // list drives CEX forwarder subscriptions only).
             symbols: env_or(
                 "NXR_SYMBOLS",
                 "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,ADA/USDT,DOGE/USDT,\

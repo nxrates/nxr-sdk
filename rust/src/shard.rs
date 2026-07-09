@@ -412,16 +412,29 @@ pub fn read_shard_aligned<T: Pod>(path: &Path) -> Result<Vec<T>> {
 /// file (the whole file if it's smaller than that - cheap either way at
 /// that size). A live shard can be tens of MB; seeking avoids paying that
 /// cost just to read the last ~100 bytes.
+///
+/// Restart-seeding call sites want the very last record; `TAIL_SEED_RECORDS`
+/// reads a few extra past it as cheap margin against an off-by-one, not
+/// because more are ever consumed.
+pub const TAIL_SEED_RECORDS: usize = 4;
+
 pub fn read_shard_tail<T: Pod>(path: &Path, tail_records: usize) -> Result<Vec<T>> {
     let stride = std::mem::size_of::<T>();
     if stride == 0 {
         return Ok(Vec::new());
     }
     let mut file = fs::File::open(path).with_context(|| format!("open shard {}", path.display()))?;
-    let len = file
+    let raw_len = file
         .metadata()
         .with_context(|| format!("stat shard {}", path.display()))?
         .len();
+    // Round down to the last whole-record boundary BEFORE picking a seek
+    // start: a torn trailing write (crash mid-append) can leave `raw_len`
+    // short of a full record, and seeking off the raw length would offset
+    // the whole read window by the torn remainder - silently reinterpreting
+    // record N's tail + record N+1's head as one bogus record instead of
+    // healing past it the way `read_shard_aligned` does.
+    let len = (raw_len / stride as u64) * stride as u64;
     let want = (tail_records as u64).saturating_mul(stride as u64);
     let start = len.saturating_sub(want);
     file.seek(SeekFrom::Start(start))
@@ -898,7 +911,7 @@ impl IdxShardWriter {
             // If the latest shard predates today, the first record of today is
             // a genuine new-day write (handled by ensure_shard).
             self.cur_date = Some(*date);
-            let recs = read_shard_tail::<IndexRecord>(path, 4)?;
+            let recs = read_shard_tail::<IndexRecord>(path, TAIL_SEED_RECORDS)?;
             if let Some(last) = recs.last() {
                 let idx = last.index;
                 self.last_bid = idx.bid;
@@ -1268,7 +1281,7 @@ impl BarShardWriter {
     pub fn last_bar(&self) -> Result<Option<crate::mitch::bar::Bar>> {
         let shards = list_shards(&self.dir, self.ext)?;
         if let Some((_date, path)) = shards.last() {
-            let recs = read_shard_tail::<crate::mitch::bar::Bar>(path, 4)?;
+            let recs = read_shard_tail::<crate::mitch::bar::Bar>(path, TAIL_SEED_RECORDS)?;
             return Ok(recs.last().copied());
         }
         Ok(None)
@@ -1552,13 +1565,58 @@ mod tests {
         let full = read_shard_aligned::<IndexRecord>(&path).unwrap();
         assert_eq!(full.len(), 200, "sanity: all 200 distinct rows kept");
 
-        let tail = read_shard_tail::<IndexRecord>(&path, 4).unwrap();
+        let tail = read_shard_tail::<IndexRecord>(&path, TAIL_SEED_RECORDS).unwrap();
         assert!(!tail.is_empty());
         let tail_bid = tail.last().unwrap().index.bid;
         let full_bid = full.last().unwrap().index.bid;
         assert_eq!(
             tail_bid, full_bid,
             "tail read must recover the same last record as a full read"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Regression test for the seek-alignment bug found in code review: a
+    /// torn trailing write (crash mid-append, `file_len % stride != 0`) must
+    /// NOT shift the tail-read window off a record boundary. Before the fix,
+    /// seeking off the raw (torn) file length reinterpreted the tail of the
+    /// last whole record spliced with the torn partial one as one bogus
+    /// record - exactly the state a crash-then-restart leaves on disk,
+    /// since `AppendLog`'s own truncate-on-open healing hasn't run yet at
+    /// the point restart-seeding calls `read_shard_tail`.
+    #[test]
+    fn read_shard_tail_heals_torn_trailing_write_on_large_shard() {
+        let root = std::env::temp_dir().join("nxr_shard_tail_torn_test");
+        let _ = fs::remove_dir_all(&root);
+        let t0 = t_recent_day_start();
+        {
+            let mut w = IdxShardWriter::open(&root, 707, true).unwrap();
+            for i in 0..200i64 {
+                let px = 100.0 + i as f64 * 0.01;
+                w.append(&rec(t0 + i * 100, px, px + 1.0)).unwrap();
+            }
+            w.flush().unwrap();
+        }
+        let dir = idx_dir(&root, 707);
+        let path = list_shards(&dir, "idx").unwrap()[0].1.clone();
+
+        let full = read_shard_aligned::<IndexRecord>(&path).unwrap();
+        let last_whole_bid = full.last().unwrap().index.bid;
+
+        // Simulate a crash mid-append: a partial record's worth of garbage
+        // bytes trailing the last whole one, same as an OS-level torn write.
+        let stride = std::mem::size_of::<IndexRecord>();
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(&vec![0xAAu8; stride / 2]).unwrap();
+        }
+
+        let tail = read_shard_tail::<IndexRecord>(&path, TAIL_SEED_RECORDS).unwrap();
+        let tail_bid = tail.last().unwrap().index.bid;
+        assert_eq!(
+            tail_bid, last_whole_bid,
+            "torn trailing bytes must be healed away, not reinterpreted as a bogus record"
         );
 
         let _ = fs::remove_dir_all(&root);

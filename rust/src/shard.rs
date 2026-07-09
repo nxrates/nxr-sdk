@@ -30,7 +30,7 @@
 //!   market (sentinels present) from a *producer outage* (no sentinels).
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -398,6 +398,39 @@ pub fn read_shard_aligned<T: Pod>(path: &Path) -> Result<Vec<T>> {
     let aligned = &bytes[..n * stride];
     // T is `repr(C, packed)` (align 1) for our record types, so cast_slice
     // never fails the alignment check; bytes from `fs::read` are align-1 safe.
+    Ok(bytemuck::cast_slice::<u8, T>(aligned).to_vec())
+}
+
+/// Read just enough of a shard's TAIL to recover the last whole record
+/// (healing a torn trailing write, same as `read_shard_aligned`) without
+/// reading the whole file. For callers that only need the final record to
+/// seed restart state - `read_shard_aligned` remains correct and in use for
+/// callers that genuinely need every record (offline backfill/heal/audit
+/// tools).
+///
+/// Reads at most `tail_records * size_of::<T>()` bytes from the end of the
+/// file (the whole file if it's smaller than that - cheap either way at
+/// that size). A live shard can be tens of MB; seeking avoids paying that
+/// cost just to read the last ~100 bytes.
+pub fn read_shard_tail<T: Pod>(path: &Path, tail_records: usize) -> Result<Vec<T>> {
+    let stride = std::mem::size_of::<T>();
+    if stride == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = fs::File::open(path).with_context(|| format!("open shard {}", path.display()))?;
+    let len = file
+        .metadata()
+        .with_context(|| format!("stat shard {}", path.display()))?
+        .len();
+    let want = (tail_records as u64).saturating_mul(stride as u64);
+    let start = len.saturating_sub(want);
+    file.seek(SeekFrom::Start(start))
+        .with_context(|| format!("seek shard {}", path.display()))?;
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("read tail of shard {}", path.display()))?;
+    let n = bytes.len() / stride;
+    let aligned = &bytes[..n * stride];
     Ok(bytemuck::cast_slice::<u8, T>(aligned).to_vec())
 }
 
@@ -865,7 +898,7 @@ impl IdxShardWriter {
             // If the latest shard predates today, the first record of today is
             // a genuine new-day write (handled by ensure_shard).
             self.cur_date = Some(*date);
-            let recs = read_shard_aligned::<IndexRecord>(path)?;
+            let recs = read_shard_tail::<IndexRecord>(path, 4)?;
             if let Some(last) = recs.last() {
                 let idx = last.index;
                 self.last_bid = idx.bid;
@@ -1213,26 +1246,19 @@ impl BarShardWriter {
     /// Return the epoch-ms timestamp of the last bar in the most-recent shard,
     /// or `None` if no shards exist / the shard is empty. Producers use this
     /// at startup to skip emitting a bar for a bucket that already exists.
+    /// Delegates to `last_bar` (one tail read) rather than reading the shard
+    /// a second time - a caller wanting both fields should call `last_bar`
+    /// directly and read both off the one returned `Bar`.
     pub fn last_ts_ms(&self) -> Result<Option<i64>> {
-        let shards = list_shards(&self.dir, self.ext)?;
-        if let Some((_date, path)) = shards.last() {
-            let recs = read_shard_aligned::<crate::mitch::bar::Bar>(path)?;
-            return Ok(recs.last().map(|b| b.ts_ms()));
-        }
-        Ok(None)
+        Ok(self.last_bar()?.map(|b| b.ts_ms()))
     }
 
     /// Return the close price of the last bar in the most-recent shard, or
     /// `None` if no shards exist / shard empty. Renko producer uses this on
     /// open to seed its `last_close` so a restart preserves brick state
-    /// continuity across processes.
+    /// continuity across processes. See `last_ts_ms` doc re: delegation.
     pub fn last_close(&self) -> Result<Option<f64>> {
-        let shards = list_shards(&self.dir, self.ext)?;
-        if let Some((_date, path)) = shards.last() {
-            let recs = read_shard_aligned::<crate::mitch::bar::Bar>(path)?;
-            return Ok(recs.last().map(|b| b.close));
-        }
-        Ok(None)
+        Ok(self.last_bar()?.map(|b| b.close))
     }
 
     /// Return the last bar in the most-recent shard, or `None` if no shards
@@ -1242,7 +1268,7 @@ impl BarShardWriter {
     pub fn last_bar(&self) -> Result<Option<crate::mitch::bar::Bar>> {
         let shards = list_shards(&self.dir, self.ext)?;
         if let Some((_date, path)) = shards.last() {
-            let recs = read_shard_aligned::<crate::mitch::bar::Bar>(path)?;
+            let recs = read_shard_tail::<crate::mitch::bar::Bar>(path, 4)?;
             return Ok(recs.last().copied());
         }
         Ok(None)
@@ -1497,6 +1523,70 @@ mod tests {
         let dir = idx_dir(&root, 702);
         let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Regression test for the boot-time OOM fix: `read_shard_tail` must
+    /// recover the same last record a full `read_shard_aligned` read would,
+    /// while only ever reading a small window from the end of the file -
+    /// the whole point is NOT reading the full (potentially multi-MB) shard
+    /// just to seed restart state from its last record.
+    #[test]
+    fn read_shard_tail_matches_full_read_on_a_large_shard() {
+        let root = std::env::temp_dir().join("nxr_shard_tail_read_test");
+        let _ = fs::remove_dir_all(&root);
+        let t0 = t_recent_day_start();
+        {
+            let mut w = IdxShardWriter::open(&root, 705, true).unwrap();
+            // Distinct bid/ask each row so the delta gate keeps all of them -
+            // need a shard meaningfully larger than the tail window below.
+            for i in 0..200i64 {
+                let px = 100.0 + i as f64 * 0.01;
+                w.append(&rec(t0 + i * 100, px, px + 1.0)).unwrap();
+            }
+            w.flush().unwrap();
+        }
+        let dir = idx_dir(&root, 705);
+        let path = list_shards(&dir, "idx").unwrap()[0].1.clone();
+
+        let full = read_shard_aligned::<IndexRecord>(&path).unwrap();
+        assert_eq!(full.len(), 200, "sanity: all 200 distinct rows kept");
+
+        let tail = read_shard_tail::<IndexRecord>(&path, 4).unwrap();
+        assert!(!tail.is_empty());
+        let tail_bid = tail.last().unwrap().index.bid;
+        let full_bid = full.last().unwrap().index.bid;
+        assert_eq!(
+            tail_bid, full_bid,
+            "tail read must recover the same last record as a full read"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A shard smaller than the requested tail window must fall back to
+    /// reading the whole (small) file correctly, not error or truncate.
+    #[test]
+    fn read_shard_tail_handles_file_smaller_than_window() {
+        let root = std::env::temp_dir().join("nxr_shard_tail_small_test");
+        let _ = fs::remove_dir_all(&root);
+        let t0 = t_recent_day_start();
+        {
+            let mut w = IdxShardWriter::open(&root, 706, true).unwrap();
+            w.append(&rec(t0, 100.0, 101.0)).unwrap();
+            w.append(&rec(t0 + 100, 100.5, 101.5)).unwrap();
+            w.flush().unwrap();
+        }
+        let dir = idx_dir(&root, 706);
+        let path = list_shards(&dir, "idx").unwrap()[0].1.clone();
+
+        // Window (10 records) far larger than the actual file (2 records).
+        let tail = read_shard_tail::<IndexRecord>(&path, 10).unwrap();
+        assert_eq!(tail.len(), 2);
+        let (bid0, bid1) = (tail[0].index.bid, tail[1].index.bid);
+        assert_eq!(bid0, 100.0);
+        assert_eq!(bid1, 100.5);
+
         let _ = fs::remove_dir_all(&root);
     }
 

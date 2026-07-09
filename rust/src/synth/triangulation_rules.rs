@@ -134,6 +134,10 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     // USD1/USDC + USDE/USDC DO have (thin) native CEX books - the synth
     // overwrites them each cycle, same last-writer-wins posture as BTC/USD
     // vs the CFD feed above; pyth wins for stable pegs.
+    // USDT/USDC: the NATIVE deep-book ticker is USDC/USDT (kept untouched);
+    // this pyth-derived INVERSE form exists so the keeper's X/USDC universe
+    // is uniform. Distinct ticker id (base/quote swapped) - no overwrite.
+    SynthesisRuleSpec { out_sym: "USDT/USDC",  leg1_sym: "USDT/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
     SynthesisRuleSpec { out_sym: "USD1/USDC",  leg1_sym: "USD1/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
     SynthesisRuleSpec { out_sym: "USDE/USDC",  leg1_sym: "USDE/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
     SynthesisRuleSpec { out_sym: "PYUSD/USDC", leg1_sym: "PYUSD/USD", leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
@@ -233,9 +237,9 @@ mod tests {
         // duplicate rule (81dfa27); count re-verified against the live registry.
         // 2026-07-08: 61 -> 57 — USDS/USD1/USDE/PYUSD `/USD` synth rules removed,
         // fed natively by the pyth oracle relay (nxr-oracle); then 57 -> 56
-        // (XAUT/USD native via pyth too). 56 -> 67: +11 STABLE/USDC crosses
+        // (XAUT/USD native via pyth too). 56 -> 68: +12 STABLE/USDC crosses
         // for the BTR Stable Core keeper (USDC-denominated pools).
-        assert_eq!(SYNTHESIS_RULES.len(), 67);
+        assert_eq!(SYNTHESIS_RULES.len(), 68);
         assert_eq!(INJECTION_RULES.len(), 11);
     }
 }

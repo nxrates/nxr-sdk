@@ -401,6 +401,11 @@ pub fn read_shard_aligned<T: Pod>(path: &Path) -> Result<Vec<T>> {
     Ok(bytemuck::cast_slice::<u8, T>(aligned).to_vec())
 }
 
+/// Restart-seeding call sites want the very last record; reads a few extra
+/// past it as cheap margin against an off-by-one, not because more are ever
+/// consumed.
+pub const TAIL_SEED_RECORDS: usize = 4;
+
 /// Read just enough of a shard's TAIL to recover the last whole record
 /// (healing a torn trailing write, same as `read_shard_aligned`) without
 /// reading the whole file. For callers that only need the final record to
@@ -412,12 +417,6 @@ pub fn read_shard_aligned<T: Pod>(path: &Path) -> Result<Vec<T>> {
 /// file (the whole file if it's smaller than that - cheap either way at
 /// that size). A live shard can be tens of MB; seeking avoids paying that
 /// cost just to read the last ~100 bytes.
-///
-/// Restart-seeding call sites want the very last record; `TAIL_SEED_RECORDS`
-/// reads a few extra past it as cheap margin against an off-by-one, not
-/// because more are ever consumed.
-pub const TAIL_SEED_RECORDS: usize = 4;
-
 pub fn read_shard_tail<T: Pod>(path: &Path, tail_records: usize) -> Result<Vec<T>> {
     let stride = std::mem::size_of::<T>();
     if stride == 0 {
@@ -439,7 +438,7 @@ pub fn read_shard_tail<T: Pod>(path: &Path, tail_records: usize) -> Result<Vec<T
     let start = len.saturating_sub(want);
     file.seek(SeekFrom::Start(start))
         .with_context(|| format!("seek shard {}", path.display()))?;
-    let mut bytes = Vec::with_capacity((len - start) as usize);
+    let mut bytes = Vec::with_capacity((raw_len - start) as usize);
     file.read_to_end(&mut bytes)
         .with_context(|| format!("read tail of shard {}", path.display()))?;
     let n = bytes.len() / stride;

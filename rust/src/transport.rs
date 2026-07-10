@@ -268,11 +268,27 @@ impl BarKind {
     }
 }
 
-/// Bar producer source: full-fanout `Native` or single-ticker `Synth(id)`.
-/// Both flavors share the same multicast leg + label per BarKind; the synth
-/// variant just filters incoming index records to one synth ticker_id.
+/// Bar producer source: full-fanout `Native`, single-ticker `Synth(id)`, or
+/// full-fanout `SynthAll` (many synth ids, one shared writer thread). All
+/// three share the same multicast leg + label per BarKind.
+///
+/// `SynthAll` exists because the legacy `NXR_SYNTH_PIPELINE` used to spawn
+/// one `Synth(id)` producer PER pair (main.rs looping `bars_s10::spawn` /
+/// `bars_renko::spawn` once per synth_id) - each call opens its own
+/// dedicated OS writer thread (`shard_writer::spawn_writer`) even though
+/// that thread's `writers: FxHashMap<u64, _>` already supports many
+/// tickers. RCA 2026-07-10: 52 synth pairs x 4 threads (s10 writer + s10
+/// watchdog + renko writer + renko watchdog) = 208 extra OS threads,
+/// pushing total process thread count to 229 - a strong contributor to the
+/// live OOM crash-loop (glibc allocates per-thread malloc arenas; virtual
+/// memory stayed ~constant ~11.5GB independent of the cgroup limit, the
+/// signature of thread-driven arena bloat rather than a data leak). `Synth
+/// (u64)` is kept for the existing single-ticker test coverage; the real
+/// pipeline now spawns exactly ONE `SynthAll` producer (like `Native`) that
+/// demuxes all synth ids through the same per-ticker `TickerState` map.
 #[derive(Debug, Clone, Copy)]
 pub enum BarSource {
     Native,
     Synth(u64),
+    SynthAll,
 }

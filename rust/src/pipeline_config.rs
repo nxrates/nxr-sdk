@@ -140,19 +140,9 @@ pub struct OracleProviderYml {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RuntimeYml {
     /// Forwarder heartbeat cadence (seconds). Was: hardcoded
-    /// `FORWARDER_HEARTBEAT_SECS = 5` in `crypto/src/main.rs:34` and
-    /// `crypto/src/bin/fx.rs:52`.
+    /// `FORWARDER_HEARTBEAT_SECS = 5` in `crypto/src/main.rs:34`.
     #[serde(default)]
     pub forwarder_heartbeat_secs: Option<u64>,
-    /// FX provider liveness staleness threshold (seconds). Was: hardcoded
-    /// `PROVIDER_STALE_SECS = 30` in `crypto/src/bin/fx.rs:48`.
-    #[serde(default)]
-    pub provider_stale_secs: Option<u64>,
-    /// Cap on accumulated TCP input awaiting frame parsing (bytes). Defense
-    /// in depth against runaway peers. Was: hardcoded
-    /// `FRAME_BUF_MAX = 2 * 1024 * 1024` in `crypto/src/bin/fx.rs:254`.
-    #[serde(default)]
-    pub frame_buf_max: Option<usize>,
     /// REST `/health` stale-forwarder threshold (seconds). Was: hardcoded
     /// `STALE_SECS = 20` in `core/src/server/rest.rs:786`.
     #[serde(default)]

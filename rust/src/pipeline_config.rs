@@ -67,8 +67,6 @@ pub struct PipelineYml {
     pub cexs: CexsYml,
     pub series: SeriesYml,
     #[serde(default)]
-    pub forex: ForexYml,
-    #[serde(default)]
     pub network: NetworkYml,
     #[serde(default)]
     pub server: ServerYml,
@@ -83,6 +81,10 @@ pub struct PipelineYml {
     ///     `sdk/rust/src/synth/pairs.rs::INITIAL_SYNTH_PAIRS`).
     #[serde(default)]
     pub synths: SynthsYml,
+    /// Stablecoin allowlist for the FX/metal/stablecoin auto-cross
+    /// triangulator (`core::triangulator::build_auto_cross_rules`).
+    #[serde(default)]
+    pub triangulation: TriangulationYml,
     /// Runtime tuning knobs for the forwarders, fx provider server, and core
     /// REST/WS layer. Phase 59.R3.C2.O5 (2026-05-30) — was hardcoded
     /// `const FORWARDER_HEARTBEAT_SECS / PROVIDER_STALE_SECS / FRAME_BUF_MAX
@@ -217,6 +219,25 @@ pub struct SynthPairYml {
     pub quote_sym: String,
 }
 
+/// `triangulation:` block — the ONE piece of the auto-cross-triangulation
+/// eligibility test that can't be derived from existing ticker_id metadata.
+/// FX (any currency pair) and CM-spot (metals/commodities, excluding futures
+/// like expirable gold contracts) are both auto-detected from the ticker_id's
+/// own asset-class + instrument-type bits (see
+/// `core::triangulator::build_auto_cross_rules`) — zero config needed there.
+/// Stablecoins are all `AssetClass::CR` (same class as BTC/ETH/...), which
+/// carries no sub-class distinguishing "pegged to USD" from "not" - hence
+/// this explicit, small, YAML-owned list rather than a Rust-hardcoded one.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct TriangulationYml {
+    /// Base symbols (no "/USD" suffix) of USD-pegged stablecoins eligible for
+    /// automatic cross-triangulation against every other eligible leg
+    /// (FX majors, metals, other stablecoins). Each must already be
+    /// registered as `<SYM>/USD` under some oracle provider's `symbols:`.
+    #[serde(default)]
+    pub stablecoins: Vec<String>,
+}
+
 /// Source of the default `NXR_CONFIG` fallback path. Determines what
 /// the resolver returns when the env var is unset.
 ///
@@ -344,37 +365,6 @@ pub struct ArchiveUrlTemplate {
     /// Interpolates `{sym}`, `{y}`, `{m}` (zero-padded year/month).
     #[serde(default)]
     pub probe: Option<String>,
-}
-
-/// `forex:` block — non-CEX provider-forwarded symbols + provider metadata.
-/// `symbols` is the slash-separated FX pairs list scraped by nxr-fx /
-/// MT4 forwarders (was hardcoded in `weights/src/scraper/fx.rs` originally).
-/// `provider_symbols` is the no-slash multi-asset list (FX + commodities +
-/// indices + crypto CFDs) the provider forwarders subscribe to and the core
-/// sink pre-registers in `symbol_map`. Was: `core::main::FX_SYMBOLS`
-/// (phase 59.R2C.1).
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct ForexYml {
-    #[serde(default)]
-    pub symbols: Vec<String>,
-    #[serde(default)]
-    pub provider_symbols: Vec<String>,
-    #[serde(default)]
-    pub providers: BTreeMap<String, FxProviderYml>,
-}
-
-/// `forex.providers.<name>:` per-provider mitch_id + weight + per-pair overrides.
-/// Was: `weights::config::FxProviderEntry`.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct FxProviderYml {
-    #[serde(default)]
-    pub mitch_id: u16,
-    #[serde(default)]
-    pub weight: f64,
-    /// Per-pair weight overrides keyed by canonical "BASE/QUOTE".
-    /// Empty ⇒ provider default applies to every pair.
-    #[serde(default)]
-    pub pair_weights: BTreeMap<String, f64>,
 }
 
 /// `network:` block — UDP + listener cfg. Today these knobs are env-driven via

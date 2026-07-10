@@ -100,7 +100,7 @@ impl RunningStats {
 
 /// Buffers raw ticks and flushes to an `Index` every aggregation cycle.
 ///
-/// Used by forwarders (nxr-crypto, nxr-fx) for per-(provider, ticker) local
+/// Used by forwarders (nxr-crypto, nxr-oracle) for per-(provider, ticker) local
 /// aggregation. Each cycle: N raw ticks are accumulated, then `flush()` produces
 /// a single `Index` with averaged bid/ask and summed volumes.
 pub struct TickAccumulator {

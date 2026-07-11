@@ -85,7 +85,17 @@ pub fn compute_synth_index(
     if b_conf == 0 || q_conf == 0 {
         return None;
     }
-    if !(b_bid > 0.0 && b_ask >= b_bid && q_bid > 0.0 && q_ask >= q_bid) {
+    // Magnitude cap on BOTH legs, not just finiteness: a poisoned quote leg
+    // (finite but astronomical) divided into a normal base leg yields a
+    // tiny-but-finite result that would sail past the `is_finite()` checks
+    // below undetected (2026-07-10 incident - see mitch::MAX_PRICE doc).
+    if !(b_bid > 0.0
+        && b_ask >= b_bid
+        && b_ask <= mitch::MAX_PRICE
+        && q_bid > 0.0
+        && q_ask >= q_bid
+        && q_ask <= mitch::MAX_PRICE)
+    {
         return None;
     }
 

@@ -59,7 +59,14 @@ pub fn compute_synth_tick(
 
     for leg in &path.legs {
         let k = legs.get(leg.sym.as_str())?;
-        if !(k.mid > 0.0) || !(k.bid > 0.0) || !(k.ask > 0.0) {
+        // is_finite() + magnitude cap (not just >0.0): a poisoned leg (finite
+        // but astronomical) multiplied straight into `mid`/`bid`/`ask` below
+        // would otherwise silently corrupt the whole cross (2026-07-10
+        // incident class - see mitch::MAX_PRICE doc).
+        if !(k.mid.is_finite() && k.mid > 0.0 && k.mid <= mitch::MAX_PRICE)
+            || !(k.bid.is_finite() && k.bid > 0.0 && k.bid <= mitch::MAX_PRICE)
+            || !(k.ask.is_finite() && k.ask > 0.0 && k.ask <= mitch::MAX_PRICE)
+        {
             return None;
         }
         if leg.exp == 1 {

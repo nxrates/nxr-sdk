@@ -332,6 +332,18 @@ pub struct ExchangeYml {
     /// const.
     #[serde(default)]
     pub archive_url_template: Option<ArchiveUrlTemplate>,
+    /// Canonical "BASE/QUOTE" pairs to drop from this exchange's resolved
+    /// symbol list even when present in both `NXR_SYMBOLS` and the
+    /// exchange's own live markets response. For cross-exchange ticker
+    /// collisions: a short/generic base symbol (e.g. "U") can denote two
+    /// completely unrelated assets on different exchanges (confirmed
+    /// 2026-07-12: Bybit's & XT.com's "U" is an unrelated ~$0.0003 token,
+    /// not United Stables the ~$1 stablecoin every other connected exchange
+    /// lists under the same ticker) - mixing them into one VWAP composite
+    /// silently corrupts the aggregate. Checked in `client.rs::get_symbols`
+    /// after the existing supported-set intersection.
+    #[serde(default)]
+    pub exclude_symbols: Vec<String>,
 }
 
 /// Per-exchange historical-archive URL prefixes. Each field is the URL stem

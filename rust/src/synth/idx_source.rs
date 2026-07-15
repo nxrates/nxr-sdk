@@ -50,8 +50,11 @@ impl EphemeralIdxSource {
     /// Create a new ring with the given capacity. Panics if `capacity == 0`.
     pub fn with_capacity(capacity: usize) -> Self {
         assert!(capacity > 0, "EphemeralIdxSource capacity must be > 0");
+        // Lazy allocation: rings are created per ticker (thousands of natives
+        // + synths); an eager `with_capacity` reserved capacity×56B per ring
+        // up front (36 MB/synth, 200 KB/native) before a single record landed.
         Self {
-            inner: Mutex::new(VecDeque::with_capacity(capacity.min(1 << 20))),
+            inner: Mutex::new(VecDeque::new()),
             capacity,
         }
     }
@@ -67,6 +70,27 @@ impl EphemeralIdxSource {
     /// contract to hold (the live kernel does this by construction).
     pub fn push(&self, rec: IndexRecord) {
         let mut g = self.inner.lock().expect("ring lock poisoned");
+        if g.len() >= self.capacity {
+            g.pop_front();
+        }
+        g.push_back(rec);
+    }
+
+    /// [`push`](Self::push) + evict-by-age: drops front records older than
+    /// `window_ms` behind `rec`'s own timestamp (callers push in ts order),
+    /// then applies the count cap. Bounds memory by true emit volume inside
+    /// the window instead of the count capacity alone — quiet tickers hold
+    /// a handful of heartbeats, not `capacity` records accumulated over days.
+    pub fn push_windowed(&self, rec: IndexRecord, window_ms: i64) {
+        let cutoff = mitch::timestamp::to_epoch_ms(rec.header.get_timestamp()) - window_ms;
+        let mut g = self.inner.lock().expect("ring lock poisoned");
+        while let Some(front) = g.front() {
+            if mitch::timestamp::to_epoch_ms(front.header.get_timestamp()) < cutoff {
+                g.pop_front();
+            } else {
+                break;
+            }
+        }
         if g.len() >= self.capacity {
             g.pop_front();
         }
@@ -190,6 +214,28 @@ mod tests {
         let ts2 = mitch::timestamp::to_epoch_ms(v[2].header.get_timestamp());
         assert_eq!(ts0, t0 + 3 * step);
         assert_eq!(ts2, t0 + 5 * step);
+    }
+
+    #[test]
+    fn push_windowed_evicts_by_age_and_count() {
+        let s = EphemeralIdxSource::with_capacity(4);
+        let t0 = 1_700_000_000_000_i64;
+        let step = 32_i64;
+        // Window = 2 steps: each push drops records older than ts-2step.
+        for i in 0..6_i64 {
+            s.push_windowed(mk_rec(42, t0 + i * step), 2 * step);
+        }
+        // Age window keeps i=3..5 (ts >= t5 - 2step); count cap (4) not hit.
+        let v: Vec<IndexRecord> = s.iter_range(i64::MIN, i64::MAX).collect();
+        assert_eq!(v.len(), 3);
+        let first_ts = mitch::timestamp::to_epoch_ms(v[0].header.get_timestamp());
+        assert_eq!(first_ts, t0 + 3 * step);
+        // Count cap still binds with a wide window.
+        let s2 = EphemeralIdxSource::with_capacity(2);
+        for i in 0..5_i64 {
+            s2.push_windowed(mk_rec(42, t0 + i * step), i64::MAX / 2);
+        }
+        assert_eq!(s2.len(), 2);
     }
 
     #[test]

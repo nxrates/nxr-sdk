@@ -101,12 +101,19 @@ impl RunningStats {
 /// Buffers raw ticks and flushes to an `Index` every aggregation cycle.
 ///
 /// Used by forwarders (nxr-crypto, nxr-oracle) for per-(provider, ticker) local
-/// aggregation. Each cycle: N raw ticks are accumulated, then `flush()` produces
-/// a single `Index` with averaged bid/ask and summed volumes.
+/// aggregation. Each cycle: N raw ticks are accumulated, then `flush()`
+/// produces a single `Index` carrying the LATEST bid/ask and summed volumes.
+///
+/// Latest, not window mean (audit 2026-07-15): the mean put every published
+/// mark at the window centroid — ~half an aggregation interval stale AT
+/// emission (~100ms at 200ms cadence), the single largest structural latency
+/// term vs consuming a venue's book stream directly. The window still
+/// contributes tick_count/volumes/rejected for audit; cross-venue smoothing
+/// happens downstream in the sink's TDWAP, which is its job.
 pub struct TickAccumulator {
     ticker: u64,
-    acc_bid: f64,
-    acc_ask: f64,
+    last_bid: f64,
+    last_ask: f64,
     acc_bid_vol: u64,
     acc_ask_vol: u64,
     acc_count: u32,
@@ -119,8 +126,8 @@ impl TickAccumulator {
     pub fn new(ticker: u64) -> Self {
         Self {
             ticker,
-            acc_bid: 0.0,
-            acc_ask: 0.0,
+            last_bid: 0.0,
+            last_ask: 0.0,
             acc_bid_vol: 0,
             acc_ask_vol: 0,
             acc_count: 0,
@@ -128,11 +135,11 @@ impl TickAccumulator {
         }
     }
 
-    /// Buffer a single raw tick's values.
+    /// Buffer a single raw tick's values (price = last-write-wins).
     #[inline]
     pub fn ingest(&mut self, bid: f64, ask: f64, vbid: u32, vask: u32) {
-        self.acc_bid += bid;
-        self.acc_ask += ask;
+        self.last_bid = bid;
+        self.last_ask = ask;
         self.acc_bid_vol += vbid as u64;
         self.acc_ask_vol += vask as u64;
         self.acc_count += 1;
@@ -147,8 +154,8 @@ impl TickAccumulator {
         self.acc_rejected = self.acc_rejected.saturating_add(1);
     }
 
-    /// Average the accumulated ticks into an `Index` and reset.
-    /// Returns `None` if no ticks were accumulated since last flush.
+    /// Emit the window's LATEST quote as an `Index` and reset the window
+    /// counters. Returns `None` if no ticks arrived since the last flush.
     /// Rejected-count also resets each cycle, so `Index.rejected` reflects
     /// outliers rejected in the window ending at this flush.
     pub fn flush(&mut self) -> Option<Index> {
@@ -157,12 +164,11 @@ impl TickAccumulator {
             self.acc_rejected = 0;
             return None;
         }
-        let n = self.acc_count as f64;
         let rejected = self.acc_rejected.min(u8::MAX as u32) as u8;
         let index = Index {
             ticker: self.ticker,
-            bid: self.acc_bid / n,
-            ask: self.acc_ask / n,
+            bid: self.last_bid,
+            ask: self.last_ask,
             vbid: self.acc_bid_vol.min(u32::MAX as u64) as u32,
             vask: self.acc_ask_vol.min(u32::MAX as u64) as u32,
             ci: 0,
@@ -172,8 +178,6 @@ impl TickAccumulator {
             rejected,
             flags: 0,
         };
-        self.acc_bid = 0.0;
-        self.acc_ask = 0.0;
         self.acc_bid_vol = 0;
         self.acc_ask_vol = 0;
         self.acc_count = 0;

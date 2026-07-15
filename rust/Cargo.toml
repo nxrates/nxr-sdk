@@ -22,7 +22,7 @@ mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 memmap2 = "0.9"
 
-tokio = { version = "1.52", default-features = false, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util"] }
+tokio = { version = "1.52", default-features = false, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "signal"] }
 
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 bytes = "1"

@@ -306,9 +306,10 @@ where
         wd_sum += entry.base_weight * decay;
 
         // Active provider: any with non-floored decay >= 10 percent, regardless
-        // of whether its weight contributes to TDWAP this cycle. Count, not sum
-        // of base_weights — `Index::confidence` is documented as "active provider
-        // count" and must satisfy `confidence ≤ accepted` (see `Index::validate`).
+        // of whether its weight contributes to TDWAP this cycle. Diagnostic
+        // only: `Index::confidence` is the Q0.8 freshness byte (f x 255, flag
+        // bit 3), NOT this count — the old count semantics and the
+        // `confidence <= accepted` validate constraint were retired.
         if decay >= 0.1 {
             active_count = active_count.saturating_add(1);
         }

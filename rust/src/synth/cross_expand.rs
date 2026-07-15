@@ -56,6 +56,31 @@ pub fn expand_cross_pairs(
     out
 }
 
+/// Generate the full directed N×(N−1) crypto-cross catalog over `assets`.
+///
+/// Every ordered pair of distinct assets `A/B` (both directions — `A/B` and
+/// `B/A` are distinct inverse crosses) becomes a cross string, USDT-pivoted at
+/// composition time by [`legs_for_cross`]. This is the "all crosses by default"
+/// input: feed the result to [`expand_cross_pairs`], which drops any pair whose
+/// `A/USDT`/`B/USDT` legs don't resolve. Assets are the single canonical crypto
+/// universe (`cexs.assets`); no per-cross declaration.
+pub fn all_crypto_crosses(assets: &[String]) -> Vec<String> {
+    let up: Vec<String> = assets
+        .iter()
+        .map(|a| a.trim().to_uppercase())
+        .filter(|a| !a.is_empty())
+        .collect();
+    let mut out = Vec::with_capacity(up.len().saturating_mul(up.len().saturating_sub(1)));
+    for a in &up {
+        for b in &up {
+            if a != b {
+                out.push(format!("{a}/{b}"));
+            }
+        }
+    }
+    out
+}
+
 fn normalize_cross(sym: &str) -> String {
     sym.trim()
         .to_uppercase()
@@ -78,6 +103,19 @@ fn leg_resolves(sym: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_crypto_crosses_is_directed_nxn_minus_diag() {
+        let assets: Vec<String> = ["BTC", "ETH", "SOL"].iter().map(|s| s.to_string()).collect();
+        let out = all_crypto_crosses(&assets);
+        assert_eq!(out.len(), 3 * 2); // N×(N-1), both directions, no A/A
+        let set: HashSet<_> = out.iter().map(String::as_str).collect();
+        assert!(set.contains("ETH/BTC") && set.contains("BTC/ETH")); // both directions
+        assert!(!set.contains("BTC/BTC"));
+        // Feeds expand_cross_pairs cleanly (legs resolve for real majors).
+        let expanded = expand_cross_pairs(&out, &["BTC".into(), "ETH".into(), "SOL".into()]);
+        assert!(expanded.iter().any(|p| p.synth_sym == "ETH/BTC" && p.base_sym == "ETH/USDT"));
+    }
 
     #[test]
     fn skips_usdt_primaries_and_keeps_crypto_crosses() {

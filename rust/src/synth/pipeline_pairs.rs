@@ -1,21 +1,22 @@
 //! Resolve the synth-pipeline universe from operator YAML.
 
 use crate::pipeline_config::{PipelineYml, SynthPairYml};
-use crate::synth::cross_expand::expand_cross_pairs;
+use crate::synth::cross_expand::{all_crypto_crosses, expand_cross_pairs};
 use crate::synth::pairs::DEFAULT_INITIAL_SYNTH_PAIRS;
 
-/// Synth pairs for live kernel + offline backfill/calibrate.
+/// Synth cross catalog for offline backfill/calibrate (and cross enumeration).
 ///
-/// Prefer `cexs.cross_pairs` (full universe). `synths.initial_pairs` is a
-/// deprecated manual override when non-empty.
+/// ALL crosses by default: the full directed N² over the canonical crypto
+/// universe `cexs.assets`, USDT-pivoted. `expand_cross_pairs` drops any pair
+/// whose `A/USDT`/`B/USDT` legs don't resolve. No per-cross declaration —
+/// `cexs.cross_pairs` is retired. `synths.initial_pairs` stays only as a
+/// deprecated manual override when non-empty (empty in prod).
 pub fn synth_pipeline_pairs(yml: &PipelineYml) -> Vec<SynthPairYml> {
     if !yml.synths.initial_pairs.is_empty() {
         return yml.synths.initial_pairs.clone();
     }
-    expand_cross_pairs(
-        &yml.cexs.cross_pairs,
-        &yml.series.pipeline.pairs,
-    )
+    let crosses = all_crypto_crosses(&yml.cexs.assets);
+    expand_cross_pairs(&crosses, &yml.series.pipeline.pairs)
 }
 
 /// Fallback when YAML is unavailable (tests / minimal boot).

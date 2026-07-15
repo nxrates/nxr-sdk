@@ -41,6 +41,7 @@
 //! are verbatim ports.
 
 pub mod bar;
+pub mod compose;
 pub mod cross_expand;
 pub mod idx_source;
 pub mod ohlc;
@@ -52,6 +53,7 @@ pub mod rolling;
 pub mod tick;
 pub mod triangulation_rules;
 
+pub use compose::compose_cross_s10;
 pub use idx_source::{EphemeralIdxSource, DEFAULT_EPHEMERAL_CAPACITY};
 pub use replay::{compute_synth_index, SynthReplayState, LEG_STALE_TTL_MS, SYNTH_KERNEL_PROVIDER_ID};
 

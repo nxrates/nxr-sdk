@@ -112,6 +112,14 @@ pub const FLAG_NO_BOOK: u8 = 0b0010_0000;
 /// from microstructure gates. (Fable DQ audit GATE-3, 2026-07-07.)
 pub const FLAG_S10_FLAT_FILL: u8 = 0b0100_0000;
 
+/// Bit 7 (Bar flag space): this bar is a COMPOSED cross — derived on read from
+/// its two native leg S10 bars (`synth::compose::compose_cross_s10`), never
+/// ingested. O/H/L/C are exact endpoints / conservative-corner range; the
+/// path-dependent HF fields (realized_var, bipower_var, drift, vol_imbalance,
+/// max_abs_return) are ZERO and MUST NOT be read as measured. Certifiers exempt
+/// composed bars from microstructure gates, same as flat-fill.
+pub const FLAG_COMPOSED: u8 = 0b1000_0000;
+
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote
 /// is unchanged. 60s bounds the "is this a gap or just quiet?" ambiguity.
 pub const SENTINEL_INTERVAL_MS: i64 = 60_000;

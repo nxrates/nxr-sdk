@@ -147,52 +147,35 @@ pub struct SignedFeedYml {
     pub quote_via: Option<String>,
 }
 
-/// `oracles:` block — push-based oracle relay providers consumed by the
-/// `nxr-oracle` forwarder (Pyth via self-hosted Hermes SSE today).
+/// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the
+/// `nxr-oracle` forwarder.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct OraclesYml {
-    /// Oracle forwarder flush cadence (ms). Pythnet publishes ~400 ms slots,
-    /// so oracles run their own (slower) cadence than the CEX 200 ms one.
-    /// Default 1000 when absent.
+    /// Oracle forwarder flush cadence (ms). Default 250 when absent.
     #[serde(default)]
     pub aggregation_interval_ms: Option<u64>,
-    /// Relay catalog re-scan period (secs) for `watch` auto-onboarding.
-    /// Default 3600 when absent.
-    #[serde(default)]
-    pub catalog_refresh_secs: Option<u64>,
     #[serde(default)]
     pub providers: BTreeMap<String, OracleProviderYml>,
 }
 
-/// `oracles.providers.<name>:` — one relay endpoint + its feed manifest.
+/// `oracles.providers.<name>:` — one Lazer subscription + its feed manifest.
+/// Bearer token comes from env `NXR_ORACLE_TOKEN_<NAME>`; endpoint override
+/// from env `NXR_ORACLE_URL_<NAME>` (comma-separated).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct OracleProviderYml {
-    /// Relay base URL (Hermes: `http://host:8080`; forwarder appends
-    /// `/v2/updates/price/stream`). Env `NXR_ORACLE_URL_<NAME>` overrides.
-    #[serde(default)]
-    pub url: String,
-    /// Canonical "BASE/QUOTE" → provider feed id (Pyth: hex, no 0x).
+    /// Canonical "BASE/QUOTE" → DECIMAL Lazer feed id. Gated / coming-soon
+    /// feeds may be listed: the server refuses them per-feed
+    /// (ignoreInvalidFeeds) and the forwarder resubscribes hourly, so a
+    /// state/entitlement flip onboards without a restart.
     #[serde(default)]
     pub symbols: BTreeMap<String, String>,
-    /// Coming-soon feeds: canonical NXR symbol → provider CATALOG symbol
-    /// (Pyth: e.g. "Metal.XCU/USD"). The forwarder re-scans the relay
-    /// catalog every `catalog_refresh_secs` and auto-subscribes the moment
-    /// a watched feed goes live. Keys must resolve strictly at boot.
-    #[serde(default)]
-    pub watch: BTreeMap<String, String>,
-    /// Transport: "" = Hermes SSE (default), "lazer" = Pyth Lazer WS
-    /// (JSON subscribe, Bearer token via env `NXR_ORACLE_TOKEN_<NAME>`).
-    /// Lazer `symbols` values are DECIMAL Lazer feed ids, not hex.
-    #[serde(default)]
-    pub kind: String,
-    /// Lazer subscription channel (e.g. "fixed_rate@200ms"). NEVER
-    /// `real_time`: only ~30 stable feeds carry it and `ignoreInvalidFeeds`
-    /// silently drops the rest (verified 2026-07-12 profiling).
+    /// Subscription channel (e.g. "fixed_rate@200ms"). NEVER `real_time`:
+    /// only ~30 stable feeds carry it; `ignoreInvalidFeeds` silently drops
+    /// the rest (verified 2026-07-12 profiling).
     #[serde(default)]
     pub channel: String,
-    /// Lazer stream endpoints, ALL consumed concurrently with first-arrival
-    /// dedup on `feedUpdateTimestamp` (any endpoint may die; no gap).
-    /// Overrides `url` when non-empty.
+    /// Stream endpoints, ALL consumed concurrently with first-arrival dedup
+    /// on `feedUpdateTimestamp` (any endpoint may die; no gap).
     #[serde(default)]
     pub urls: Vec<String>,
 }

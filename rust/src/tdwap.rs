@@ -98,6 +98,14 @@ pub fn decode_ci_ubp(encoded: u16) -> f64 {
 /// by backtest/replay consumers (which advance a simulated clock anchored at
 /// the first observation). Wall-clock-convenience wrappers (`new`, `update`,
 /// `inject`, `effective_weight`) call `Instant::now()` internally.
+/// Coarse monotonic "now" for callers outside this module that need to age
+/// [`ProviderEntry::last_update`] (e.g. the sink's reject-median corpse
+/// filter) without depending on `coarsetime` directly.
+#[inline]
+pub fn coarse_now() -> Instant {
+    Instant::now()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderEntry {
     /// Latest per-provider aggregate (MITCH canonical type).

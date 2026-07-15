@@ -120,3 +120,24 @@ pub use client::NxrClient;
 // ---- Plan-tier typed errors ----
 
 pub use errors::{PlanErrorCode, PlanLimitError, PlanLimitErrorBody, PLAN_ERROR_DISCRIMINANT};
+
+/// Resolve when either SIGINT (ctrl-c) or SIGTERM arrives. k8s sends
+/// SIGTERM on pod stop; as PID 1 the default handler is a hard kill with
+/// no graceful drain (fail-safety audit 2026-07-15) — every deploy lost
+/// the final writer fsync + manifest finalize without this.
+pub async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = term.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ctrl_c.await;
+    }
+}

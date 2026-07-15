@@ -12,7 +12,8 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
+//! // requires the `client` feature (NxrClient)
 //! use nxr_sdk::errors::{PlanLimitError, PlanErrorCode};
 //!
 //! # async fn run() -> anyhow::Result<()> {

@@ -180,6 +180,21 @@ pub struct OracleProviderYml {
     /// a watched feed goes live. Keys must resolve strictly at boot.
     #[serde(default)]
     pub watch: BTreeMap<String, String>,
+    /// Transport: "" = Hermes SSE (default), "lazer" = Pyth Lazer WS
+    /// (JSON subscribe, Bearer token via env `NXR_ORACLE_TOKEN_<NAME>`).
+    /// Lazer `symbols` values are DECIMAL Lazer feed ids, not hex.
+    #[serde(default)]
+    pub kind: String,
+    /// Lazer subscription channel (e.g. "fixed_rate@200ms"). NEVER
+    /// `real_time`: only ~30 stable feeds carry it and `ignoreInvalidFeeds`
+    /// silently drops the rest (verified 2026-07-12 profiling).
+    #[serde(default)]
+    pub channel: String,
+    /// Lazer stream endpoints, ALL consumed concurrently with first-arrival
+    /// dedup on `feedUpdateTimestamp` (any endpoint may die; no gap).
+    /// Overrides `url` when non-empty.
+    #[serde(default)]
+    pub urls: Vec<String>,
 }
 
 /// `runtime:` block — forwarder + server tuning knobs. All `Option<…>`

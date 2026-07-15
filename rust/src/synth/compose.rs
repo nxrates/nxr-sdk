@@ -34,7 +34,11 @@ use crate::tdwap::{decode_ci_ubp, encode_ci_ubp};
 ///   marks the bar derived.
 /// - `avg_ci_ubp`     = `encode(√Σ decode(ci_i)²)` — relative-CI quadrature.
 /// - `avg_spread_bps` = `Σ spread_i` — additive, non-compounding.
-/// - `vbid/vask/tick_count` = min over legs (the bottleneck leg bounds it).
+/// - `vbid/vask`       = min over legs (the bottleneck leg bounds depth).
+/// - `tick_count`      = MAX over legs: the bucket is live iff ANY leg ticked.
+///   (min zeroed every cross bar sharing a bucket with a quiet peg leg —
+///   consumers treat `tick_count == 0` as "no data" and rendered gaps,
+///   2026-07-15 BTC/USD incident.)
 /// - `reject_rate`    = max over legs (worst leg).
 /// - `realized_var/bipower_var/drift/vol_imbalance/max_abs_return` = 0 (path-
 ///   dependent HF accumulators, not composable from summary bars).
@@ -50,7 +54,7 @@ pub fn compose_cross_s10(legs: &[Leg], bars: &[Bar]) -> Option<Bar> {
     let (mut open, mut close, mut high, mut low) = (1.0_f64, 1.0_f64, 1.0_f64, 1.0_f64);
     let mut ci_sq = 0.0_f64;
     let mut spread = 0.0_f32;
-    let (mut vbid, mut vask, mut tick_count) = (u32::MAX, u32::MAX, u32::MAX);
+    let (mut vbid, mut vask, mut tick_count) = (u32::MAX, u32::MAX, 0u32);
     let mut reject_rate = 0u16;
 
     for (leg, b) in legs.iter().zip(bars) {
@@ -84,7 +88,7 @@ pub fn compose_cross_s10(legs: &[Leg], bars: &[Bar]) -> Option<Bar> {
         spread += b.avg_spread_bps;
         vbid = vbid.min(b.vbid);
         vask = vask.min(b.vask);
-        tick_count = tick_count.min(b.tick_count);
+        tick_count = tick_count.max(b.tick_count);
         reject_rate = reject_rate.max(b.reject_rate);
     }
 
@@ -190,7 +194,7 @@ mod tests {
         let x = compose_cross_s10(&[Leg::new("A/USDT", 1), Leg::new("B/USDT", 1)], &[a, b]).unwrap();
         let (vbid, tc, rr) = (x.vbid, x.tick_count, x.reject_rate);
         assert_eq!(vbid, 50); // min
-        assert_eq!(tc, 10); // min
+        assert_eq!(tc, 40); // max — any leg activity keeps the bucket live
         assert_eq!(rr, 300); // max
     }
 

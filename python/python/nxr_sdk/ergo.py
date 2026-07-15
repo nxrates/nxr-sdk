@@ -214,12 +214,13 @@ class NxrClient:
     >>> bars = nxr.get().history().base("BTC").renko().limit(100).fetch()
     """
 
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout_s: float = 30.0):
+    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout_s: float = 30.0, api_key: str | None = None):
         # Lazy import so circular module init stays clean.
         from nxr_sdk._native import Client as _Inner  # type: ignore
 
         self._base_url = base_url.rstrip("/")
-        self._inner = _Inner(base_url, timeout_s)
+        self._api_key = api_key
+        self._inner = _Inner(base_url, timeout_s, api_key)
         # Lazy caches.
         self._detail_cache: Optional[TickersDetailResponse] = None
         self._symbol_to_id: dict[str, int] = {}
@@ -244,9 +245,6 @@ class NxrClient:
 
     def fetch_providers(self):
         return self._inner.fetch_providers()
-
-    def fetch_symbols(self):
-        return self._inner.fetch_symbols()
 
     # ── Integrator inventory ────────────────────────────────────────────
 

@@ -5,7 +5,7 @@
 //! BTR canonical quote = `USDC` (collector source-of-truth, see
 //! `~/Work/btr/sdk/src/types/paths.ts`). **NXR canonical quote = USDT** for crypto
 //! (exchange-native) and `USD` for FX. Symbols use a slash separator: `BTC/USDT`,
-//! `ETH/USDT`, `EUR/USD`, `EURC/USDT`, etc., to match the `/v1/symbols` REST
+//! `ETH/USDT`, `EUR/USD`, `EURC/USDT`, etc., to match the `/v1/synth/paths` REST
 //! contract and `core/src/triangulator.rs` rule tables.
 //!
 //! ## Path semantics

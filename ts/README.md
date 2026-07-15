@@ -6,7 +6,7 @@ Official TypeScript SDK for **NX Rates** (NXR). MITCH binary decoders, REST + We
 
 - Zero-dep MITCH binary decoders for the canonical wire types: **56 B `IndexRecord`** (header + body), **96 B `Bar`**, **32 B `Tick`**, plus `Index`/`MitchHeader` primitives.
 - **`NxrClient`** REST client covering 100% of the live `/v1` surface:
-  - Metadata: `/health`, `/metrics`, `/v1/symbols`, `/v1/providers`, `/v1/tickers`, `/v1/tickers/detail`, `/v1/synth/paths`.
+  - Metadata: `/health`, `/metrics`, `/v1/providers`, `/v1/tickers`, `/v1/tickers/detail`, `/v1/synth/paths`.
   - Live snapshots: `/v1/price/{ticker_id}`, `/v1/last`.
   - History: `/v1/idx/{sym}`, `/v1/bars/{sym}/{kind}`, `/v1/ohlc/{sym}`, `/v1/synth/ohlc/{sym}`, `/v1/synth/tick/{sym}`.
   - Diagnostics: `/v1/integrity/{sym}`.
@@ -60,7 +60,6 @@ sub.close();
 | ------------------------------------------- | --------------------------------- | ---------------- |
 | `client.health()` / `client.isHealthy()`    | `GET /health`                     | JSON / boolean   |
 | `client.metrics()`                          | `GET /metrics`                    | Prometheus text  |
-| `client.symbols()`                          | `GET /v1/symbols`                 | JSON             |
 | `client.providers()`                        | `GET /v1/providers`               | JSON             |
 | `client.tickers()`                          | `GET /v1/tickers`                 | JSON             |
 | `client.tickersDetail({ refresh? })`        | `GET /v1/tickers/detail`          | JSON, cached     |

@@ -43,7 +43,6 @@ export type {
   TickersDetailResponse,
   KindSchema,
   ShardWindow,
-  SymbolsResponse,
   BarKind,
   DataKind,
 } from './types.js';

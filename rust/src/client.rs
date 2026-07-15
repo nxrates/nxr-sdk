@@ -91,12 +91,6 @@ pub struct SynthPath {
     pub legs: Vec<SynthLeg>,
 }
 
-/// `/v1/symbols` response wrapper.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SymbolsResponse {
-    pub direct: HashMap<String, u64>,
-    pub synth: Vec<SynthPath>,
-}
 
 /// Disk shard window from `/v1/tickers/detail`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -237,6 +231,7 @@ pub enum HistoryData {
 pub struct NxrClient {
     base_url: String,
     http: reqwest::Client,
+    api_key: Option<String>,
     detail_cache: std::sync::Arc<Mutex<Option<TickersDetailResponse>>>,
     symbol_to_id: std::sync::Arc<Mutex<HashMap<String, u64>>>,
 }
@@ -258,6 +253,7 @@ impl NxrClient {
         Self {
             base_url: url,
             http,
+            api_key: None,
             detail_cache: Default::default(),
             symbol_to_id: Default::default(),
         }
@@ -266,6 +262,13 @@ impl NxrClient {
     /// Default-endpoint constructor — `NxrClient::default()` ≡ `NxrClient::new(DEFAULT_BASE_URL)`.
     pub fn default() -> Self {
         Self::new(DEFAULT_BASE_URL)
+    }
+
+    /// Attach an API key (`X-NXR-Key`) for paid plan access.
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        let k = key.into();
+        self.api_key = if k.is_empty() { None } else { Some(k) };
+        self
     }
 
     /// Set a custom HTTP timeout (default 30 s).
@@ -288,11 +291,6 @@ impl NxrClient {
     /// `GET /health` — full JSON liveness body.
     pub async fn health(&self) -> Result<serde_json::Value> {
         self.json_get("/health").await
-    }
-
-    /// `GET /v1/symbols` — symbol → ticker_id map + synth paths.
-    pub async fn symbols(&self) -> Result<SymbolsResponse> {
-        self.json_get("/v1/symbols").await
     }
 
     /// `GET /v1/providers` — provider_id → name map.
@@ -490,10 +488,14 @@ impl NxrClient {
 
     async fn json_get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let r = self
+        let mut req = self
             .http
             .get(&url)
-            .header(ACCEPT, HeaderValue::from_static("application/json"))
+            .header(ACCEPT, HeaderValue::from_static("application/json"));
+        if let Some(k) = &self.api_key {
+            req = req.header("X-NXR-Key", k);
+        }
+        let r = req
             .send()
             .await
             .with_context(|| format!("GET {}", url))?;
@@ -514,10 +516,14 @@ impl NxrClient {
 
     async fn bytes_get(&self, path: &str) -> Result<bytes::Bytes> {
         let url = format!("{}{}", self.base_url, path);
-        let r = self
+        let mut req = self
             .http
             .get(&url)
-            .header(ACCEPT, HeaderValue::from_static("application/octet-stream"))
+            .header(ACCEPT, HeaderValue::from_static("application/octet-stream"));
+        if let Some(k) = &self.api_key {
+            req = req.header("X-NXR-Key", k);
+        }
+        let r = req
             .send()
             .await
             .with_context(|| format!("GET {}", url))?;

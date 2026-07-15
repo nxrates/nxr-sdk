@@ -6,7 +6,7 @@
 //!   GET /v1/idx/{sym}?limit=1000       -> octet-stream of 56B IndexRecords
 //!   GET /v1/ohlc/{sym}?tf=60&from=&to= -> JSON [{ts,open,..}, ...]
 //!   GET /v1/bars/{sym}/{kind}          -> octet-stream of 96B Bars
-//!   GET /v1/tickers, /v1/providers, /v1/symbols (JSON catalog)
+//!   GET /v1/tickers, /v1/providers, /v1/tickers/detail (JSON catalog)
 //!
 //! The client deliberately runs `reqwest::blocking` so it can be used from
 //! plain Python scripts without an asyncio event loop. `py.allow_threads`
@@ -25,6 +25,7 @@ use reqwest::blocking::Client as RClient;
 pub struct Client {
     inner: RClient,
     base: String,
+    api_key: Option<String>,
 }
 
 #[pymethods]
@@ -33,14 +34,18 @@ impl Client {
     /// `http://nxr-svc:80` or `http://nxr.nxrates.com`. `timeout` defaults
     /// to 30 seconds.
     #[new]
-    #[pyo3(signature = (base_url, timeout_s=30.0))]
-    fn new(base_url: &str, timeout_s: f64) -> PyResult<Self> {
+    #[pyo3(signature = (base_url, timeout_s=30.0, api_key=None))]
+    fn new(base_url: &str, timeout_s: f64, api_key: Option<String>) -> PyResult<Self> {
         let inner = RClient::builder()
             .timeout(Duration::from_secs_f64(timeout_s.max(0.001)))
             .user_agent(concat!("nxr-sdk-python/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| PyRuntimeError::new_err(format!("reqwest build: {e}")))?;
-        Ok(Self { inner, base: base_url.trim_end_matches('/').to_string() })
+        Ok(Self {
+            inner,
+            base: base_url.trim_end_matches('/').to_string(),
+            api_key,
+        })
     }
 
     /// Fetch raw IndexRecord stream from `/v1/idx/{sym}`.
@@ -69,12 +74,14 @@ impl Client {
             ],
         );
         let bytes = py.allow_threads(|| -> Result<Vec<u8>, String> {
-            let resp = self
+            let mut req = self
                 .inner
                 .get(&url)
-                .header(reqwest::header::ACCEPT, "application/octet-stream")
-                .send()
-                .map_err(|e| e.to_string())?;
+                .header(reqwest::header::ACCEPT, "application/octet-stream");
+            if let Some(k) = &self.api_key {
+                req = req.header("X-NXR-Key", k);
+            }
+            let resp = req.send().map_err(|e| e.to_string())?;
             if !resp.status().is_success() {
                 return Err(format!("{} -> {}", url, resp.status()));
             }
@@ -186,12 +193,14 @@ impl Client {
             ],
         );
         let bytes = py.allow_threads(|| -> Result<Vec<u8>, String> {
-            let resp = self
+            let mut req = self
                 .inner
                 .get(&url)
-                .header(reqwest::header::ACCEPT, "application/octet-stream")
-                .send()
-                .map_err(|e| e.to_string())?;
+                .header(reqwest::header::ACCEPT, "application/octet-stream");
+            if let Some(k) = &self.api_key {
+                req = req.header("X-NXR-Key", k);
+            }
+            let resp = req.send().map_err(|e| e.to_string())?;
             if !resp.status().is_success() {
                 return Err(format!("{} -> {}", url, resp.status()));
             }
@@ -213,11 +222,6 @@ impl Client {
         self.get_json(py, "/v1/providers")
     }
 
-    /// GET /v1/symbols — JSON {symbol: ticker_id} passthrough.
-    fn fetch_symbols(&self, py: Python<'_>) -> PyResult<PyObject> {
-        self.get_json(py, "/v1/symbols")
-    }
-
     fn __repr__(&self) -> String {
         format!("Client(base_url={:?})", self.base)
     }
@@ -227,7 +231,11 @@ impl Client {
     fn get_json(&self, py: Python<'_>, path: &str) -> PyResult<PyObject> {
         let url = format!("{}{}", self.base, path);
         let body = py.allow_threads(|| -> Result<String, String> {
-            let resp = self.inner.get(&url).send().map_err(|e| e.to_string())?;
+            let mut req = self.inner.get(&url);
+            if let Some(k) = &self.api_key {
+                req = req.header("X-NXR-Key", k);
+            }
+            let resp = req.send().map_err(|e| e.to_string())?;
             if !resp.status().is_success() {
                 return Err(format!("{} -> {}", url, resp.status()));
             }

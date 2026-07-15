@@ -48,7 +48,6 @@ import type {
   ShardWindow,
   SnapshotResponse,
   Sym,
-  SymbolsResponse,
   SynthPath,
   SynthTick,
   TickerDetail,
@@ -122,6 +121,11 @@ export interface NxrClientOpts {
   fetch?: typeof fetch;
   /** Optional WebSocket ctor override (test injection / Node ws-package). */
   WebSocket?: typeof WebSocket;
+  /**
+   * API key sent as `X-NXR-Key`. Paid plans unlock MITCH/f64 encodings and WS.
+   * See https://nxrates.com/pricing
+   */
+  apiKey?: string;
 }
 
 /** Handle returned by {@link NxrClient.subscribe}. Idempotent close. */
@@ -156,6 +160,7 @@ export class NxrClient {
   private readonly baseUrl: string;
   private readonly _fetch: typeof fetch;
   private readonly _WS: typeof WebSocket;
+  private readonly apiKey: string | undefined;
   private wsUrl: string | null = null;
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -178,6 +183,13 @@ export class NxrClient {
     if (opts.reconnectMs) this.reconnectMs = opts.reconnectMs;
     this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
     this._WS = opts.WebSocket ?? (globalThis as { WebSocket: typeof WebSocket }).WebSocket;
+    this.apiKey = opts.apiKey;
+  }
+
+  private authHeaders(extra?: Record<string, string>): Record<string, string> {
+    const h: Record<string, string> = { ...(extra ?? {}) };
+    if (this.apiKey) h['X-NXR-Key'] = this.apiKey;
+    return h;
   }
 
   // ── REST: discovery ─────────────────────────────────────────────────────
@@ -204,21 +216,12 @@ export class NxrClient {
     return await r.text();
   }
 
-  /** Fetch symbol → ticker_id map + synth paths from `/v1/symbols`. */
-  async symbols(): Promise<SymbolsResponse> {
-    type Raw = { direct: Record<string, string | number>; synth: SynthPath[] };
-    const data = await this.json<Raw>('/v1/symbols');
-    const direct = new Map<string, bigint>(
-      Object.entries(data.direct).map(([k, v]) => [k, BigInt(v)]),
-    );
-    return { direct, synth: data.synth };
-  }
-
   /** Resolve unified symbol (e.g. "BTC/USDT") to ticker_id. */
   async resolve(symbol: Sym): Promise<bigint | undefined> {
-    // Use the cached /v1/tickers/detail lookup if available.
-    if (this.symbolToId.size > 0) return this.symbolToId.get(symbol);
-    return (await this.symbols()).direct.get(symbol);
+    // /v1/tickers/detail is the sole id↔symbol source of truth; it populates
+    // symbolToId. (The redundant /v1/symbols endpoint was retired 2026-07-14.)
+    if (this.symbolToId.size === 0) await this.tickersDetail();
+    return this.symbolToId.get(symbol);
   }
 
   /** Fetch provider_id → name from `/v1/providers`. */
@@ -378,7 +381,7 @@ export class NxrClient {
 
   private async json<T>(path: string): Promise<T> {
     const r = await this._fetch(`${this.baseUrl}${path}`, {
-      headers: { Accept: 'application/json' },
+      headers: this.authHeaders({ Accept: 'application/json' }),
     });
     if (!r.ok) {
       const body = await safeText(r);
@@ -389,7 +392,7 @@ export class NxrClient {
 
   private async bytes(path: string): Promise<Uint8Array> {
     const r = await this._fetch(`${this.baseUrl}${path}`, {
-      headers: { Accept: 'application/octet-stream' },
+      headers: this.authHeaders({ Accept: 'application/octet-stream' }),
     });
     if (!r.ok) {
       const body = await safeText(r);
@@ -432,7 +435,9 @@ export class NxrClient {
   ): SubscriberHandle {
     const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/v1/stream`;
     if (!this._WS) throw new Error('No global WebSocket; pass opts.WebSocket (e.g. `ws` on Node)');
-    const ws = new this._WS(wsUrl);
+    const ws = this.apiKey
+      ? new this._WS(wsUrl, { headers: { 'X-NXR-Key': this.apiKey } } as unknown as string)
+      : new this._WS(wsUrl);
     (ws as { binaryType?: BinaryType }).binaryType = 'arraybuffer';
     const tickerSet = tickers && tickers.length > 0 ? new Set(tickers) : null;
     let resolvedIds: Set<number> | null = null;

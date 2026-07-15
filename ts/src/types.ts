@@ -164,7 +164,7 @@ export interface SynthLeg {
   exp: number;
 }
 
-/** Synth-path entry returned by `/v1/synth/paths` and inside `SymbolsResponse.synth`. */
+/** Synth-path entry returned by `/v1/synth/paths`. */
 export interface SynthPath {
   sym: string;
   legs: SynthLeg[];
@@ -221,8 +221,3 @@ export interface TickersDetailResponse {
   tickers: TickerDetail[];
 }
 
-/** `/v1/symbols` response: direct ticker -> id map + synth paths. */
-export interface SymbolsResponse {
-  direct: Map<string, bigint>;
-  synth: SynthPath[];
-}

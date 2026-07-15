@@ -133,7 +133,6 @@ async fn main() -> anyhow::Result<()> {
 | ------------------------------------- | -------------------- | ---------------- | ------------------------------------ |
 | `GET /health`                         | `health()`           | JSON             | Liveness + forwarder ages            |
 | `GET /metrics`                        | `metrics()`          | Prometheus text  | (TS only — `metrics()` raw body)     |
-| `GET /v1/symbols`                     | `symbols()`          | JSON             | direct map + synth paths             |
 | `GET /v1/providers`                   | `providers()`        | JSON             | provider_id → name                   |
 | `GET /v1/tickers`                     | `tickers()`          | JSON             | live snapshot for every ticker       |
 | `GET /v1/tickers/detail`              | `tickersDetail()`    | JSON, **cached** | universal integrator inventory       |

@@ -254,24 +254,6 @@ describe('NxrClient REST', () => {
     }
   });
 
-  it('symbols() returns Map<string,bigint> + synth paths', async () => {
-    const fetchMock = makeFetch(
-      async () =>
-        new Response(
-          JSON.stringify({
-            direct: { 'BTC/USDT': '0xabc', 'ETH/USDT': 42 },
-            synth: [{ sym: 'ETH-BTC', legs: [{ sym: 'ETH/USDT', exp: 1 }] }],
-          }),
-          { status: 200 },
-        ),
-    );
-    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
-    const r = await client.symbols();
-    expect(r.direct.get('BTC/USDT')).toBe(0xabcn);
-    expect(r.direct.get('ETH/USDT')).toBe(42n);
-    expect(r.synth).toHaveLength(1);
-  });
-
   it('synthPaths() returns the registry', async () => {
     const sample = [{ sym: 'ETH-BTC', legs: [{ sym: 'ETH/USDT', exp: 1 }] }];
     const fetchMock = makeFetch(async () => new Response(JSON.stringify(sample), { status: 200 }));

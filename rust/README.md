@@ -68,7 +68,6 @@ cargo run --release --example quickstart
 | Method                                | Endpoint                       | Wire             |
 | ------------------------------------- | ------------------------------ | ---------------- |
 | `c.health()`                          | `GET /health`                  | JSON value       |
-| `c.symbols()`                         | `GET /v1/symbols`              | JSON             |
 | `c.providers()`                       | `GET /v1/providers`            | JSON             |
 | `c.tickers()`                         | `GET /v1/tickers`              | JSON             |
 | `c.tickers_detail()`                  | `GET /v1/tickers/detail`       | JSON, cached     |

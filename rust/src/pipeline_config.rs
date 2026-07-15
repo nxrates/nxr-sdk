@@ -97,6 +97,54 @@ pub struct PipelineYml {
     /// name (must exist in `mitch/ids/market-providers.csv`, e.g. `pyth`).
     #[serde(default)]
     pub oracles: OraclesYml,
+    /// BTR DEX signed-quote endpoint (`/v1/quote/signed`). Absent = disabled.
+    /// Domain binds to the DEPLOYED ExternalOracle (chain_id + address) —
+    /// per-deployment config, never hardcoded. Signing key: env
+    /// `NXR_SIGNER_KEY` (required when this block is present; never logged).
+    #[serde(default)]
+    pub signed_quotes: Option<SignedQuotesYml>,
+}
+
+/// `signed_quotes:` block — NXR-signed EIP-712 quote blobs for the BTR DEX
+/// `ExternalOracle.batchPushSigned` relay path. Wire format is the FROZEN
+/// spec `btr/dex/ORACLE_SIGNED_PUSH_SPEC.md` (24 B/feed packed records).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignedQuotesYml {
+    /// Deployed ExternalOracle address (0x-hex, 20 bytes) — EIP-712
+    /// `verifyingContract`.
+    pub oracle: String,
+    /// EIP-712 domain chainId of the deployment.
+    pub chain_id: u64,
+    /// Blob rebuild floor (ms). Requests inside the window get the cached
+    /// blob. Default 250.
+    #[serde(default)]
+    pub min_interval_ms: Option<u64>,
+    /// Trailing 30 m bars for the Parkinson σ (mirrors keeper
+    /// `nxr.vol_lookback_bars`). Default 48.
+    #[serde(default)]
+    pub sigma_lookback_bars: Option<u32>,
+    /// Reject marks whose last aggregator emit is older than this (s).
+    /// Default 120.
+    #[serde(default)]
+    pub mark_max_age_s: Option<u64>,
+    /// DEX feed subset. `idx` MUST equal the feed's position in the on-chain
+    /// append-only `feedIds[]` (idx never remaps); keeper cross-checks
+    /// `feedIds(idx) == feed_id` at startup.
+    pub feeds: Vec<SignedFeedYml>,
+}
+
+/// One signed-quote feed: on-chain `feedIds[]` index → NXR symbol.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignedFeedYml {
+    /// Position in the on-chain `feedIds[]` array.
+    pub idx: u16,
+    /// NXR symbol whose mark/σ/CI back the feed (e.g. `BTC-USDC`).
+    pub symbol: String,
+    /// Optional bridge symbol: pushed mark = `mark(symbol) × mark(quote_via)`
+    /// (e.g. `CAKE-USDT × USDT-USDC`), CI/σ composed in quadrature — mirrors
+    /// keeper `quote_via` (ORC-04).
+    #[serde(default)]
+    pub quote_via: Option<String>,
 }
 
 /// `oracles:` block — push-based oracle relay providers consumed by the

@@ -149,6 +149,46 @@ pub fn synth_deps(leg: &str) -> &'static [&'static SynthPath] {
     SYNTH_DEPS.get(leg).map(Vec::as_slice).unwrap_or(&[])
 }
 
+/// Generic pivot derivation for compose-on-read: `A/B = (A/P) × (B/P)⁻¹`,
+/// trying pivots USDT then USD. Each leg is accepted direct (`X/P`) or
+/// inverted (`P/X`, exponent flipped); a leg equal to the pivot is the
+/// identity and is dropped. `resolve` maps a candidate leg symbol to its
+/// ticker id iff that symbol is a REGISTERED live feed (typically a
+/// `symbol_map` lookup) — mere resolvability is not enough, the leg must
+/// actually have data behind it.
+///
+/// Used by `/v1/ohlc` to serve any cross with no persisted series and no
+/// static [`SYNTH_PATHS`] entry. Returns `(leg_symbol, exponent, ticker_id)`.
+pub fn derive_legs(
+    base: &str,
+    quote: &str,
+    resolve: &dyn Fn(&str) -> Option<u64>,
+) -> Option<Vec<(String, i8, u64)>> {
+    if base.is_empty() || quote.is_empty() || base == quote {
+        return None;
+    }
+    for pivot in ["USDT", "USD"] {
+        let leg = |asset: &str, exp: i8| -> Option<Option<(String, i8, u64)>> {
+            if asset == pivot {
+                return Some(None); // identity leg
+            }
+            let direct = format!("{asset}/{pivot}");
+            if let Some(id) = resolve(&direct) {
+                return Some(Some((direct, exp, id)));
+            }
+            let inv = format!("{pivot}/{asset}");
+            resolve(&inv).map(|id| Some((inv, -exp, id)))
+        };
+        if let (Some(a), Some(b)) = (leg(base, 1), leg(quote, -1)) {
+            let legs: Vec<_> = [a, b].into_iter().flatten().collect();
+            if !legs.is_empty() {
+                return Some(legs);
+            }
+        }
+    }
+    None
+}
+
 /// Normalize any text symbol form to slash. Dash → slash. No-op on slash.
 /// Numeric / hex prefixed forms are returned as-is (caller resolves separately).
 #[inline]

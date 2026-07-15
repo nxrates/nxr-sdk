@@ -24,10 +24,14 @@ use crate::tdwap::{decode_ci_ubp, encode_ci_ubp};
 ///
 /// Field math (`p = Π x^exp` over legs):
 /// - `open/close`     = product of leg opens / closes — exact synthetic endpoints.
-/// - `high/low`       = conservative outward corner: a `+1` leg contributes its
-///   high to the cross high and its low to the cross low; a `-1` leg inverts
-///   (its low → cross high, its high → cross low). This is an upper bound on the
-///   true range (never under-ranges); `FLAG_COMPOSED` marks it derived.
+/// - `high/low`       = ALIGNED corners: envelope of {open, close, Π highᵢ^expᵢ,
+///   Π lowᵢ^expᵢ} — assumes leg extremes co-occur (correlated legs sharing a
+///   pivot quote, the overwhelmingly common case). The outward corner
+///   (+1 leg high ÷ −1 leg low) was REJECTED 2026-07-15: it multiplies leg
+///   ranges and paints large symmetric synthetic wicks on every cross,
+///   especially after rollup to high TFs. Aligned corners can under-range
+///   anti-correlated moves inside one 10 s bucket — accepted; `FLAG_COMPOSED`
+///   marks the bar derived.
 /// - `avg_ci_ubp`     = `encode(√Σ decode(ci_i)²)` — relative-CI quadrature.
 /// - `avg_spread_bps` = `Σ spread_i` — additive, non-compounding.
 /// - `vbid/vask/tick_count` = min over legs (the bottleneck leg bounds it).
@@ -67,11 +71,13 @@ pub fn compose_cross_s10(legs: &[Leg], bars: &[Bar]) -> Option<Bar> {
             high *= h;
             low *= l;
         } else {
-            // Inversion: 1/low is the largest → cross high; 1/high the smallest → cross low.
+            // Aligned inversion: this leg's high divides the cross "high
+            // candidate" (extremes assumed co-occurring), NOT the outward
+            // 1/low corner — see module doc.
             open /= o;
             close /= c;
-            high /= l;
-            low /= h;
+            high /= h;
+            low /= l;
         }
         let ci = decode_ci_ubp(b.avg_ci_ubp);
         ci_sq += ci * ci;
@@ -82,15 +88,18 @@ pub fn compose_cross_s10(legs: &[Leg], bars: &[Bar]) -> Option<Bar> {
         reject_rate = reject_rate.max(b.reject_rate);
     }
 
-    // Same poison guard as per-leg, applied to the composed corners: the outward
-    // high is a product of capped legs and can itself exceed MAX_PRICE.
+    // Envelope: with aligned corners the h/l candidate products are not
+    // ordered (an inverted leg with the larger range flips them) — the bar's
+    // high/low is the envelope over endpoints + both candidates.
+    let (hi_cand, lo_cand) = (high, low);
+    high = open.max(close).max(hi_cand).max(lo_cand);
+    low = open.min(close).min(hi_cand).min(lo_cand);
+    // Same poison guard as per-leg, applied to the composed fields: a product
+    // of capped legs can itself exceed MAX_PRICE.
     for v in [open, high, low, close] {
         if !(v.is_finite() && v > 0.0 && v <= mitch::MAX_PRICE) {
             return None;
         }
-    }
-    if high < low {
-        return None;
     }
 
     let mut bar = Bar::new_ohlcv(
@@ -138,9 +147,18 @@ mod tests {
             (x.open, x.high, x.low, x.close, x.flags, x.realized_var, x.vol_imbalance);
         assert!((open - 1800.0 / 60000.0).abs() < 1e-12);
         assert!((close - 1810.0 / 60200.0).abs() < 1e-12);
-        // Outward corner: high = ETH.high / BTC.low, low = ETH.low / BTC.high.
-        assert!((high - 1820.0 / 59800.0).abs() < 1e-12);
-        assert!((low - 1790.0 / 60500.0).abs() < 1e-12);
+        // Aligned corners: candidates are ETH.high/BTC.high and ETH.low/BTC.low;
+        // high/low = envelope over {open, close, candidates}.
+        let cands = [
+            1800.0 / 60000.0,
+            1810.0 / 60200.0,
+            1820.0 / 60500.0,
+            1790.0 / 59800.0,
+        ];
+        let want_hi = cands.iter().cloned().fold(f64::MIN, f64::max);
+        let want_lo = cands.iter().cloned().fold(f64::MAX, f64::min);
+        assert!((high - want_hi).abs() < 1e-12);
+        assert!((low - want_lo).abs() < 1e-12);
         assert!(high >= low);
         assert_eq!(flags, FLAG_COMPOSED);
         assert_eq!(rv, 0.0);

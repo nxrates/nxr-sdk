@@ -67,11 +67,11 @@ pub const FLAG_HISTORICAL_BACKFILL: u8 = 0b0000_0010;
 pub const FLAG_RENKO_SYNTHETIC_BRICK: u8 = 0b0000_0100;
 
 /// `Index.flags` bit 3: this INDEX record's `confidence` byte (Index body
-/// offset 36) carries a continuous freshness value in Q0.8 fixed-point
-/// (`f = byte / 255 ∈ [0,1]`, ~1 when all providers fresh) rather than the
+/// offset 36) carries a continuous freshness value as a percent 0-100
+/// (`f = byte / 100 ∈ [0,1]`, ~1 when all providers fresh) rather than the
 /// legacy integer active-provider count. Set by the TDWAP writer
 /// (`nxr_sdk::tdwap::compute_vwap_at`); readers MUST check this bit before
-/// interpreting `confidence` — clear = legacy count, set = Q0.8 freshness.
+/// interpreting `confidence` — clear = legacy count, set = freshness percent.
 ///
 /// ⚠ This is the INDEX-record flag space (bits 0/1 = heartbeat/backfill).
 /// Bit 2 is taken by `FLAG_RENKO_SYNTHETIC_BRICK` in the *Bar* flag space,

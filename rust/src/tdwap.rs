@@ -267,7 +267,7 @@ where
 
     let mut w_stale_sq_sum = 0.0f64;
 
-    // Freshness (Q0.8) accumulators. `bw_sum` = Σ base_weight over every
+    // Freshness (percent 0-100) accumulators. `bw_sum` = Σ base_weight over every
     // VALID-tick provider; `wd_sum` = Σ base_weight·decay. The ratio
     // `wd_sum/bw_sum ∈ [0,1]` is a continuous freshness: ~1 when all providers
     // are fresh (decay≈1), falling as components decay. Floored-but-valid
@@ -307,8 +307,8 @@ where
 
         // Active provider: any with non-floored decay >= 10 percent, regardless
         // of whether its weight contributes to TDWAP this cycle. Diagnostic
-        // only: `Index::confidence` is the Q0.8 freshness byte (f x 255, flag
-        // bit 3), NOT this count — the old count semantics and the
+        // only: `Index::confidence` is the freshness percent 0-100 (f x 100,
+        // flag bit 3), NOT this count — the old count semantics and the
         // `confidence <= accepted` validate constraint were retired.
         if decay >= 0.1 {
             active_count = active_count.saturating_add(1);
@@ -359,13 +359,14 @@ where
     let half_spread_agg = (tdwap_ask - tdwap_bid).abs() * 0.5;
     let conf_interval = raw_ci.max(half_spread_agg);
 
-    // `confidence` is now a CONTINUOUS freshness float in [0,1], stored Q0.8 in
-    // the u8 (byte = round(f·255)). f≈1 ⇒ all providers fresh; falls as
-    // components decay. Independent of `accepted`/`rejected` (which stay raw
-    // COUNTS). The emitted Index sets FLAG_CONF_FRESHNESS so readers know byte36
-    // is Q0.8 freshness, not the legacy active-provider count.
+    // `confidence` is now a CONTINUOUS freshness float in [0,1], stored as a
+    // freshness percent 0-100 in the u8 (byte = round(f·100)). f≈1 ⇒ all
+    // providers fresh; falls as components decay. Independent of
+    // `accepted`/`rejected` (which stay raw COUNTS). The emitted Index sets
+    // FLAG_CONF_FRESHNESS so readers know byte36 is freshness percent, not the
+    // legacy active-provider count.
     let conf_f64 = if bw_sum > 0.0 { (wd_sum / bw_sum).clamp(0.0, 1.0) } else { 0.0 };
-    let confidence = (conf_f64 * 255.0).round() as u8;
+    let confidence = mitch::conf_to_u8(conf_f64);
     let _ = active_count; // retained for potential diagnostics; no longer drives confidence
 
     // Composite bid/ask resolution (operator ruling 2026-07-05 — NO order books,
@@ -409,8 +410,8 @@ where
         confidence,
         accepted,
         rejected,
-        // Signal that `confidence` is Q0.8 freshness (byte/255), not a legacy
-        // active-provider count. Single-source bit in `nxr_sdk::shard`.
+        // Signal that `confidence` is freshness percent 0-100 (byte/100), not a
+        // legacy active-provider count. Single-source bit in `nxr_sdk::shard`.
         // FLAG_NO_BOOK when NO provider carried depth (oracle relays publish
         // price±conf without book sizes): honest absence marker so the
         // integrity/dq phantom-quote gates don't flag oracle tickers. A

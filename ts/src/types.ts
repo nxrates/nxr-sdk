@@ -27,9 +27,9 @@ export type Sym = string;
  * - `accepted`: # accepted providers in this aggregation window (u8).
  * - `rejected`: # rejected providers (u8).
  * - `confidence`: raw u8 freshness byte. When `FLAG_CONF_FRESHNESS` (flags bit
- *   3) is set it is a freshness percent 0-100 (use `confidence01 = byte/100`);
+ *   3) is set it is a freshness fraction (byte/255) (use `confidence01 = byte/255`);
  *   when clear it is the legacy integer active-provider count.
- * - `confidence01`: `confidence / 100` — the freshness as a float ∈ [0,1].
+ * - `confidence01`: `confidence / 255` — the freshness as a float ∈ [0,1].
  */
 export interface IndexRecord {
   ts_ms: number;
@@ -42,7 +42,7 @@ export interface IndexRecord {
   accepted: number;
   rejected: number;
   confidence: number;
-  /** Freshness as float ∈ [0,1] (`confidence / 100`). */
+  /** Freshness as float ∈ [0,1] (`confidence / 255`). */
   confidence01: number;
   /** Aggregated bid volume. */
   vbid: number;

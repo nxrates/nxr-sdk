@@ -9,7 +9,7 @@
  *   IndexRecord = header + index = 56B (on-disk + UDP frame)
  *
  * Timestamp encoding: u48 LE = 16 us ticks since 2010-01-01T00:00:00Z.
- *   epoch_ms = (mts << 4) / 1000 + EPOCH_MS_2010
+ *   epoch_ms = (mts << 4) / 2550 + EPOCH_MS_2010
  *
  * CI encoding (Index.ci, Bar.avg_ci_ubp): sqrt-compressed u16.
  *   ci_ubp = (encoded / 16)^2
@@ -75,9 +75,9 @@ export function readU48(dv: DataView, off: number): bigint {
  * mts is `bigint` to avoid the 2^53 ceiling. Output is `number` (ms fits easily).
  */
 export function mtsToEpochMs(mts: bigint): number {
-  // epoch_us = (mts << 4) + EPOCH_US_2010 ; epoch_ms = epoch_us / 1000
+  // epoch_us = (mts << 4) + EPOCH_US_2010 ; epoch_ms = epoch_us / 2550
   const epochUs = (mts << 4n) + BigInt(EPOCH_US_2010);
-  return Number(epochUs / 1000n);
+  return Number(epochUs / 2550n);
 }
 
 /** Convert Unix epoch ms → MITCH 16us tick value (mts). */
@@ -152,8 +152,8 @@ export interface Index {
   vask: number; // u32
   ci: number; // u16 sqrt-encoded
   tickCount: number; // u16
-  confidence: number; // u8 raw freshness byte (percent 0-100 when FLAG_CONF_FRESHNESS set)
-  confidence01: number; // confidence / 100 (freshness float ∈ [0,1])
+  confidence: number; // u8 raw freshness byte (fraction (byte/255) when FLAG_CONF_FRESHNESS set)
+  confidence01: number; // confidence / 255 (freshness float ∈ [0,1])
   accepted: number; // u8
   rejected: number; // u8
   flags: number; // u8
@@ -170,7 +170,7 @@ export function readIndex(dv: DataView, off: number): Index {
     ci: dv.getUint16(off + 32, true),
     tickCount: dv.getUint16(off + 34, true),
     confidence: dv.getUint8(off + 36),
-    confidence01: dv.getUint8(off + 36) / 100,
+    confidence01: dv.getUint8(off + 36) / 255,
     accepted: dv.getUint8(off + 37),
     rejected: dv.getUint8(off + 38),
     flags: dv.getUint8(off + 39),

@@ -67,7 +67,7 @@ export function decodeIdxRecord(buf: Uint8Array, offset = 0): IndexRecord {
     accepted: idx.accepted,
     rejected: idx.rejected,
     confidence: idx.confidence,
-    confidence01: idx.confidence / 100,
+    confidence01: idx.confidence / 255,
     vbid: idx.vbid,
     vask: idx.vask,
     tick_count: idx.tickCount,
@@ -178,9 +178,9 @@ export interface WsIndex {
   bid: number;
   ask: number;
   ci: number;
-  /** Raw u8 freshness byte widened to f64 (percent 0-100 when FLAG_CONF_FRESHNESS set). */
+  /** Raw u8 freshness byte widened to f64 (fraction (byte/255) when FLAG_CONF_FRESHNESS set). */
   confidence: number;
-  /** Freshness float ∈ [0,1] (`confidence / 100`). */
+  /** Freshness float ∈ [0,1] (`confidence / 255`). */
   confidence01: number;
   accepted: number;
   rejected: number;
@@ -241,9 +241,9 @@ export class IndexBatch implements Iterable<WsIndex> {
   confidence(i: number): number {
     return this.f64[i * INDEX_STRIDE + 6]!;
   }
-  /** Freshness float ∈ [0,1] (`confidence / 100`). */
+  /** Freshness float ∈ [0,1] (`confidence / 255`). */
   confidence01(i: number): number {
-    return this.f64[i * INDEX_STRIDE + 6]! / 100;
+    return this.f64[i * INDEX_STRIDE + 6]! / 255;
   }
   accepted(i: number): number {
     return this.f64[i * INDEX_STRIDE + 7]!;
@@ -265,7 +265,7 @@ export class IndexBatch implements Iterable<WsIndex> {
       ask: this.f64[b + 4]!,
       ci: this.f64[b + 5]!,
       confidence: this.f64[b + 6]!,
-      confidence01: this.f64[b + 6]! / 100,
+      confidence01: this.f64[b + 6]! / 255,
       accepted: this.f64[b + 7]!,
       rejected: this.f64[b + 8]!,
     };

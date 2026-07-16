@@ -184,6 +184,16 @@ impl<T: Pod> AppendLog<T> {
     /// readable by other processes; durability will be retried on the next
     /// periodic tick or at Drop.
     #[inline]
+    /// Switch this log to group-commit mode: appends never fdatasync inline;
+    /// an external sweeper provides the durability barrier (one syncfs per
+    /// sweep instead of one fdatasync per file per interval — at ~2.9k live
+    /// ticker files a 5 s per-file cadence was ~580 blocking fdatasyncs/s on
+    /// the single writer thread, saturating it permanently; 2026-07-16 OOM
+    /// incident).
+    pub fn set_group_commit(&mut self) {
+        self.sync_interval = Duration::MAX;
+    }
+
     pub fn append(&mut self, record: &T) -> Result<()> {
         self.file
             .write_all(bytemuck::bytes_of(record))
@@ -208,6 +218,16 @@ impl<T: Pod> AppendLog<T> {
 
     /// Force an `fdatasync` now. Use before a process-level checkpoint or when
     /// a specific record must be durable before returning to the caller.
+    /// Push the userspace buffer to the OS WITHOUT an fsync. Group-commit
+    /// sweeper companion: the durability barrier is one filesystem-wide
+    /// syncfs after all dirty logs have flushed their buffers.
+    pub fn flush_buffer_only(&mut self) -> Result<()> {
+        if let Sink::Buffered(bw) = &mut self.file {
+            bw.flush().with_context(|| format!("buf flush {}", self.path))?;
+        }
+        Ok(())
+    }
+
     pub fn flush(&mut self) -> Result<()> {
         // Order MUST be buf.flush() THEN sync_data(): push userspace-buffered
         // bytes into the page cache first, then fdatasync the file. Otherwise

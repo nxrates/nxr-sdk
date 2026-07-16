@@ -818,6 +818,8 @@ pub struct IdxShardWriter {
     dir: PathBuf,
     cur_date: Option<NaiveDate>,
     log: Option<AppendLog<IndexRecord>>,
+    /// Group-commit mode: no per-file fdatasync; the writer thread sweeps.
+    group_commit: bool,
     gate: bool,
     /// R1 H9: advisory writer-lock. Kept open for the writer's lifetime;
     /// dropping the field releases the flock automatically. `None` only for
@@ -888,6 +890,7 @@ impl IdxShardWriter {
             dir,
             cur_date: None,
             log: None,
+            group_commit: false,
             gate,
             manifest,
             have_last: false,
@@ -958,7 +961,13 @@ impl IdxShardWriter {
             }
         }
         let path = shard_path(&self.dir, date, "idx");
-        self.log = Some(AppendLog::open(&path)?);
+        self.log = Some({
+            let mut log = AppendLog::open(&path)?;
+            if self.group_commit {
+                log.set_group_commit();
+            }
+            log
+        });
         self.cur_date = Some(date);
         // Refresh the cached same-day fast-path window in lock-step with
         // cur_date. [start, start+MS_PER_DAY) is the exact epoch-ms span that
@@ -995,6 +1004,23 @@ impl IdxShardWriter {
     /// Like [`append`] but takes a caller-supplied `now_ms` for the ts sanity
     /// bounds. Lets a tight loop (e.g. the aggregator cycle) capture the
     /// wall-clock once and amortise it across many `append` calls.
+    /// Enable group-commit (see `AppendLog::set_group_commit`). Call before
+    /// first append; applies to logs opened afterwards.
+    pub fn set_group_commit(&mut self) {
+        self.group_commit = true;
+        if let Some(log) = self.log.as_mut() {
+            log.set_group_commit();
+        }
+    }
+
+    /// Push any buffered bytes to the OS (no fsync). The group-commit
+    /// sweeper calls this before its filesystem-wide barrier.
+    pub fn flush_buffers(&mut self) {
+        if let Some(log) = self.log.as_mut() {
+            let _ = log.flush_buffer_only();
+        }
+    }
+
     pub fn append_with_now(&mut self, rec: &IndexRecord, now_ms: i64) -> Result<bool> {
         let ts = rec.shard_ts_ms();
         // ts sanity: a future ts mis-routes the shard date (creates a "future"
@@ -1195,6 +1221,8 @@ pub struct BarShardWriter {
     ext: &'static str,
     cur_date: Option<NaiveDate>,
     log: Option<AppendLog<crate::mitch::bar::Bar>>,
+    /// Group-commit mode: no per-file fdatasync; the writer thread sweeps.
+    group_commit: bool,
     /// Whether to refresh `manifest.json` on rotation/flush. ON by default.
     manifest: bool,
     /// R1 H9: per-(ticker, ext) writer-lock. The s10 + renko producers and the
@@ -1245,6 +1273,7 @@ impl BarShardWriter {
             ext,
             cur_date: None,
             log: None,
+            group_commit: false,
             manifest,
             _writer_lock: Some(lock_file),
         };
@@ -1311,7 +1340,13 @@ impl BarShardWriter {
             }
         }
         let path = shard_path(&self.dir, date, self.ext);
-        self.log = Some(AppendLog::open(&path)?);
+        self.log = Some({
+            let mut log = AppendLog::open(&path)?;
+            if self.group_commit {
+                log.set_group_commit();
+            }
+            log
+        });
         self.cur_date = Some(date);
         Ok(())
     }

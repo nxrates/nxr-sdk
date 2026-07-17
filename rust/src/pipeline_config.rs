@@ -127,6 +127,23 @@ pub struct SignedQuotesYml {
     /// Default 120.
     #[serde(default)]
     pub mark_max_age_s: Option<u64>,
+    /// Peer replica base URLs for k-of-n co-signing (exclude self). Each peer
+    /// holds its OWN `NXR_SIGNER_KEY` and countersigns a proposed blob only
+    /// after validating it against its own live view (`POST /v1/quote/cosign`).
+    #[serde(default)]
+    pub peers: Vec<String>,
+    /// Minimum total signatures per served quote (self + peers). A build that
+    /// cannot gather this many fails closed (503). Default 1 (single-signer).
+    #[serde(default)]
+    pub quorum: Option<u8>,
+    /// Co-sign price tolerance (bps): max relative deviation between a
+    /// proposed record's mark and this replica's own live mark. Default 25.
+    #[serde(default)]
+    pub cosign_tolerance_bps: Option<f64>,
+    /// Co-sign sourceTs forward-skew bound (ms) vs this replica's clock.
+    /// Default 5000. Backward bound is `mark_max_age_s`.
+    #[serde(default)]
+    pub cosign_max_skew_ms: Option<i64>,
     /// DEX feed subset. `idx` MUST equal the feed's position in the on-chain
     /// append-only `feedIds[]` (idx never remaps); keeper cross-checks
     /// `feedIds(idx) == feed_id` at startup.

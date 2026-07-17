@@ -182,6 +182,23 @@ pub fn sane_px(p: f64) -> bool {
     p.is_finite() && p > 0.0 && p < 1e15
 }
 
+/// Stateful record-level guard: magnitude check plus a >2x jump filter vs the
+/// last accepted mid (catches the partially-diverged 2-4x records the pure
+/// magnitude test passes). `last` self-heals: it only advances on ACCEPTED
+/// mids, so after a corrupt burst the next sane record within 2x of the last
+/// good anchor resumes the stream.
+#[inline]
+fn sane_mid(mid: f64, last: &mut f64) -> bool {
+    if !sane_px(mid) {
+        return false;
+    }
+    if *last > 0.0 && !(0.5..=2.0).contains(&(mid / *last)) {
+        return false;
+    }
+    *last = mid;
+    true
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 /// Bucket-aligned resample of an `IndexRecord` slice to a TF in milliseconds.
@@ -201,10 +218,11 @@ pub fn idx_to_ohlc(records: &[IndexRecord], tf_ms: i64) -> Vec<Ohlc> {
 
     let mut out: Vec<Ohlc> = Vec::with_capacity(records.len() / 8 + 1);
     let mut cur: Option<BucketState> = None;
+    let mut last_mid = 0.0_f64;
 
     for rec in records {
         let (ts_ms, mid, vbid, vask, ci_ubp) = decode_record(rec);
-        if !sane_px(mid) {
+        if !sane_mid(mid, &mut last_mid) {
             continue;
         }
         let bs = bucket_start(ts_ms, tf_ms);
@@ -246,6 +264,7 @@ where
         tf_ms,
         cur: None,
         done: false,
+        last_mid: 0.0,
     }
 }
 
@@ -254,6 +273,7 @@ struct OhlcStream<I> {
     tf_ms: i64,
     cur: Option<BucketState>,
     done: bool,
+    last_mid: f64,
 }
 
 impl<'a, I> Iterator for OhlcStream<I>
@@ -270,7 +290,7 @@ where
             match self.inner.next() {
                 Some(rec) => {
                     let (ts_ms, mid, vbid, vask, ci_ubp) = decode_record(rec);
-                    if !sane_px(mid) {
+                    if !sane_mid(mid, &mut self.last_mid) {
                         continue;
                     }
                     let bs = bucket_start(ts_ms, self.tf_ms);

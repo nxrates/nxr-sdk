@@ -114,19 +114,16 @@ pub struct SignedQuotesYml {
     pub oracle: String,
     /// EIP-712 domain chainId of the deployment.
     pub chain_id: u64,
-    /// Blob rebuild floor (ms). Requests inside the window get the cached
-    /// blob. Default 250.
-    #[serde(default)]
-    pub min_interval_ms: Option<u64>,
+    /// Required blob rebuild/cache floor in milliseconds. Must be in 1..=10
+    /// so a newly observed provider tick is not hidden behind a stale cache.
+    pub min_interval_ms: u64,
     /// Trailing 30 m bars for the Parkinson σ (mirrors keeper
     /// `nxr.vol_lookback_bars`). Default 48.
     #[serde(default)]
     pub sigma_lookback_bars: Option<u32>,
-    /// Reject marks whose last real upstream provider observation is older
-    /// than this (s). Heartbeat emits never advance this clock.
-    /// Default 120.
-    #[serde(default)]
-    pub mark_max_age_s: Option<u64>,
+    /// Required maximum age in milliseconds of the last real upstream provider
+    /// observation. Must be in 1..=500; heartbeat emits never advance it.
+    pub mark_max_age_ms: u64,
     /// Required minimum accepted provider count on every direct/bridge leg.
     /// Must be >= 2. Provider identity authentication is a separate layer.
     pub min_accepted_providers: u8,
@@ -140,12 +137,8 @@ pub struct SignedQuotesYml {
     /// Minimum total signatures per served quote (self + peers). Required and
     /// must be >= 2; a build below quorum fails closed (503).
     pub quorum: Option<u8>,
-    /// Co-sign price tolerance (bps): max relative deviation between a
-    /// proposed record's mark and this replica's own live mark. Default 25.
-    #[serde(default)]
-    pub cosign_tolerance_bps: Option<f64>,
     /// Co-sign sourceTs forward-skew bound (ms) vs this replica's clock.
-    /// Default 5000. Backward bound is `mark_max_age_s`.
+    /// Default 5000. Backward bound is `mark_max_age_ms`.
     #[serde(default)]
     pub cosign_max_skew_ms: Option<i64>,
     /// Maximum proposed sourceTs lead over a co-signer's own real provider
@@ -173,6 +166,10 @@ pub struct SignedFeedYml {
     pub idx: u16,
     /// NXR symbol whose mark/σ/CI back the feed (e.g. `BTC-USDC`).
     pub symbol: String,
+    /// Required maximum deviation, in basis points, between a proposed mark
+    /// and each co-signer's own live mark. Runtime policy accepts 0.01..=5.0.
+    /// One basis point is 0.01%; for example, 0.25 bps is 0.0025%.
+    pub cosign_tolerance_bps: f64,
     /// Optional bridge symbol: pushed mark = `mark(symbol) × mark(quote_via)`
     /// (e.g. `CAKE-USDT × USDT-USDC`), CI/σ composed in quadrature — mirrors
     /// keeper `quote_via` (ORC-04).
@@ -479,6 +476,30 @@ pub struct NetworkYml {
     /// (phase 59.R2C.6).
     #[serde(default)]
     pub bars: BarsMcastYml,
+    /// Authenticated forwarder -> aggregator ingress. When `signed_quotes` is
+    /// configured this block is mandatory and raw MITCH UDP is refused.
+    #[serde(default)]
+    pub udp_auth: Option<UdpAuthYml>,
+}
+
+/// Versioned HMAC envelope policy for the private UDP ingest leg. Key bytes
+/// are read from the named environment variables and never stored in YAML.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UdpAuthYml {
+    pub max_age_ms: u64,
+    pub max_future_ms: u64,
+    /// Sliding replay window (1..=64 sequence numbers).
+    pub replay_window: u8,
+    pub keys: Vec<UdpAuthKeyYml>,
+}
+
+/// One independently rotatable forwarder credential and its exact MITCH
+/// provider authority. Provider 0 must be listed to authorize heartbeats.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UdpAuthKeyYml {
+    pub key_id: u16,
+    pub key_env: String,
+    pub allowed_provider_ids: Vec<u16>,
 }
 
 /// `network.bars:` — per-feed multicast addr+port. Empty fields fall back to
@@ -846,6 +867,42 @@ mod tests {
         // Legacy path: only the per-pair override map, no class layer.
         assert_eq!(c.target_for_pair("USDC/USDT"), 50.0);
         assert_eq!(c.target_for_pair("FDUSD/USDT"), 300.0); // not in override map
+    }
+
+    #[test]
+    fn signed_quotes_requires_pinned_peers_and_tight_ms_freshness() {
+        let current: SignedQuotesYml = serde_yml::from_str(
+            "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 56\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 3\n\
+             min_composite_freshness_bps: 9000\nquorum: 2\npeers:\n\
+               - { url: 'http://signer.internal:8080', signer: '0x2222222222222222222222222222222222222222' }\n\
+             feeds:\n  - { idx: 0, symbol: 'BTC-USDC', cosign_tolerance_bps: 2.0 }\n",
+        )
+        .expect("parse hardened signed_quotes schema");
+        assert_eq!(current.min_interval_ms, 5);
+        assert_eq!(current.mark_max_age_ms, 500);
+        assert_eq!(current.peers.len(), 1);
+        assert_eq!(current.feeds[0].cosign_tolerance_bps, 2.0);
+
+        let missing_feed_tolerance = "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 56\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 3\n\
+             min_composite_freshness_bps: 9000\nquorum: 2\npeers:\n\
+               - { url: 'http://signer.internal:8080', signer: '0x2222222222222222222222222222222222222222' }\n\
+             feeds:\n  - { idx: 0, symbol: 'BTC-USDC' }\n";
+        assert!(
+            serde_yml::from_str::<SignedQuotesYml>(missing_feed_tolerance).is_err(),
+            "every feed must explicitly set cosign_tolerance_bps"
+        );
+
+        let legacy = "oracle: '0x1111111111111111111111111111111111111111'\n\
+                      chain_id: 56\nmark_max_age_s: 120\nmin_accepted_providers: 3\n\
+                      min_composite_freshness_bps: 9000\nquorum: 2\n\
+                      peers: ['http://signer.internal:8080']\ncosign_tolerance_bps: 25\n\
+                      feeds:\n  - { idx: 0, symbol: 'BTC-USDC' }\n";
+        assert!(
+            serde_yml::from_str::<SignedQuotesYml>(legacy).is_err(),
+            "legacy seconds/unpinned-peer config must fail closed"
+        );
     }
 
     /// PART B4 (2026-06-09): the per-pair forced-k escape hatch. The calibrator

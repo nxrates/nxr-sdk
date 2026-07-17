@@ -41,6 +41,7 @@ pub mod stats;
 pub mod synth;
 pub mod tdwap;
 pub mod ticker;
+pub mod udp_auth;
 #[cfg(feature = "transport")]
 pub mod transport;
 pub mod vol;

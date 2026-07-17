@@ -33,8 +33,7 @@ pub const DEFAULT_ARCHIVE_URL_BINANCE_MONTHLY: &str =
     "https://data.binance.vision/data/spot/monthly/aggTrades/{sym}/";
 pub const DEFAULT_ARCHIVE_URL_BINANCE_DAILY: &str =
     "https://data.binance.vision/data/spot/daily/aggTrades/{sym}/";
-pub const DEFAULT_ARCHIVE_URL_BINANCE_PROBE: &str =
-    "https://data.binance.vision/data/spot/monthly/aggTrades/{sym}/{sym}-aggTrades-{y:04}-{m:02}.zip";
+pub const DEFAULT_ARCHIVE_URL_BINANCE_PROBE: &str = "https://data.binance.vision/data/spot/monthly/aggTrades/{sym}/{sym}-aggTrades-{y:04}-{m:02}.zip";
 
 /// Default Bybit historical-archive URL prefixes.
 pub const DEFAULT_ARCHIVE_URL_BYBIT_MONTHLY: &str = "https://public.bybit.com/spot/{sym}/";
@@ -57,8 +56,7 @@ pub const DEFAULT_ARCHIVE_URL_OKX_MONTHLY: &str =
     "https://static.okx.com/cdn/okex/traderecords/trades/monthly/{y:04}{m:02}/";
 pub const DEFAULT_ARCHIVE_URL_OKX_DAILY: &str =
     "https://static.okx.com/cdn/okex/traderecords/trades/daily/{ds}/";
-pub const DEFAULT_ARCHIVE_URL_OKX_PROBE: &str =
-    "https://static.okx.com/cdn/okex/traderecords/trades/monthly/{y:04}{m:02}/{sym}-trades-{y:04}-{m:02}.zip";
+pub const DEFAULT_ARCHIVE_URL_OKX_PROBE: &str = "https://static.okx.com/cdn/okex/traderecords/trades/monthly/{y:04}{m:02}/{sym}-trades-{y:04}-{m:02}.zip";
 
 /// Top-level wrapper matching the layout of `nxrates.yml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -100,7 +98,8 @@ pub struct PipelineYml {
     /// BTR DEX signed-quote endpoint (`/v1/quote/signed`). Absent = disabled.
     /// Domain binds to the DEPLOYED ExternalOracle (chain_id + address) —
     /// per-deployment config, never hardcoded. Signing key: env
-    /// `NXR_SIGNER_KEY` (required when this block is present; never logged).
+    /// `NXR_SIGNER_KEY` + 32-byte-hex `NXR_COSIGN_SECRET` (both required when
+    /// this block is present; never logged).
     #[serde(default)]
     pub signed_quotes: Option<SignedQuotesYml>,
 }
@@ -123,18 +122,23 @@ pub struct SignedQuotesYml {
     /// `nxr.vol_lookback_bars`). Default 48.
     #[serde(default)]
     pub sigma_lookback_bars: Option<u32>,
-    /// Reject marks whose last aggregator emit is older than this (s).
+    /// Reject marks whose last real upstream provider observation is older
+    /// than this (s). Heartbeat emits never advance this clock.
     /// Default 120.
     #[serde(default)]
     pub mark_max_age_s: Option<u64>,
-    /// Peer replica base URLs for k-of-n co-signing (exclude self). Each peer
-    /// holds its OWN `NXR_SIGNER_KEY` and countersigns a proposed blob only
-    /// after validating it against its own live view (`POST /v1/quote/cosign`).
+    /// Required minimum accepted provider count on every direct/bridge leg.
+    /// Must be >= 2. Provider identity authentication is a separate layer.
+    pub min_accepted_providers: u8,
+    /// Required minimum composite freshness in bps (1..=10_000), derived from
+    /// the Index confidence freshness byte on every direct/bridge leg.
+    pub min_composite_freshness_bps: u16,
+    /// Peer replicas for k-of-n co-signing (exclude self). Every URL is pinned
+    /// to the exact signer address expected in its response.
     #[serde(default)]
-    pub peers: Vec<String>,
-    /// Minimum total signatures per served quote (self + peers). A build that
-    /// cannot gather this many fails closed (503). Default 1 (single-signer).
-    #[serde(default)]
+    pub peers: Vec<SignedPeerYml>,
+    /// Minimum total signatures per served quote (self + peers). Required and
+    /// must be >= 2; a build below quorum fails closed (503).
     pub quorum: Option<u8>,
     /// Co-sign price tolerance (bps): max relative deviation between a
     /// proposed record's mark and this replica's own live mark. Default 25.
@@ -144,10 +148,22 @@ pub struct SignedQuotesYml {
     /// Default 5000. Backward bound is `mark_max_age_s`.
     #[serde(default)]
     pub cosign_max_skew_ms: Option<i64>,
+    /// Maximum proposed sourceTs lead over a co-signer's own real provider
+    /// observation (ms). Default 250, hard-capped at 500.
+    #[serde(default)]
+    pub provenance_tolerance_ms: Option<i64>,
     /// DEX feed subset. `idx` MUST equal the feed's position in the on-chain
     /// append-only `feedIds[]` (idx never remaps); keeper cross-checks
     /// `feedIds(idx) == feed_id` at startup.
     pub feeds: Vec<SignedFeedYml>,
+}
+
+/// One countersigning replica. `signer` is the expected ECDSA address recovered
+/// from this URL's response; a different key never counts toward quorum.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignedPeerYml {
+    pub url: String,
+    pub signer: String,
 }
 
 /// One signed-quote feed: on-chain `feedIds[]` index → NXR symbol.
@@ -614,9 +630,15 @@ pub struct RenkoYml {
     pub min_pct: f32,
 }
 
-fn default_rolling_window_days() -> usize { 365 }
-fn default_bracket_max_iters() -> usize { 12 }
-fn default_accept_tol() -> f64 { 0.05 }
+fn default_rolling_window_days() -> usize {
+    365
+}
+fn default_bracket_max_iters() -> usize {
+    12
+}
+fn default_accept_tol() -> f64 {
+    0.05
+}
 
 /// `series.calibration:` block. Mirrors `series_factory::bar_construction::
 /// calibrate::CalibrationConfig` plus the per-class target table.
@@ -673,7 +695,10 @@ impl CalibrationYml {
     /// class detection. Lookup: per-pair override → flat top-level `target_bpd`.
     /// Prefer `target_for_pair_classed` where the caller knows the asset class.
     pub fn target_for_pair(&self, pair: &str) -> f64 {
-        self.target_bpd_overrides.get(pair).copied().unwrap_or(self.target_bpd)
+        self.target_bpd_overrides
+            .get(pair)
+            .copied()
+            .unwrap_or(self.target_bpd)
     }
 
     /// Resolve `target_bpd` using the detected asset-class bucket.
@@ -799,10 +824,16 @@ mod tests {
     fn classed_resolution_order() {
         let c = cal();
         // 1. explicit per-pair override wins over everything.
-        assert_eq!(c.target_for_pair_classed("USDC/USDT", "crypto_stable"), 50.0);
+        assert_eq!(
+            c.target_for_pair_classed("USDC/USDT", "crypto_stable"),
+            50.0
+        );
         // 2. no override, but class default applies — the whole point: a stable
         //    pair NOT in the override list still gets 50 by class detection.
-        assert_eq!(c.target_for_pair_classed("FDUSD/USDT", "crypto_stable"), 50.0);
+        assert_eq!(
+            c.target_for_pair_classed("FDUSD/USDT", "crypto_stable"),
+            50.0
+        );
         // 3. no override, no class default → flat default.
         assert_eq!(c.target_for_pair_classed("BTC/USDT", "crypto_major"), 300.0);
         // unclassified bucket also falls back to flat default.
@@ -831,20 +862,27 @@ mod tests {
             "target_bpd: 300\nrolling_window_days: 365\nmin_window_days: 30\n\
              bracket_max_iters: 12\naccept_tol: 0.05\nmult_bounds: [0.05, 4.0]\n\
              renko_k_overrides:\n  \"BTC/USDT\": 0.42\n  \"BAD/LOW\": 0.001\n  \"BIG/HI\": 9.0\n",
-        ).expect("parse CalibrationYml with renko_k_overrides");
+        )
+        .expect("parse CalibrationYml with renko_k_overrides");
 
         // Present + in-bounds ⇒ the binary emits this k and skips the fit.
         let forced = y.renko_k_overrides.get("BTC/USDT").copied();
         assert_eq!(forced, Some(0.42));
-        assert!((K_FLOOR..=K_MAX_SAFETY).contains(&forced.unwrap()),
-            "in-bounds override short-circuits");
+        assert!(
+            (K_FLOOR..=K_MAX_SAFETY).contains(&forced.unwrap()),
+            "in-bounds override short-circuits"
+        );
 
         // Below K_FLOOR is still ignored (the floor is preserved).
-        assert!(!(K_FLOOR..=K_MAX_SAFETY)
-            .contains(&y.renko_k_overrides["BAD/LOW"]), "below K_FLOOR ignored");
+        assert!(
+            !(K_FLOOR..=K_MAX_SAFETY).contains(&y.renko_k_overrides["BAD/LOW"]),
+            "below K_FLOOR ignored"
+        );
         // Above the OLD 4.0 ceiling is now ACCEPTED (no upper market cap).
-        assert!((K_FLOOR..=K_MAX_SAFETY)
-            .contains(&y.renko_k_overrides["BIG/HI"]), "k above old 4.0 wall now accepted");
+        assert!(
+            (K_FLOOR..=K_MAX_SAFETY).contains(&y.renko_k_overrides["BIG/HI"]),
+            "k above old 4.0 wall now accepted"
+        );
 
         // Absent pair ⇒ no override ⇒ normal fit path.
         assert!(y.renko_k_overrides.get("ETH/USDT").is_none());
@@ -865,7 +903,8 @@ mod tests {
         let y: CalibrationYml = serde_yml::from_str(
             "target_bpd: 300\nrolling_window_days: 365\nmin_window_days: 30\n\
              bracket_max_iters: 12\naccept_tol: 0.05\nmult_bounds: [0.05, 4.0]\n",
-        ).expect("parse lean CalibrationYml");
+        )
+        .expect("parse lean CalibrationYml");
         assert_eq!(y.rolling_window_days, 365);
         assert_eq!(y.bracket_max_iters, 12);
         assert!((y.accept_tol - 0.05).abs() < 1e-12);
@@ -875,14 +914,21 @@ mod tests {
         let legacy: CalibrationYml = serde_yml::from_str(
             "target_bpd: 300\nrolling_window_days: 365\nmin_window_days: 30\n\
              max_rounds: 20\ntolerance: 0.08\nmult_bounds: [0.05, 4.0]\n",
-        ).expect("parse legacy-aliased CalibrationYml");
-        assert_eq!(legacy.bracket_max_iters, 20, "max_rounds aliases bracket_max_iters");
-        assert!((legacy.accept_tol - 0.08).abs() < 1e-12, "tolerance aliases accept_tol");
+        )
+        .expect("parse legacy-aliased CalibrationYml");
+        assert_eq!(
+            legacy.bracket_max_iters, 20,
+            "max_rounds aliases bracket_max_iters"
+        );
+        assert!(
+            (legacy.accept_tol - 0.08).abs() < 1e-12,
+            "tolerance aliases accept_tol"
+        );
 
         // Omitted optional fields → documented defaults.
-        let minimal: CalibrationYml = serde_yml::from_str(
-            "target_bpd: 300\nmin_window_days: 30\nmult_bounds: [0.05, 4.0]\n",
-        ).expect("parse minimal CalibrationYml");
+        let minimal: CalibrationYml =
+            serde_yml::from_str("target_bpd: 300\nmin_window_days: 30\nmult_bounds: [0.05, 4.0]\n")
+                .expect("parse minimal CalibrationYml");
         assert_eq!(minimal.rolling_window_days, 365);
         assert_eq!(minimal.bracket_max_iters, 12);
         assert!((minimal.accept_tol - 0.05).abs() < 1e-12);

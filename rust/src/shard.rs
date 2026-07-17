@@ -1281,6 +1281,26 @@ impl BarShardWriter {
         Ok(w)
     }
 
+    /// Enable group-commit (mirror of `IdxShardWriter::set_group_commit`):
+    /// no per-file fdatasync on append; the owning writer thread sweeps with
+    /// `flush_buffers` + one fs-wide barrier. Without this every 10s bar
+    /// append fdatasyncs (~290 serialized syncs/s at ~2.9k tickers) and the
+    /// writer diverges from live emit (incident 2026-07-17: 22min+ s10 lag).
+    pub fn set_group_commit(&mut self) {
+        self.group_commit = true;
+        if let Some(log) = self.log.as_mut() {
+            log.set_group_commit();
+        }
+    }
+
+    /// Push buffered bytes to the OS (no fsync). Group-commit sweeper calls
+    /// this before its filesystem-wide barrier.
+    pub fn flush_buffers(&mut self) {
+        if let Some(log) = self.log.as_mut() {
+            let _ = log.flush_buffer_only();
+        }
+    }
+
     /// Read the last record of the most-recent shard so a same-day restart
     /// reopens the existing shard in append mode (no rotation, no manifest
     /// finalize) instead of trying to start a fresh one.

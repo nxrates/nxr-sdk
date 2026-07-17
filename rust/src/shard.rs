@@ -159,7 +159,7 @@ pub const ROLLOVER_SHIFT_MS_RENKO: i64 = 4_000;
 /// ladder. Was hardcoded `TF_WHITELIST_S` at `core/src/server/rest.rs:31`
 /// (phase 59.R3.C3.O2, 2026-05-30).
 pub const CANONICAL_TFS_S: &[u32] = &[
-    10, 20, 30, 60, 120, 300, 900, 1800,
+    10, 20, 30, 60, 120, 300, 600, 900, 1800,
     3600, 7200, 14400, 28800, 43200, 86400, 259200,
 ];
 
@@ -1279,6 +1279,26 @@ impl BarShardWriter {
         };
         w.seed_from_tail()?;
         Ok(w)
+    }
+
+    /// Enable group-commit (mirror of `IdxShardWriter::set_group_commit`):
+    /// no per-file fdatasync on append; the owning writer thread sweeps with
+    /// `flush_buffers` + one fs-wide barrier. Without this every 10s bar
+    /// append fdatasyncs (~290 serialized syncs/s at ~2.9k tickers) and the
+    /// writer diverges from live emit (incident 2026-07-17: 22min+ s10 lag).
+    pub fn set_group_commit(&mut self) {
+        self.group_commit = true;
+        if let Some(log) = self.log.as_mut() {
+            log.set_group_commit();
+        }
+    }
+
+    /// Push buffered bytes to the OS (no fsync). Group-commit sweeper calls
+    /// this before its filesystem-wide barrier.
+    pub fn flush_buffers(&mut self) {
+        if let Some(log) = self.log.as_mut() {
+            let _ = log.flush_buffer_only();
+        }
     }
 
     /// Read the last record of the most-recent shard so a same-day restart

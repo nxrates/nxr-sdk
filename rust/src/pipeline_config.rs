@@ -107,6 +107,13 @@ pub struct PipelineYml {
 /// `signed_quotes:` block — NXR-signed EIP-712 quote blobs for the BTR DEX
 /// `ExternalOracle.batchPushSigned` relay path. Wire format is the FROZEN
 /// spec `btr/dex/ORACLE_SIGNED_PUSH_SPEC.md` (24 B/feed packed records).
+/// EIP-712 domain `name` default: the currently deployed consumer-contract
+/// domain string. Kept as a per-deployment config default so the digest stays
+/// byte-identical while no consumer brand is hardcoded in the signing path.
+fn default_domain_name() -> String {
+    "BTR ExternalOracle".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignedQuotesYml {
     /// Deployed ExternalOracle address (0x-hex, 20 bytes) — EIP-712
@@ -114,6 +121,12 @@ pub struct SignedQuotesYml {
     pub oracle: String,
     /// EIP-712 domain chainId of the deployment.
     pub chain_id: u64,
+    /// EIP-712 domain `name`. Per-deployment: binds every signature to the
+    /// consumer contract's domain string. Changing it changes the digest, so
+    /// override only to match a differently-domained verifier; the default is
+    /// the currently deployed value.
+    #[serde(default = "default_domain_name")]
+    pub domain_name: String,
     /// Required blob rebuild/cache floor in milliseconds. Must be in 1..=10
     /// so a newly observed provider tick is not hidden behind a stale cache.
     pub min_interval_ms: u64,

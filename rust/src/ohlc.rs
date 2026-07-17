@@ -173,6 +173,15 @@ fn bucket_start(ts_ms: i64, tf_ms: i64) -> i64 {
     ts_ms.div_euclid(tf_ms) * tf_ms
 }
 
+/// Corruption guard, not a market filter: rejects non-finite / non-positive /
+/// physically impossible prices (incident 2026-07-07: TDWAP divergence wrote
+/// ask→inf records into .idx, rolled into .s10 with e224..e304 closes).
+/// Legit prices span ~1e-12 (micro-cap crosses) to ~1e6; 1e15 is pure garbage.
+#[inline]
+pub fn sane_px(p: f64) -> bool {
+    p.is_finite() && p > 0.0 && p < 1e15
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 /// Bucket-aligned resample of an `IndexRecord` slice to a TF in milliseconds.
@@ -195,6 +204,9 @@ pub fn idx_to_ohlc(records: &[IndexRecord], tf_ms: i64) -> Vec<Ohlc> {
 
     for rec in records {
         let (ts_ms, mid, vbid, vask, ci_ubp) = decode_record(rec);
+        if !sane_px(mid) {
+            continue;
+        }
         let bs = bucket_start(ts_ms, tf_ms);
         match cur.as_mut() {
             Some(state) if state.ts == bs => {
@@ -258,6 +270,9 @@ where
             match self.inner.next() {
                 Some(rec) => {
                     let (ts_ms, mid, vbid, vask, ci_ubp) = decode_record(rec);
+                    if !sane_px(mid) {
+                        continue;
+                    }
                     let bs = bucket_start(ts_ms, self.tf_ms);
                     match self.cur.as_mut() {
                         Some(state) if state.ts == bs => {

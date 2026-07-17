@@ -159,7 +159,7 @@ pub const ROLLOVER_SHIFT_MS_RENKO: i64 = 4_000;
 /// ladder. Was hardcoded `TF_WHITELIST_S` at `core/src/server/rest.rs:31`
 /// (phase 59.R3.C3.O2, 2026-05-30).
 pub const CANONICAL_TFS_S: &[u32] = &[
-    10, 20, 30, 60, 120, 300, 900, 1800,
+    10, 20, 30, 60, 120, 300, 600, 900, 1800,
     3600, 7200, 14400, 28800, 43200, 86400, 259200,
 ];
 

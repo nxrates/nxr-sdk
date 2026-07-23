@@ -115,6 +115,7 @@ fn default_domain_name() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignedQuotesYml {
     /// Deployed ExternalOracle address (0x-hex, 20 bytes) — EIP-712
     /// `verifyingContract`.
@@ -135,7 +136,9 @@ pub struct SignedQuotesYml {
     #[serde(default)]
     pub sigma_lookback_bars: Option<u32>,
     /// Required maximum age in milliseconds of the last real upstream provider
-    /// observation. Must be in 1..=500; heartbeat emits never advance it.
+    /// observation — the GLOBAL default freshness tier (sub-second CEX legs).
+    /// Must be in 1..=500; heartbeat emits never advance it. Per-feed
+    /// `max_age_ms` overrides it for slower-cadence sources (Pyth-Lazer).
     pub mark_max_age_ms: u64,
     /// Required minimum accepted provider count on every direct/bridge leg.
     /// Must be >= 2. Provider identity authentication is a separate layer.
@@ -167,6 +170,7 @@ pub struct SignedQuotesYml {
 /// One countersigning replica. `signer` is the expected ECDSA address recovered
 /// from this URL's response; a different key never counts toward quorum.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignedPeerYml {
     pub url: String,
     pub signer: String,
@@ -174,6 +178,7 @@ pub struct SignedPeerYml {
 
 /// One signed-quote feed: on-chain `feedIds[]` index → NXR symbol.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignedFeedYml {
     /// Position in the on-chain `feedIds[]` array.
     pub idx: u16,
@@ -188,6 +193,13 @@ pub struct SignedFeedYml {
     /// keeper `quote_via` (ORC-04).
     #[serde(default)]
     pub quote_via: Option<String>,
+    /// Per-feed freshness tier (ms) for THIS feed's own source leg, by source
+    /// cadence: unset = global `mark_max_age_ms` (sub-second CEX books);
+    /// Pyth-Lazer-cadence sources (~1s ticks) set 1500. Bridge `quote_via`
+    /// legs always stay on the global CEX bound. Bounds 1..=1500 enforced at
+    /// boot (signed.rs `validate_feed_max_age_ms`).
+    #[serde(default)]
+    pub max_age_ms: Option<u64>,
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the
@@ -872,6 +884,56 @@ mod tests {
         assert_eq!(c.target_for_pair_classed("BTC/USDT", "crypto_major"), 300.0);
         // unclassified bucket also falls back to flat default.
         assert_eq!(c.target_for_pair_classed("FOO/BAR", "default"), 300.0);
+    }
+
+    /// EURC/USDC (2026-07-21): classify_ticker (asset_class.rs) wrongly buckets
+    /// it `crypto_stable` (EURC ∈ cexs.stablecoins, CR/CR vs USDC) even though
+    /// EURC is EUR-pegged (~1.14), not a $1 peg. The real repo config.yml
+    /// carries an explicit per-pair override to force it back to the
+    /// FX-appropriate flat tier regardless of the (wrong) class the runtime
+    /// detects it as — this is the actual end-to-end proof the override wins.
+    #[test]
+    fn eurc_usdc_override_beats_wrong_crypto_stable_class_in_real_config() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.yml");
+        let pl = PipelineYml::load(&root).expect("parse repo config.yml");
+        assert_eq!(
+            pl.series.calibration.target_for_pair_classed("EURC/USDC", "crypto_stable"),
+            300.0,
+            "EURC/USDC must resolve to the FX-appropriate 300bpd tier, not the 50bpd $1-stable tier"
+        );
+    }
+
+    /// Sepolia 24-asset pivot (2026-07-21): SYRUPUSDC (Maple's yield-bearing
+    /// vault share, NAV ≈1.174) deliberately is NOT in `cexs.stablecoins` (same
+    /// reasoning as EURC/SUSDE), so classify_ticker would bucket its /USDT and
+    /// /USDC crosses `crypto_alt` (no class default, flat 300bpd) without the
+    /// explicit override. AUSD (Agora Dollar) IS in `cexs.stablecoins`, so its
+    /// (CR,FX) /USD leg needs the same explicit-override treatment U/USDG/USDF/
+    /// USDTB/BFUSD all needed — class detection never fires for a CR,FX pair.
+    #[test]
+    fn syrupusdc_and_ausd_overrides_in_real_config() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.yml");
+        let pl = PipelineYml::load(&root).expect("parse repo config.yml");
+        assert_eq!(
+            pl.series.calibration.target_for_pair_classed("SYRUPUSDC/USDC", "crypto_alt"),
+            50.0,
+            "SYRUPUSDC/USDC override must win over the crypto_alt default"
+        );
+        assert_eq!(
+            pl.series.calibration.target_for_pair_classed("SYRUPUSDC/USDT", "crypto_alt"),
+            50.0,
+            "SYRUPUSDC/USDT override must win over the crypto_alt default"
+        );
+        assert_eq!(
+            pl.series.calibration.target_for_pair_classed("SYRUPUSDC/USD", "fx_cross"),
+            300.0,
+            "SYRUPUSDC/USD must stay at the FX-like default - NOT overridden to the $1-stable tier"
+        );
+        assert_eq!(
+            pl.series.calibration.target_for_pair_classed("AUSD/USD", "fx_cross"),
+            50.0,
+            "AUSD/USD must resolve to 50bpd via explicit override (same-class fix as U/USD)"
+        );
     }
 
     #[test]

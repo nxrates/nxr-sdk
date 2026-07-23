@@ -177,3 +177,17 @@ fn cbeth_distinct_from_eth_index() {
         "cbETH base must resolve to cbETH asset, not ethereum"
     );
 }
+
+#[test]
+fn stablecoin_audit_2026_07_21_new_oracle_symbols_resolve_strictly() {
+    // Mirrors crypto/src/bin/oracle.rs's boot-time strict resolution
+    // (try_resolve_ticker_id, exit(78) on None) for every symbol newly wired
+    // into oracles.providers.pyth.symbols this pass. A None here means
+    // nxr-oracle would fatal at boot.
+    for sym in ["U/USD", "USDG/USD", "USDF/USD", "BFUSD/USD", "USDTB/USD"] {
+        assert!(
+            nxr_sdk::try_resolve_ticker_id(sym).is_some(),
+            "{sym} does not resolve strictly — nxr-oracle would exit(78) at boot"
+        );
+    }
+}

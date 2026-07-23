@@ -79,6 +79,20 @@ pub struct NxrConfig {
     /// markets while neutering wash-vol capture. Tunable per deployment.
     /// Default: 0.40 (40%).
     pub max_weight_per_source: f64,
+    /// HHI-adaptive ceiling upper bound. The effective per-ticker cap is
+    /// `clamp(sqrt(HHI_w), max_weight_per_source, max_weight_concentrated)`
+    /// where `HHI_w` is the Herfindahl index of WINSORIZED volumes (each
+    /// provider truncated at `anomaly_vol_ratio × median`). sqrt(HHI) = RMS
+    /// share ≥ every winsorized share, so the cap only bites on raw shares
+    /// that exceeded the winsor point — ie a genuinely (or fraudulently)
+    /// dominant venue keeps its concentration-corroborated share up to this
+    /// bound. A primary market (eg Binance on an issuer-partnered listing at
+    /// 75% raw share) earns up to 60%; fragmented tickers degrade to the flat
+    /// `max_weight_per_source` floor. Single-venue wash volume cannot lift the
+    /// ceiling past this bound: winsorization caps its HHI contribution and
+    /// moving the median needs ⌈N/2⌉ colluding venues. Must be ≥
+    /// `max_weight_per_source`. Default: 0.60 (60%).
+    pub max_weight_concentrated: f64,
     /// Minimum number of active providers per ticker required to enforce the
     /// cap. With < N providers, the thin coverage is itself the bottleneck and
     /// forcing a cap would distort the few legitimate quotes. Default: 3.
@@ -168,6 +182,15 @@ impl NxrConfig {
             // golden source for stable pegs — declared in `config.yml
             // oracles.providers.pyth.symbols`, NOT in this manifest (this env
             // list drives CEX forwarder subscriptions only).
+            // G5 feed-coverage adds (2026-07-22, signed-quotes tier): native
+            // books the BASE/USD fallback cannot reach — RLUSD/USDC +
+            // USDG/USDC (kraken lists both; neither was ever subscribed),
+            // DAI/USDT (kraken; DAI had ZERO subscription), TUSD/USDT
+            // (bybit/bitget/gate/htx; TUSD had ZERO subscription),
+            // FDUSD/USDC (binance-only book, dormant until binance WS
+            // heals) — plus USDT/USDC made EXPLICIT (fallback-reachable via
+            // USDT/USD today, but it is the signed-manifest via-leg for 6
+            // bridges; do not leave it implicit).
             symbols: env_or(
                 "NXR_SYMBOLS",
                 "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,ADA/USDT,DOGE/USDT,\
@@ -191,7 +214,8 @@ impl NxrConfig {
                  GHO/USDT,CRVUSD/USDT,USYC/USDC,BUIDL/USDC,USDF/USDT,\
                  RLUSD/USDT,USDY/USDT,USDTB/USDT,USD0/USDT,\
                  AUSD/USDT,USDG/USDT,EURC/USDC,USDD/USDT,PYUSD/USDT,\
-                 USDE/USDT,USDE/USDC",
+                 USDE/USDT,USDE/USDC,\
+                 USDT/USDC,RLUSD/USDC,USDG/USDC,DAI/USDT,TUSD/USDT,FDUSD/USDC",
             ),
             sink_host: env_or("NXR_SINK_HOST", "127.0.0.1"),
             sink_port: env_or("NXR_SINK_PORT", "40010").parse().unwrap_or(40010),
@@ -199,6 +223,9 @@ impl NxrConfig {
             max_weight_per_source: env_or("NXR_MAX_WEIGHT_PER_SOURCE", "0.40")
                 .parse()
                 .unwrap_or(0.40),
+            max_weight_concentrated: env_or("NXR_MAX_WEIGHT_CONCENTRATED", "0.60")
+                .parse()
+                .unwrap_or(0.60),
             min_providers_for_cap: env_or("NXR_MIN_PROVIDERS_FOR_CAP", "3")
                 .parse()
                 .unwrap_or(3),
@@ -232,6 +259,42 @@ impl NxrConfig {
             .unwrap_or_else(|| std::path::Path::new("/data"))
             .to_path_buf()
     }
+
+    /// Sink targets from `NXR_SINK_HOST` (signing-tier gate G3): the FIRST
+    /// comma-separated entry is the primary core sink (existing live path,
+    /// unchanged); every ADDITIONAL entry is an additive best-effort fan-out
+    /// sink (signer tier). Each entry accepts an optional `:port` suffix;
+    /// default is `NXR_SINK_PORT`. Single-host configs are byte-identical to
+    /// the pre-G3 behavior.
+    pub fn sink_targets(&self) -> ((String, u16), Vec<(String, u16)>) {
+        split_sink_hosts(&self.sink_host, self.sink_port)
+    }
+}
+
+/// Pure core of [`NxrConfig::sink_targets`] (unit-testable without env state).
+pub fn split_sink_hosts(raw: &str, default_port: u16) -> ((String, u16), Vec<(String, u16)>) {
+    let mut entries = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| parse_host_port(s, default_port));
+    let primary = entries
+        .next()
+        .unwrap_or_else(|| (raw.trim().to_string(), default_port));
+    (primary, entries.collect())
+}
+
+/// `host[:port]` → (host, port). The suffix is a port only when it parses as
+/// u16 AND the prefix has no further `:` (keeps bare IPv6 literals whole).
+fn parse_host_port(entry: &str, default_port: u16) -> (String, u16) {
+    if let Some((host, port)) = entry.rsplit_once(':')
+        && !host.is_empty()
+        && !host.contains(':')
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return (host.to_string(), port);
+    }
+    (entry.to_string(), default_port)
 }
 
 /// Default aggregation cadence (ms) when NEITHER the YAML
@@ -314,6 +377,34 @@ mod tests {
             reconcile_aggregation_interval_ms(None, None),
             DEFAULT_AGGREGATION_INTERVAL_MS
         );
+    }
+
+    #[test]
+    fn sink_hosts_split_primary_and_additive_fanout() {
+        // Single host (every current deployment) — byte-identical behavior.
+        assert_eq!(
+            split_sink_hosts("nxr-svc", 40010),
+            (("nxr-svc".into(), 40010), vec![])
+        );
+        // G3: primary + 3 additive signer sinks, per-entry port override.
+        let (primary, fanout) = split_sink_hosts(
+            "nxr-svc, nxr-signer-0-svc.nxr.svc.cluster.local:40010,\
+             nxr-signer-1-svc.nxr.svc.cluster.local,nxr-signer-2-svc.nxr.svc.cluster.local:40011",
+            40010,
+        );
+        assert_eq!(primary, ("nxr-svc".into(), 40010));
+        assert_eq!(
+            fanout,
+            vec![
+                ("nxr-signer-0-svc.nxr.svc.cluster.local".into(), 40010),
+                ("nxr-signer-1-svc.nxr.svc.cluster.local".into(), 40010),
+                ("nxr-signer-2-svc.nxr.svc.cluster.local".into(), 40011),
+            ]
+        );
+        // Bare IPv6 literal stays whole (no bogus port split).
+        assert_eq!(split_sink_hosts("::1", 40010).0, ("::1".into(), 40010));
+        // Empty/degenerate input keeps the raw host + default port (old path).
+        assert_eq!(split_sink_hosts("", 40010).0, ("".into(), 40010));
     }
 
     #[test]

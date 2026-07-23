@@ -516,6 +516,33 @@ pub struct UdpAuthYml {
     /// Sliding replay window (1..=64 sequence numbers).
     pub replay_window: u8,
     pub keys: Vec<UdpAuthKeyYml>,
+    /// Unauthenticated-frame disposition. Defaults to `strict` so an operator
+    /// can never silently weaken ingest by omitting the field.
+    #[serde(default)]
+    pub mode: UdpAuthMode,
+}
+
+/// How the aggregator treats a datagram that carries NO `NXR1` envelope.
+///
+/// This knob exists ONLY to make the forwarder cutover zero-downtime. Core and
+/// the forwarders cannot switch atomically: enabling auth on core first would
+/// reject every raw frame in flight, and sealing forwarders first would have
+/// core decode the 26 B header as MITCH. `Permissive` bridges that window.
+///
+/// It NEVER weakens the sealed path: a datagram beginning with `NXR1` is fully
+/// verified (tag, freshness, replay, provider authority) in BOTH modes, and a
+/// bad tag is rejected rather than retried as legacy. The only difference is
+/// whether an envelope-less frame is admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UdpAuthMode {
+    /// Envelope-less datagrams are REJECTED. The real invariant; the only mode
+    /// permitted once `signed_quotes` is armed.
+    #[default]
+    Strict,
+    /// Envelope-less datagrams are accepted as legacy raw MITCH. TRANSITIONAL
+    /// ONLY -- ingest is spoofable exactly as it was before udp_auth existed.
+    Permissive,
 }
 
 /// One independently rotatable forwarder credential and its exact MITCH

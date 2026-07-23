@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::pipeline_config::UdpAuthYml;
+use crate::pipeline_config::{UdpAuthMode, UdpAuthYml};
 
 pub const MAGIC: &[u8; 4] = b"NXR1";
 pub const VERSION: u8 = 1;
@@ -98,6 +98,18 @@ pub struct UdpAuthVerifier {
     max_age_ms: u64,
     max_future_ms: u64,
     replay_window: u8,
+    mode: UdpAuthMode,
+}
+
+/// Outcome of [`UdpAuthVerifier::accept`].
+#[derive(Debug)]
+pub enum Ingress<'a> {
+    /// Carried an `NXR1` envelope that passed every check.
+    Sealed(VerifiedFrame<'a>),
+    /// No envelope; admitted only because the mode is `Permissive`. Carries no
+    /// `key_id`, so the caller's provider-authority gate cannot be applied --
+    /// identical to pre-udp_auth behavior, and exactly why this is transitional.
+    Legacy(&'a [u8]),
 }
 
 #[derive(Debug)]
@@ -150,7 +162,32 @@ impl UdpAuthVerifier {
             max_age_ms: cfg.max_age_ms,
             max_future_ms: cfg.max_future_ms,
             replay_window: cfg.replay_window,
+            mode: cfg.mode,
         })
+    }
+
+    #[inline]
+    pub fn mode(&self) -> UdpAuthMode {
+        self.mode
+    }
+
+    /// Ingress classifier for the UDP hot path.
+    ///
+    /// Dispatch is on the `NXR1` magic, NOT on the mode: anything claiming to
+    /// be sealed is verified in full and its failures are returned as errors.
+    /// A forged/corrupt tag therefore never degrades into a legacy accept, so
+    /// `Permissive` cannot be used to bypass authentication -- it only decides
+    /// whether an envelope-LESS datagram is admitted.
+    pub fn accept<'a>(&mut self, datagram: &'a [u8], now_ms: u64) -> Result<Ingress<'a>> {
+        if datagram.len() >= MAGIC.len() && &datagram[..MAGIC.len()] == MAGIC {
+            return self.verify(datagram, now_ms).map(Ingress::Sealed);
+        }
+        match self.mode {
+            UdpAuthMode::Permissive => Ok(Ingress::Legacy(datagram)),
+            UdpAuthMode::Strict => {
+                bail!("unauthenticated UDP frame rejected (udp_auth.mode = strict)")
+            }
+        }
     }
 
     /// Authenticate length/version/tag/freshness/replay before returning any
@@ -255,6 +292,10 @@ mod tests {
     use super::*;
 
     fn verifier(key: [u8; 32]) -> UdpAuthVerifier {
+        verifier_mode(key, UdpAuthMode::Strict)
+    }
+
+    fn verifier_mode(key: [u8; 32], mode: UdpAuthMode) -> UdpAuthVerifier {
         UdpAuthVerifier {
             keys: HashMap::from([(
                 7,
@@ -267,7 +308,14 @@ mod tests {
             max_age_ms: 100,
             max_future_ms: 10,
             replay_window: 64,
+            mode,
         }
+    }
+
+    /// A raw MITCH Index frame: 56 B with no `NXR1` envelope, i.e. exactly what
+    /// the forwarders send before the sealed rollout.
+    fn raw_mitch() -> [u8; INDEX_LEN] {
+        [0x42; INDEX_LEN]
     }
 
     fn frame(sender: &UdpAuthSender, ts: u64) -> Vec<u8> {
@@ -312,6 +360,124 @@ mod tests {
                 .to_string()
                 .contains("stale")
         );
+    }
+
+    // ── Transition-mode matrix (permissive cutover) ──────────────────────
+    // The security claim under test: mode changes ONLY the disposition of an
+    // envelope-less datagram. Everything wearing an `NXR1` header is verified
+    // identically in both modes.
+
+    /// 1. Sealed frames are accepted in BOTH modes, and permissive does not
+    ///    alter the recovered payload/key binding.
+    #[test]
+    fn sealed_frame_accepted_in_both_modes() {
+        let key = [11u8; 32];
+        for mode in [UdpAuthMode::Strict, UdpAuthMode::Permissive] {
+            let sender = UdpAuthSender::new(7, key, 1);
+            let sealed = frame(&sender, 1_000);
+            match verifier_mode(key, mode).accept(&sealed, 1_001).unwrap() {
+                Ingress::Sealed(v) => {
+                    assert_eq!(v.key_id, 7, "{mode:?}");
+                    assert_eq!(v.payload, &[0x42; INDEX_LEN], "{mode:?}");
+                }
+                Ingress::Legacy(_) => panic!("{mode:?}: sealed frame classified as legacy"),
+            }
+        }
+    }
+
+    /// 2. Permissive admits raw MITCH — the property that keeps the feed up
+    ///    while forwarders still send unsealed frames.
+    #[test]
+    fn raw_frame_accepted_in_permissive() {
+        let raw = raw_mitch();
+        match verifier_mode([1u8; 32], UdpAuthMode::Permissive)
+            .accept(&raw, 1_000)
+            .unwrap()
+        {
+            Ingress::Legacy(payload) => assert_eq!(payload, &raw[..]),
+            Ingress::Sealed(_) => panic!("raw frame must not classify as sealed"),
+        }
+    }
+
+    /// 3. Strict rejects raw MITCH — the invariant `signed_quotes` depends on.
+    #[test]
+    fn raw_frame_rejected_in_strict() {
+        let err = verifier_mode([1u8; 32], UdpAuthMode::Strict)
+            .accept(&raw_mitch(), 1_000)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unauthenticated"), "unexpected error: {err}");
+    }
+
+    /// 4. THE load-bearing test: a frame claiming `NXR1` with a bad tag is
+    ///    REJECTED even in permissive. If this ever falls back to Legacy, an
+    ///    attacker downgrades authentication by corrupting one byte.
+    #[test]
+    fn bad_tag_rejected_even_in_permissive() {
+        let key = [4u8; 32];
+        let sender = UdpAuthSender::new(7, key, 1);
+        let mut tampered = frame(&sender, 1_000);
+        tampered[HEADER_LEN + 3] ^= 1;
+        let err = verifier_mode(key, UdpAuthMode::Permissive)
+            .accept(&tampered, 1_001)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tag"), "expected tag rejection, got: {err}");
+
+        // Same for a wrong-key sender and a truncated envelope: neither may
+        // degrade to a legacy accept.
+        let wrong = UdpAuthSender::new(7, [5u8; 32], 1);
+        assert!(
+            verifier_mode(key, UdpAuthMode::Permissive)
+                .accept(&frame(&wrong, 1_000), 1_001)
+                .is_err()
+        );
+        let mut truncated = frame(&sender, 1_000);
+        truncated.truncate(HEADER_LEN + INDEX_LEN);
+        assert!(
+            verifier_mode(key, UdpAuthMode::Permissive)
+                .accept(&truncated, 1_001)
+                .is_err()
+        );
+    }
+
+    /// 5. Replay protection still applies through `accept`, in permissive too.
+    #[test]
+    fn replay_rejected_through_accept_in_permissive() {
+        let key = [6u8; 32];
+        let sender = UdpAuthSender::new(7, key, 1);
+        let sealed = frame(&sender, 1_000);
+        let mut v = verifier_mode(key, UdpAuthMode::Permissive);
+        assert!(v.accept(&sealed, 1_001).is_ok());
+        let err = v.accept(&sealed, 1_001).unwrap_err().to_string();
+        assert!(err.contains("replayed"), "unexpected error: {err}");
+    }
+
+    /// 6. Provider authority is unchanged by mode: a sealed frame's key may
+    ///    still only speak for its allowlisted MITCH providers.
+    #[test]
+    fn provider_authority_enforced_in_permissive() {
+        let key = [8u8; 32];
+        let sender = UdpAuthSender::new(7, key, 1);
+        let sealed = frame(&sender, 1_000);
+        let mut v = verifier_mode(key, UdpAuthMode::Permissive);
+        let Ingress::Sealed(verified) = v.accept(&sealed, 1_001).unwrap() else {
+            panic!("sealed frame classified as legacy");
+        };
+        assert!(v.provider_allowed(verified.key_id, 101));
+        assert!(!v.provider_allowed(verified.key_id, 102));
+    }
+
+    /// Mode must default to strict when the YAML omits it — an operator can
+    /// never weaken ingest by forgetting a field.
+    #[test]
+    fn mode_defaults_to_strict() {
+        let yml: crate::pipeline_config::UdpAuthYml = serde_yml::from_str(
+            "max_age_ms: 500\nmax_future_ms: 100\nreplay_window: 64\n\
+             keys:\n  - { key_id: 1, key_env: X, allowed_provider_ids: [0] }\n",
+        )
+        .expect("schema parses without `mode`");
+        assert_eq!(yml.mode, UdpAuthMode::Strict);
     }
 
     #[test]

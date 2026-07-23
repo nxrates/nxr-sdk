@@ -119,11 +119,15 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     // Stablecoin /USD rules (USDS/USD1/USDE/PYUSD) removed 2026-07-08: those
     // tickers are now fed NATIVELY by the pyth oracle relay (`nxr-oracle`,
     // golden source for stable pegs) — a synth rule here would overwrite the
-    // oracle composite every cycle (last-writer-wins). USDG/USD kept: no
-    // pyth feed wired.
+    // oracle composite every cycle (last-writer-wins).
+    // USDG/USD removed 2026-07-21 (same reason, deferred): kept as a CEX-synth
+    // stopgap because no pyth feed was wired at the time - config.yml now
+    // subscribes Crypto.USDG/USD (Lazer id 232, confirmed live/stable), so this
+    // stopgap would silently clobber the pyth composite every cycle exactly
+    // like the four above. Root-caused during the 2026-07-21 "U feed broken"
+    // audit — USDG had the identical never-retired-stopgap bug class.
     // XAUT/USD rule removed 2026-07-08 (same wave as the stables): pyth
     // publishes native Crypto.XAUT/USD - synth would overwrite it each cycle.
-    SynthesisRuleSpec { out_sym: "USDG/USD", leg1_sym: "USDG/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
 
     // ── STABLE/USDC = STABLE/USD × (USDC/USD)⁻¹ (2026-07-08) ──
     // BTR Stable Core pools denominate in USDC: the keeper quotes every pool
@@ -239,7 +243,93 @@ mod tests {
         // fed natively by the pyth oracle relay (nxr-oracle); then 57 -> 56
         // (XAUT/USD native via pyth too). 56 -> 68: +12 STABLE/USDC crosses
         // for the BTR Stable Core keeper (USDC-denominated pools).
-        assert_eq!(SYNTHESIS_RULES.len(), 68);
+        assert_eq!(SYNTHESIS_RULES.len(), 67); // USDG/USD removed 2026-07-21 (now pyth-native)
         assert_eq!(INJECTION_RULES.len(), 11);
+    }
+
+    #[test]
+    fn synthesis_rules_never_chain_off_another_synthesis_output() {
+        // 2026-07-22: compose-on-read (core/src/server/rest.rs `compose_cross_ohlc`)
+        // does not recurse through synthetic legs: it only reads each leg's own
+        // persisted `.idx`/`.s10` shard. If a rule's leg were itself another
+        // synthesis output, and disk persistence for synth/auto-cross tickers is
+        // ever turned off, that leg would resolve to nothing and compose would
+        // silently go dark. Today's registry has zero such chains by
+        // construction; this test locks that invariant so a future rule
+        // addition that violates it fails CI instead of prod.
+        let outs: std::collections::HashSet<&str> =
+            SYNTHESIS_RULES.iter().map(|r| r.out_sym).collect();
+        for r in SYNTHESIS_RULES {
+            assert!(
+                !outs.contains(r.leg1_sym),
+                "{} leg1 {} chains off another synthesis output (compose-on-read can't recurse)",
+                r.out_sym, r.leg1_sym
+            );
+            assert!(
+                !outs.contains(r.leg2_sym),
+                "{} leg2 {} chains off another synthesis output (compose-on-read can't recurse)",
+                r.out_sym, r.leg2_sym
+            );
+        }
+    }
+
+    #[test]
+    fn synthesis_rules_derive_legs_round_trip_without_self_reference() {
+        // Simulates the real runtime hazard from the USDT/JPY bug fixed in
+        // `synth::paths::derive_legs`: once the triangulator registers an
+        // out_sym into symbol_map, `resolve` will find it. If derive_legs ever
+        // regresses to accepting a self-referential candidate, this test (which
+        // primes the resolver with every out_sym pointing at a synthetic id,
+        // exactly like the live symbol_map) catches it for the FULL rule set,
+        // not just the one hand-picked USDT/JPY regression case in paths.rs.
+        use crate::synth::paths::derive_legs;
+        use std::collections::HashMap;
+
+        // Registered primaries: every leg symbol any rule depends on, plus the
+        // two pivots' identity pairs. Distinct id range from synth outputs so a
+        // self-reference bug (leg id == the out_sym's own id) is unambiguous.
+        let mut ids: HashMap<String, u64> = HashMap::new();
+        let mut next_primary_id = 1u64;
+        for r in SYNTHESIS_RULES {
+            for leg in [r.leg1_sym, r.leg2_sym] {
+                ids.entry(leg.to_string()).or_insert_with(|| {
+                    let id = next_primary_id;
+                    next_primary_id += 1;
+                    id
+                });
+            }
+        }
+        // Every rule's own output is ALSO registered (as the live triangulator
+        // does), with ids disjoint from the primaries above.
+        let mut next_synth_id = 1_000_000u64;
+        for r in SYNTHESIS_RULES {
+            ids.entry(r.out_sym.to_string()).or_insert_with(|| {
+                let id = next_synth_id;
+                next_synth_id += 1;
+                id
+            });
+        }
+        let resolve = |s: &str| -> Option<u64> { ids.get(s).copied() };
+
+        for r in SYNTHESIS_RULES {
+            let Some((base, quote)) = r.out_sym.split_once('/') else {
+                continue; // not a base/quote-shaped symbol; not derive_legs's concern
+            };
+            let self_id = ids[r.out_sym];
+            match derive_legs(base, quote, &resolve) {
+                Some(legs) => {
+                    assert!(
+                        legs.iter().all(|(_, _, id)| *id != self_id),
+                        "{} derive_legs self-referenced (id {self_id}): {legs:?}",
+                        r.out_sym
+                    );
+                }
+                None => {
+                    // Some out_syms only resolve via the curated SYNTH_PATHS table
+                    // (compose_cross_ohlc tries that first) rather than generic
+                    // pivot derivation - not itself a failure of this invariant.
+                }
+            }
+        }
     }
 }

@@ -167,16 +167,28 @@ pub fn derive_legs(
     if base.is_empty() || quote.is_empty() || base == quote {
         return None;
     }
+    // Guard against self-reference: when pivot == base (or == quote), the
+    // inverted candidate `{pivot}/{asset}` can reconstruct `{base}/{quote}`
+    // itself (e.g. deriving USDT/JPY at the USDT pivot resolves the leg
+    // "USDT/JPY" straight back to the output's own registered id). Reject
+    // any candidate equal to the symbol being derived so the loop falls
+    // through to the next pivot instead of self-composing.
+    let self_sym = format!("{base}/{quote}");
     for pivot in ["USDT", "USD"] {
         let leg = |asset: &str, exp: i8| -> Option<Option<(String, i8, u64)>> {
             if asset == pivot {
                 return Some(None); // identity leg
             }
             let direct = format!("{asset}/{pivot}");
-            if let Some(id) = resolve(&direct) {
+            if direct != self_sym
+                && let Some(id) = resolve(&direct)
+            {
                 return Some(Some((direct, exp, id)));
             }
             let inv = format!("{pivot}/{asset}");
+            if inv == self_sym {
+                return None;
+            }
             resolve(&inv).map(|id| Some((inv, -exp, id)))
         };
         if let (Some(a), Some(b)) = (leg(base, 1), leg(quote, -1)) {
@@ -250,5 +262,35 @@ mod tests {
         assert_eq!(normalize_to_slash("BTC-USDT"), "BTC/USDT");
         assert_eq!(normalize_to_slash("BTC/USDT"), "BTC/USDT");
         assert_eq!(normalize_to_slash("0x060A8D644C100000"), "0x060A8D644C100000");
+    }
+
+    #[test]
+    fn derive_legs_rejects_usdt_pivot_self_reference() {
+        // USDT/JPY at the USDT pivot: base="USDT" == pivot, so the quote leg's
+        // inverse candidate is literally "USDT/JPY" (the symbol being derived).
+        // A registry where "USDT/JPY" itself resolves (as it would once the
+        // triangulator has registered its own synthesis output) must not
+        // short-circuit to that self-referential leg; it must fall through to
+        // the USD pivot instead.
+        let resolve = |sym: &str| -> Option<u64> {
+            match sym {
+                "USDT/USD" => Some(1),
+                "USD/JPY" => Some(2),
+                "USDT/JPY" => Some(999), // self id; must be rejected as a leg
+                _ => None,
+            }
+        };
+        let legs = derive_legs("USDT", "JPY", &resolve).expect("should resolve via USD pivot");
+        assert!(
+            legs.iter().all(|(sym, _, id)| sym != "USDT/JPY" && *id != 999),
+            "derive_legs must not self-reference: got {legs:?}"
+        );
+        assert_eq!(legs.len(), 2, "expected USDT/USD + USD/JPY legs, got {legs:?}");
+    }
+
+    #[test]
+    fn derive_legs_no_resolvable_pivot_returns_none() {
+        let resolve = |_: &str| -> Option<u64> { None };
+        assert!(derive_legs("FOO", "BAR", &resolve).is_none());
     }
 }

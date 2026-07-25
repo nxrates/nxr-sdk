@@ -30,6 +30,31 @@ const HEARTBEAT_LEN: usize = 32;
 /// 221 frame/s feed at max_age_ms=500 with ~9x headroom.
 const REPLAY_BITS: u64 = 1024;
 const REPLAY_WORDS: usize = (REPLAY_BITS / 64) as usize;
+/// Frame rate the replay-window sizing is checked against. Deliberately ~2x the
+/// measured live rate (221 frame/s, 2026-07-25) so the drain-grace bound below
+/// stays valid through growth without anyone re-deriving it.
+const ASSUMED_PEAK_FRAME_RATE_HZ: u64 = 500;
+
+/// Largest drain grace the replay bitmap can safely cover, in ms.
+///
+/// **Why widening staleness is NOT a security relaxation.** The freshness bound
+/// (`max_age_ms`) is a heuristic; the REPLAY BITMAP is the actual anti-replay
+/// control. A frame that passes freshness still has to present an unseen
+/// sequence ([`UdpAuthVerifier::check_and_mark_replay`]). So admitting older
+/// frames during a bounded drain does not let an attacker replay anything —
+/// PROVIDED the bitmap still spans the widened window. If it does not, the
+/// window slides, old sequences fall off the map and become re-acceptable, which
+/// reopens exactly the hole that raising `replay_window` from 64 to 1024 closed.
+///
+/// Hence: `max_age_ms + grace_ms <= replay_window / peak_frame_rate`. Asserted at
+/// boot in [`UdpAuthVerifier::from_config`], not left as a comment — it is a
+/// relationship between two independently-tunable knobs, and those break
+/// silently. Do not "simplify" the bitmap to make this go away.
+#[inline]
+const fn max_drain_grace_ms(replay_window: u16, max_age_ms: u64) -> u64 {
+    let span_ms = (replay_window as u64) * 1_000 / ASSUMED_PEAK_FRAME_RATE_HZ;
+    span_ms.saturating_sub(max_age_ms)
+}
 /// Bound on distinct authenticated senders tracked at once. Entries are only
 /// created by a sender that already passed the tag check, so this is not an
 /// attacker-reachable allocation; the bound exists because forwarders bind an
@@ -215,6 +240,16 @@ pub struct UdpAuthVerifier {
     max_future_ms: u64,
     replay_window: u16,
     mode: UdpAuthMode,
+    /// Configured drain grace, validated against the replay bitmap at boot
+    /// (see [`max_drain_grace_ms`]). 0 disables the mechanism entirely.
+    drain_grace_ms: u64,
+    /// `Some(deadline_ms)` while a post-boot backlog drain is being tolerated.
+    /// Armed by [`Self::arm_drain_grace`], cleared by [`Self::disarm_drain_grace`].
+    drain_grace_until_ms: Option<u64>,
+    /// Frames admitted ONLY because the grace was armed. The caller publishes
+    /// this so the mechanism is provably idle in steady state; `metrics` is an
+    /// optional dep here, so the sdk counts and the core emits.
+    grace_admitted: u64,
 }
 
 /// Outcome of [`UdpAuthVerifier::accept`].
@@ -251,6 +286,23 @@ impl UdpAuthVerifier {
             "network.udp_auth.replay_window must be in [1, {REPLAY_BITS}]"
         );
         ensure!(!cfg.keys.is_empty(), "network.udp_auth.keys is empty");
+        // Grace vs replay-bitmap capacity. See `max_drain_grace_ms`: staleness is
+        // a heuristic, the bitmap is the real anti-replay control, so the grace is
+        // only safe while the bitmap still spans it.
+        let grace_cap = max_drain_grace_ms(cfg.replay_window, cfg.max_age_ms);
+        ensure!(
+            cfg.drain_grace_ms <= grace_cap,
+            "network.udp_auth.drain_grace_ms = {} exceeds what replay_window = {} can cover \
+             at {} frame/s (max {} ms with max_age_ms = {}). Raise replay_window (<= {}) in the \
+             SAME change or lower the grace — otherwise the replay window slides and old \
+             sequences become re-acceptable.",
+            cfg.drain_grace_ms,
+            cfg.replay_window,
+            ASSUMED_PEAK_FRAME_RATE_HZ,
+            grace_cap,
+            cfg.max_age_ms,
+            REPLAY_BITS
+        );
         let mut keys = HashMap::with_capacity(cfg.keys.len());
         for item in &cfg.keys {
             ensure!(item.key_id != 0, "UDP auth key_id 0 is reserved");
@@ -279,6 +331,9 @@ impl UdpAuthVerifier {
             max_future_ms: cfg.max_future_ms,
             replay_window: cfg.replay_window,
             mode: cfg.mode,
+            drain_grace_ms: cfg.drain_grace_ms,
+            drain_grace_until_ms: None,
+            grace_admitted: 0,
         })
     }
 
@@ -351,8 +406,25 @@ impl UdpAuthVerifier {
         if source_ts_ms > now_ms.saturating_add(self.max_future_ms) {
             return Err(AuthReject::Future);
         }
-        if now_ms.saturating_sub(source_ts_ms) > self.max_age_ms {
-            return Err(AuthReject::Stale);
+        // Freshness, widened ONLY while a bounded post-boot drain is armed. A
+        // queued frame is legitimately older than the drain instant, so without
+        // this a backlog would be rejected wholesale as stale the moment
+        // forwarders start sealing. Anti-replay is unaffected — see
+        // `max_drain_grace_ms` for why, and for the bound that keeps it true.
+        let age_ms = now_ms.saturating_sub(source_ts_ms);
+        if age_ms > self.max_age_ms {
+            let grace = match self.drain_grace_until_ms {
+                Some(deadline) if now_ms <= deadline => self.drain_grace_ms,
+                Some(_) => {
+                    self.drain_grace_until_ms = None; // expired: latch back to strict
+                    0
+                }
+                None => 0,
+            };
+            if age_ms > self.max_age_ms + grace {
+                return Err(AuthReject::Stale);
+            }
+            self.grace_admitted += 1;
         }
         self.check_and_mark_replay(key_id, peer, sequence, now_ms)?;
         Ok(VerifiedFrame {
@@ -361,6 +433,38 @@ impl UdpAuthVerifier {
             source_ts_ms,
             payload: &datagram[HEADER_LEN..signed_len],
         })
+    }
+
+    /// Arm a one-shot drain grace for `drain_grace_ms` from `now_ms`.
+    ///
+    /// Call ONLY where a backlog is genuinely expected: the ingest listener
+    /// adopting a socket that was pre-bound across the process's own boot. Not a
+    /// general staleness relaxation — it self-expires, and
+    /// [`Self::disarm_drain_grace`] should be called as soon as the queue is
+    /// observed drained so the strict bound returns early rather than at expiry.
+    pub fn arm_drain_grace(&mut self, now_ms: u64) -> u64 {
+        if self.drain_grace_ms == 0 {
+            return 0;
+        }
+        self.drain_grace_until_ms = Some(now_ms.saturating_add(self.drain_grace_ms));
+        self.drain_grace_ms
+    }
+
+    /// Latch back to the strict freshness bound. Idempotent.
+    pub fn disarm_drain_grace(&mut self) {
+        self.drain_grace_until_ms = None;
+    }
+
+    /// True while a drain grace is armed and unexpired.
+    #[inline]
+    pub fn drain_grace_armed(&self) -> bool {
+        self.drain_grace_until_ms.is_some()
+    }
+
+    /// Count of frames admitted only because the grace was armed.
+    #[inline]
+    pub fn grace_admitted(&self) -> u64 {
+        self.grace_admitted
     }
 
     #[inline]
@@ -482,6 +586,9 @@ mod tests {
             max_future_ms: 10,
             replay_window: 64,
             mode,
+            drain_grace_ms: 0,
+            drain_grace_until_ms: None,
+            grace_admitted: 0,
         }
     }
 
@@ -804,4 +911,96 @@ mod tests {
             1e9 / verify_ns,
         );
     }
+
+    // ── Drain grace (post-boot backlog) ──────────────────────────────────────
+
+    /// A frame queued across the core's boot is legitimately older than the
+    /// drain instant. Armed, it must be admitted; disarmed, it must be rejected
+    /// as stale — the grace is a bounded one-shot, not a looser bound.
+    #[test]
+    fn drain_grace_admits_a_backlog_frame_only_while_armed() {
+        let key = [3u8; 32];
+        let sender = UdpAuthSender::new(7, key, 0);
+        let mut v = verifier(key); // max_age_ms = 100
+        v.drain_grace_ms = 2_000;
+
+        // 1.5 s old: far outside max_age, inside the grace.
+        let stale = frame(&sender, 1_000);
+        assert_eq!(
+            v.verify(&stale, PEER, 2_500).map(|_| ()),
+            Err(AuthReject::Stale),
+            "unarmed: a 1.5 s-old frame must be stale"
+        );
+
+        assert_eq!(v.arm_drain_grace(2_500), 2_000);
+        assert!(v.drain_grace_armed());
+        let stale2 = frame(&sender, 1_000);
+        assert!(
+            v.verify(&stale2, PEER, 2_500).is_ok(),
+            "armed: the same age must be admitted"
+        );
+        assert_eq!(v.grace_admitted(), 1, "grace admits must be counted");
+
+        v.disarm_drain_grace();
+        let stale3 = frame(&sender, 1_000);
+        assert_eq!(
+            v.verify(&stale3, PEER, 2_500).map(|_| ()),
+            Err(AuthReject::Stale),
+            "disarmed: back to the strict bound immediately"
+        );
+    }
+
+    /// The grace self-expires even if nobody disarms it, so a wedged drain
+    /// cannot leave freshness permanently widened.
+    #[test]
+    fn drain_grace_expires_on_its_own() {
+        let key = [4u8; 32];
+        let sender = UdpAuthSender::new(7, key, 0);
+        let mut v = verifier(key);
+        v.drain_grace_ms = 2_000;
+        v.arm_drain_grace(1_000); // deadline 3_000
+
+        let f = frame(&sender, 2_000);
+        assert_eq!(
+            v.verify(&f, PEER, 3_500).map(|_| ()),
+            Err(AuthReject::Stale),
+            "past the deadline the grace must not apply"
+        );
+        assert!(!v.drain_grace_armed(), "expiry must latch back to strict");
+    }
+
+    /// THE security property: widening staleness does not weaken anti-replay,
+    /// because the bitmap — not the freshness bound — is the control. A
+    /// duplicate sequence must be refused in BOTH states.
+    #[test]
+    fn drain_grace_does_not_weaken_replay_protection() {
+        let key = [5u8; 32];
+        let sender = UdpAuthSender::new(7, key, 0);
+        let mut v = verifier(key);
+        v.drain_grace_ms = 2_000;
+        v.arm_drain_grace(2_500);
+
+        let f = frame(&sender, 1_000);
+        assert!(v.verify(&f, PEER, 2_500).is_ok(), "first admit under grace");
+        assert_eq!(
+            v.verify(&f, PEER, 2_500).map(|_| ()),
+            Err(AuthReject::Replay),
+            "the SAME sealed bytes must be refused as a replay even under grace"
+        );
+    }
+
+    /// The grace/bitmap relationship is asserted at boot, not left as a comment:
+    /// it couples two independently-tunable knobs and would break silently.
+    #[test]
+    fn grace_exceeding_the_replay_bitmap_is_a_boot_error() {
+        // 1024 slots at the assumed 500 frame/s = 2048 ms of span; max_age 500
+        // leaves 1548 ms for grace.
+        assert_eq!(max_drain_grace_ms(1024, 500), 1_548);
+        // A narrow window leaves nothing: 64 slots = 128 ms < max_age.
+        assert_eq!(max_drain_grace_ms(64, 500), 0);
+        // Raising the window raises the ceiling in lock-step, which is the
+        // documented remedy.
+        assert!(max_drain_grace_ms(1024, 100) > max_drain_grace_ms(512, 100));
+    }
+
 }

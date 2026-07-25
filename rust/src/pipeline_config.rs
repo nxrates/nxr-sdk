@@ -621,6 +621,19 @@ pub struct UdpAuthYml {
     /// can never silently weaken ingest by omitting the field.
     #[serde(default)]
     pub mode: UdpAuthMode,
+    /// One-shot staleness grace, in ms, for the backlog the ingest socket queues
+    /// across the core's own boot (the socket is bound before the boot gates, so
+    /// a restart leaves frames in `SO_RCVBUF` that are legitimately older than
+    /// the drain instant). Without it, sealing forwarders would have every
+    /// drained frame rejected as `stale`.
+    ///
+    /// Defaults to 0 = mechanism off, so it can never be enabled by omission.
+    /// **Bounded by the replay bitmap** and asserted at boot — see
+    /// `udp_auth::max_drain_grace_ms`. It does NOT weaken anti-replay: the
+    /// bitmap, not the freshness bound, is the control. Raise `replay_window` in
+    /// the SAME change if you raise this.
+    #[serde(default)]
+    pub drain_grace_ms: u64,
 }
 
 /// How the aggregator treats a datagram that carries NO `NXR1` envelope.

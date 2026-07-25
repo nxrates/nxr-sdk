@@ -106,6 +106,22 @@ pub fn coarse_now() -> Instant {
     Instant::now()
 }
 
+/// The coarse clock backdated by `lateness_ms` — the observation instant for a
+/// frame that waited somewhere (kernel receive queue) before we read it.
+///
+/// Exists so callers can stamp [`ProviderEntry::new_at`] / [`ProviderEntry::update_at`]
+/// with FRAME time instead of drain time without taking a direct `coarsetime`
+/// dependency, keeping the clock choice single-sourced in this module (the
+/// module-level comment on the time source is the contract).
+///
+/// The caller is responsible for clamping `lateness_ms` to something plausible:
+/// a value derived from an unvalidated wire timestamp can be absurd, and
+/// backdating past the corpse-filter horizon is indistinguishable from dead.
+#[inline]
+pub fn coarse_now_backdated(lateness_ms: u64) -> Instant {
+    coarse_now() - Duration::from_millis(lateness_ms)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderEntry {
     /// Latest per-provider aggregate (MITCH canonical type).

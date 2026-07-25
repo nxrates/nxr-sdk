@@ -555,8 +555,10 @@ pub struct NetworkYml {
 pub struct UdpAuthYml {
     pub max_age_ms: u64,
     pub max_future_ms: u64,
-    /// Sliding replay window (1..=64 sequence numbers).
-    pub replay_window: u8,
+    /// Sliding replay window (1..=1024 sequence numbers). MUST exceed
+    /// `max_age_ms` x peak frame rate, else a duplicate that is still fresh
+    /// enough to pass the staleness gate has already fallen out of the window.
+    pub replay_window: u16,
     pub keys: Vec<UdpAuthKeyYml>,
     /// Unauthenticated-frame disposition. Defaults to `strict` so an operator
     /// can never silently weaken ingest by omitting the field.

@@ -66,18 +66,85 @@ pub const FLAG_HISTORICAL_BACKFILL: u8 = 0b0000_0010;
 /// consumers can ignore the flag. Set by `nxr_sdk::renko::RenkoGenerator`.
 pub const FLAG_RENKO_SYNTHETIC_BRICK: u8 = 0b0000_0100;
 
-/// `Index.flags` bit 3: this INDEX record's `confidence` byte (Index body
-/// offset 36) carries a continuous freshness value as a percent 0-100
-/// (`f = byte / 100 ∈ [0,1]`, ~1 when all providers fresh) rather than the
-/// legacy integer active-provider count. Set by the TDWAP writer
-/// (`nxr_sdk::tdwap::compute_vwap_at`); readers MUST check this bit before
-/// interpreting `confidence` — clear = legacy count, set = freshness percent.
+/// `Index.flags` bit 3: LEGACY (pre-2026-07-25 cutover) — this INDEX record's
+/// `confidence` byte (Index body offset 36) carries a continuous freshness
+/// FRACTION (`f = byte / 255 ∈ [0,1]`, ~1 when all providers fresh) rather than
+/// the legacy integer active-provider count.
+///
+/// ⚠ NO LIVE WRITER SETS THIS ANY MORE. The TDWAP writer
+/// (`nxr_sdk::tdwap::compute_vwap_at`) now emits the packed active-count byte
+/// and sets [`FLAG_CONF_ACTIVE`] instead, because the fraction is ANTI-correlated
+/// with breadth and a floor on it could not catch its own headline case (every
+/// leg stale-but-not-corpse). This bit remains normative for HISTORICAL and
+/// replay records and must keep being decoded as a fraction.
 ///
 /// ⚠ This is the INDEX-record flag space (bits 0/1 = heartbeat/backfill).
 /// Bit 2 is taken by `FLAG_RENKO_SYNTHETIC_BRICK` in the *Bar* flag space,
 /// which shares this module. To avoid any cross-space confusion this uses
 /// bit 3 — free in BOTH the INDEX and the Bar flag spaces.
 pub const FLAG_CONF_FRESHNESS: u8 = 0b0000_1000;
+
+/// `Index.flags` bit 6 (INDEX FLAG SPACE ONLY): this INDEX record's `confidence`
+/// byte carries the PACKED ACTIVE-PROVIDER measurement written by
+/// `nxr_sdk::tdwap::compute_vwap_at`:
+///
+/// - bits 0..6 (`& 0x7F`) = `active_count` — legs with non-floored staleness
+///   decay `>= 0.1`, i.e. genuinely ticking, saturated at 64.
+/// - bit 7 (`& 0x80`) = `fresh_weight_ok` — the fresh-WEIGHT share
+///   `wd_sum/bw_sum >= FRESH_WEIGHT_SHARE_FLOOR`.
+///
+/// Pack/unpack live in `mitch::index` (`conf_pack_active`, `conf_active_count`,
+/// `conf_fresh_weight_ok`) — the single source of truth for the encoding.
+///
+/// THREE-STATE DECODE of `confidence` (readers MUST branch in this order):
+/// 1. `FLAG_CONF_ACTIVE` set    → packed active-count + fresh-weight bit (above).
+/// 2. `FLAG_CONF_FRESHNESS` set → legacy freshness fraction `byte / 255`
+///    (historical records written before the cutover, and replay of them).
+/// 3. neither                   → legacy active-provider COUNT (raw integer).
+///    This is what `series-factory::resample_idx` deliberately leaves on healed /
+///    resampled rows: it cannot recompute decay state, so it never fabricates a
+///    marker. Consumers MUST treat this state as "no liveness metadata" and, on a
+///    money path, fail CLOSED.
+///
+/// ⚠ NUMERIC COLLISION, BY CONSTRUCTION SAFE: 0x40 is also
+/// [`FLAG_S10_FLAT_FILL`] in the *Bar* flag space. That is safe only because
+/// `Index.flags` is NEVER copied into `Bar.flags`: `bar_builder.rs` only ORs
+/// `FLAG_S10_FLAT_FILL` onto a bar it constructs itself (`bar_builder.rs:284`),
+/// and `core/src/bars_s10.rs` / `core/src/bars_renko.rs` only ever READ index
+/// flags (`FLAG_HEARTBEAT_SENTINEL` tests at `bars_s10.rs:243`,
+/// `bars_renko.rs:440`) while writing their own bar flags from scratch
+/// (`bars_s10.rs:578` writes `flags: 0`). Verified 2026-07-25. If any bar
+/// producer ever starts propagating index flags, this bit MUST move first.
+///
+/// ⚠ Bit 7 is available for `fresh_weight_ok` ONLY because
+/// `core::aggregator::MAX_ACCEPTED_PROVIDERS = 64` bounds the count at 64 (7
+/// bits). Raising that constant above 127 collides with the fresh-weight bit and
+/// silently corrupts both fields — re-encode before touching it.
+pub const FLAG_CONF_ACTIVE: u8 = 0b0100_0000;
+
+/// Minimum share of base weight held by TICKING legs (`active_bw_sum/bw_sum` in
+/// `tdwap.rs`) for `fresh_weight_ok` (bit 7 of the packed `confidence` byte).
+///
+/// This is the WEIGHT-AWARENESS companion to `active_count`, which is otherwise
+/// weight-blind: 2 ticking legs carrying 1% of the book would satisfy a pure
+/// count. 0.20 = with 10 equal-weight legs, 2 ticking legs hold 20% of base
+/// weight — the same 2-of-N doctrine as `signed_quotes.min_accepted_providers`.
+///
+/// ⚠ It is deliberately the ACTIVE-weight share, NOT the decay-weighted
+/// `Σ base_weight·decay / Σ base_weight` that the old `confidence` byte carried.
+/// The decay-weighted ratio DILUTES with breadth (each added venue contributes
+/// full base_weight to the denominator but only base_weight·decay to the
+/// numerator), so thresholding it re-creates the very inversion this gate exists
+/// to remove: measured 2026-07-25 it scored 0.059 on BTC-USDC (10 venues) and
+/// 0.082 on ETH-USDC, i.e. a 0.20 floor would reject our two best-corroborated
+/// books while admitting a single-leg Pyth feed. The active share does not
+/// dilute — a recently-ticked leg contributes its FULL base weight — so a healthy
+/// deep book sits near 1.0. Never swap the numerator back.
+///
+/// The floor this REPLACES, `min_composite_freshness_bps = 300`, only demanded
+/// `f >= 0.03` (byte >= 8 of 255), so a composite whose every leg was
+/// stale-but-not-corpse (decay ≈ 0.05 → f = 0.05 = 500 bps) PASSED it.
+pub const FRESH_WEIGHT_SHARE_FLOOR: f64 = 0.20;
 
 /// `Index.flags` bit 4: this INDEX record was rewritten by the offline
 /// `heal-idx` pass (`series-factory::idx_heal`) — sorted, optionally

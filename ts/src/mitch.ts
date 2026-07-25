@@ -152,8 +152,8 @@ export interface Index {
   vask: number; // u32
   ci: number; // u16 sqrt-encoded
   tickCount: number; // u16
-  confidence: number; // u8 raw freshness byte (fraction (byte/255) when FLAG_CONF_FRESHNESS set)
-  confidence01: number; // confidence / 255 (freshness float ∈ [0,1])
+  confidence: number; // u8 raw liveness byte; FLAG-SELECTED: packed count+bit7 (FLAG_CONF_ACTIVE), fraction byte/255 (FLAG_CONF_FRESHNESS), else legacy count
+  confidence01: number; // confidence / 255 — a fraction ONLY for FLAG_CONF_FRESHNESS records
   accepted: number; // u8
   rejected: number; // u8
   flags: number; // u8

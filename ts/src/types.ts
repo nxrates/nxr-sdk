@@ -26,10 +26,13 @@ export type Sym = string;
  * - `ci_ubp`: confidence interval in micro basis points (decoded from the sqrt-u16).
  * - `accepted`: # accepted providers in this aggregation window (u8).
  * - `rejected`: # rejected providers (u8).
- * - `confidence`: raw u8 freshness byte. When `FLAG_CONF_FRESHNESS` (flags bit
- *   3) is set it is a freshness fraction (byte/255) (use `confidence01 = byte/255`);
- *   when clear it is the legacy integer active-provider count.
- * - `confidence01`: `confidence / 255` — the freshness as a float ∈ [0,1].
+ * - `confidence`: raw u8 liveness byte, FLAG-SELECTED (three states). With
+ *   `FLAG_CONF_ACTIVE` (flags bit 6, live records since 2026-07-25) it is PACKED:
+ *   bits 0..6 = ticking-provider count (0..64), bit 7 = fresh-weight-share OK.
+ *   With `FLAG_CONF_FRESHNESS` (bit 3, historical records) it is a freshness
+ *   fraction (byte/255). With neither it is the legacy active-provider count.
+ * - `confidence01`: `confidence / 255`. A freshness fraction ∈ [0,1] ONLY for
+ *   `FLAG_CONF_FRESHNESS` records; on packed records it is a scaled count.
  */
 export interface IndexRecord {
   ts_ms: number;

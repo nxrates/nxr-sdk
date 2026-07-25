@@ -178,9 +178,19 @@ export interface WsIndex {
   bid: number;
   ask: number;
   ci: number;
-  /** Raw u8 freshness byte widened to f64 (fraction (byte/255) when FLAG_CONF_FRESHNESS set). */
+  /**
+   * Raw u8 liveness byte widened to f64. Meaning is FLAG-SELECTED on the source
+   * record and changed at the 2026-07-25 cutover: FLAG_CONF_ACTIVE = packed
+   * (bits 0..6 ticking-provider count, bit 7 fresh-weight-share OK);
+   * FLAG_CONF_FRESHNESS = freshness fraction (byte/255); neither = legacy count.
+   */
   confidence: number;
-  /** Freshness float ∈ [0,1] (`confidence / 255`). */
+  /**
+   * `confidence / 255`. ⚠ Only a freshness fraction ∈ [0,1] for legacy
+   * FLAG_CONF_FRESHNESS records; on packed (FLAG_CONF_ACTIVE) records this is a
+   * scaled count and is NOT a fraction. Computed unconditionally because the WS
+   * frame carries no flags.
+   */
   confidence01: number;
   accepted: number;
   rejected: number;

@@ -267,14 +267,22 @@ where
 
     let mut w_stale_sq_sum = 0.0f64;
 
-    // Freshness (u8 0-255) accumulators. `bw_sum` = Σ base_weight over every
-    // VALID-tick provider; `wd_sum` = Σ base_weight·decay. The ratio
-    // `wd_sum/bw_sum ∈ [0,1]` is a continuous freshness: ~1 when all providers
-    // are fresh (decay≈1), falling as components decay. Floored-but-valid
-    // providers still lower freshness via the denominator (they contribute to
-    // `bw_sum` but little to `wd_sum`).
+    // Weight-share accumulators. `bw_sum` = Σ base_weight over every VALID-tick
+    // provider. Two numerators:
+    //  * `active_bw_sum` = Σ base_weight over legs that are genuinely TICKING
+    //    (decay >= 0.1). `active_bw_sum/bw_sum` is the weight share the live legs
+    //    carry, and it does NOT dilute with breadth: a leg that ticked recently
+    //    contributes its FULL base_weight, so adding venues that are merely
+    //    between ticks cannot drag it down. This is what bit 7 publishes.
+    // NOT accumulated any more: Σ base_weight·decay, the legacy continuous
+    // freshness numerator. It is anti-correlated with breadth (every extra leg
+    // adds full base_weight to the denominator but only base_weight·decay to the
+    //    numerator), which is exactly why it is NOT the gate: measured 2026-07-25
+    // our deepest books scored it 0.059 (BTC-USDC, 10 venues) and 0.082
+    // (ETH-USDC), so ANY meaningful floor on it rejects the best-corroborated
+    // feeds FIRST. Do not reintroduce it as an admission axis.
     let mut bw_sum = 0.0f64;
-    let mut wd_sum = 0.0f64;
+    let mut active_bw_sum = 0.0f64;
 
     for entry in entries {
         if !is_valid_tick(entry.index.bid, entry.index.ask) {
@@ -303,15 +311,15 @@ where
         // provider BEFORE the weight-skip below, so floored-but-valid providers
         // still drag freshness down via the denominator.
         bw_sum += entry.base_weight;
-        wd_sum += entry.base_weight * decay;
 
         // Active provider: any with non-floored decay >= 10 percent, regardless
-        // of whether its weight contributes to TDWAP this cycle. Diagnostic
-        // only: `Index::confidence` is the freshness u8 0-255 (f x 100,
-        // flag bit 3), NOT this count — the old count semantics and the
-        // `confidence <= accepted` validate constraint were retired.
+        // of whether its weight contributes to TDWAP this cycle. PUBLISHED in
+        // `Index::confidence` bits 0..6 under `FLAG_CONF_ACTIVE` — it is the
+        // liveness axis the signed-quote gate reads (`accepted` counts merely
+        // NON-CORPSE legs, so it cannot see "10 accepted, 1 ticking").
         if decay >= 0.1 {
             active_count = active_count.saturating_add(1);
+            active_bw_sum += entry.base_weight;
         }
 
         if w <= 1e-9 {
@@ -359,15 +367,28 @@ where
     let half_spread_agg = (tdwap_ask - tdwap_bid).abs() * 0.5;
     let conf_interval = raw_ci.max(half_spread_agg);
 
-    // `confidence` is now a CONTINUOUS freshness float in [0,1], stored as a
-    // freshness u8 0-255 in the u8 (byte = round(f·100)). f≈1 ⇒ all
-    // providers fresh; falls as components decay. Independent of
-    // `accepted`/`rejected` (which stay raw COUNTS). The emitted Index sets
-    // FLAG_CONF_FRESHNESS so readers know byte36 is freshness percent, not the
-    // legacy active-provider count.
-    let conf_f64 = if bw_sum > 0.0 { (wd_sum / bw_sum).clamp(0.0, 1.0) } else { 0.0 };
-    let confidence = mitch::conf_to_u8(conf_f64);
-    let _ = active_count; // retained for potential diagnostics; no longer drives confidence
+    // `confidence` publishes the ACTIVE-provider measurement (flag
+    // FLAG_CONF_ACTIVE): bits 0..6 = `active_count` (legs genuinely ticking,
+    // decay >= 0.1), bit 7 = `fresh_weight_ok`. Independent of
+    // `accepted`/`rejected` (which stay raw COUNTS).
+    //
+    // bit 7 is the WEIGHT-AWARENESS companion to the count: `active_count` alone
+    // is weight-blind, so 2 ticking legs carrying 1% of the book would pass. It
+    // deliberately uses `active_bw_sum/bw_sum` (share of base weight held by
+    // ticking legs) and NOT the decay-weighted `wd_sum/bw_sum`: the latter falls
+    // as venues are added, so thresholding it re-creates the breadth inversion
+    // this whole gate exists to remove (it would reject BTC-USDC at 0.059 and
+    // ETH-USDC at 0.082 while admitting a single-leg feed). The active share does
+    // not dilute — a recently-ticked leg contributes its full base weight — so a
+    // healthy deep book sits near 1.0 and only genuinely dead weight pulls it
+    // down.
+    let fresh_weight_share = if bw_sum > 0.0 {
+        (active_bw_sum / bw_sum).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let fresh_weight_ok = fresh_weight_share >= crate::shard::FRESH_WEIGHT_SHARE_FLOOR;
+    let confidence = mitch::index::conf_pack_active(active_count, fresh_weight_ok);
 
     // Composite bid/ask resolution (operator ruling 2026-07-05 — NO order books,
     // trades only). Three cases:
@@ -410,13 +431,14 @@ where
         confidence,
         accepted,
         rejected,
-        // Signal that `confidence` is freshness u8 0-255 (byte/255), not a
-        // legacy active-provider count. Single-source bit in `nxr_sdk::shard`.
+        // Signal that `confidence` is the PACKED active-count byte (bits 0..6
+        // count, bit 7 fresh-weight-ok), not a legacy count and not the legacy
+        // freshness fraction. Single-source bit in `nxr_sdk::shard`.
         // FLAG_NO_BOOK when NO provider carried depth (oracle relays publish
         // price±conf without book sizes): honest absence marker so the
         // integrity/dq phantom-quote gates don't flag oracle tickers. A
         // healthy multi-provider CEX composite always sums nonzero depth.
-        flags: crate::shard::FLAG_CONF_FRESHNESS
+        flags: crate::shard::FLAG_CONF_ACTIVE
             | if total_bid_vol == 0 && total_ask_vol == 0 {
                 crate::shard::FLAG_NO_BOOK
             } else {
@@ -755,6 +777,46 @@ mod tests {
             && a.accepted == b.accepted
             && a.rejected == b.rejected
             && a.flags == b.flags
+    }
+
+    /// Bit 7 (`fresh_weight_ok`) must NOT dilute as venues are added.
+    ///
+    /// This is the invariant that killed the first draft of this gate: the old
+    /// `confidence` byte published `Σ base_weight·decay / Σ base_weight`, which
+    /// FALLS with breadth, so a 0.20 floor on it would have rejected our deepest
+    /// books (measured 0.059 BTC-USDC / 0.082 ETH-USDC) while admitting a
+    /// single-leg feed. Bit 7 uses the ACTIVE-weight share instead, so adding
+    /// fresh venues must never clear the bit.
+    #[test]
+    fn fresh_weight_bit_does_not_dilute_with_breadth() {
+        let t0 = Instant::now();
+        let mut prev_set = true;
+        for n in 1..=10usize {
+            let entries: Vec<(u16, ProviderEntry)> = (0..n)
+                .map(|i| {
+                    (
+                        i as u16 + 1,
+                        mk_entry(100.00, 100.02, 1_000, 1_100, 1.0, t0),
+                    )
+                })
+                .collect();
+            let out = compute_vwap_at(1, entries.iter().map(|(_, e)| e), 30.0, t0)
+                .expect("composite");
+            assert_eq!(
+                out.flags & crate::shard::FLAG_CONF_ACTIVE,
+                crate::shard::FLAG_CONF_ACTIVE,
+                "n={n}: must publish the ACTIVE encoding"
+            );
+            assert_eq!(
+                mitch::index::conf_active_count(out.confidence) as usize,
+                n,
+                "n={n}: every leg is fresh, so all must count as ticking"
+            );
+            let ok = mitch::index::conf_fresh_weight_ok(out.confidence);
+            assert!(ok, "n={n}: all-fresh book must set fresh_weight_ok");
+            assert!(prev_set && ok, "n={n}: bit 7 regressed as breadth grew");
+            prev_set = ok;
+        }
     }
 
     #[test]

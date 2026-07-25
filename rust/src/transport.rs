@@ -137,6 +137,28 @@ fn build_rx_socket(bind_addr: SocketAddr, label: &str) -> Result<Socket> {
     if let Err(e) = raw.set_recv_buffer_size(UDP_RECV_BUFFER_BYTES) {
         warn!(%e, requested = UDP_RECV_BUFFER_BYTES, label, "SO_RCVBUF tuning failed; kernel default used");
     }
+    // VERIFY THE GRANT, do not assume it. `setsockopt(SO_RCVBUF)` SUCCEEDS while
+    // silently clamping to `net.core.rmem_max`, so the request above looks
+    // configured and is not — measured 2026-07-25 on the nxrates node, where
+    // `rmem_max` was the untouched 212992 default and the 6 MiB ask was granted
+    // 208 KiB (~1.25 s of the 221 frame/s feed, counting skb truesize ~768 B per
+    // 56 B datagram, NOT payload bytes). A silent clamp is how that hid; this
+    // read-back is what makes it visible.
+    //
+    // Linux reports back DOUBLE what it granted (the kernel's own bookkeeping
+    // overhead is included), so compare against 2x the request before warning.
+    match raw.recv_buffer_size() {
+        Ok(got) if got < UDP_RECV_BUFFER_BYTES => warn!(
+            granted = got,
+            requested = UDP_RECV_BUFFER_BYTES,
+            label,
+            "SO_RCVBUF SILENTLY CLAMPED by net.core.rmem_max — the ingest queue holds far \
+             less than intended; raise net.core.rmem_max (persisted, not sysctl -w) to at \
+             least {UDP_RECV_BUFFER_BYTES}"
+        ),
+        Ok(got) => info!(granted = got, requested = UDP_RECV_BUFFER_BYTES, label, "SO_RCVBUF granted"),
+        Err(e) => warn!(%e, label, "SO_RCVBUF read-back failed; grant unverified"),
+    }
     raw.bind(&bind_addr.into())?;
     Ok(raw)
 }

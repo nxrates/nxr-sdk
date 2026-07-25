@@ -165,7 +165,7 @@ pub struct SignedQuotesYml {
     /// append-only `feedIds[]` (idx never remaps); keeper cross-checks
     /// `feedIds(idx) == feed_id` at startup.
     pub feeds: Vec<SignedFeedYml>,
-    /// LIGHTWEIGHT SIGNER MODE (opt-in). When `true`, the aggregator restricts
+    /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts
     /// its ticker universe to ONLY the symbols this signer must sign — every
     /// `feeds[].symbol` and `feeds[].quote_via` — instead of the full config
     /// universe (2000+ tickers). The UDP registry gate then drops all other
@@ -175,6 +175,23 @@ pub struct SignedQuotesYml {
     /// the ticker SET differs. `false` (default) keeps full-replica behavior.
     #[serde(default)]
     pub sign_only: bool,
+    /// LIGHT NODE retention, in whole days of sealed shards to keep BESIDES
+    /// today's (so `1` = yesterday + today = 2 files per ticker). Honored ONLY
+    /// when `sign_only` is true: a full node's retention is the API contract
+    /// (365 d `/v1/bars`) and is not this knob.
+    ///
+    /// A light node signs real-time prices and needs history for exactly one
+    /// thing: the Parkinson sigma window (`sigma_lookback_bars` x 30 m = 24 h).
+    /// The floor of 1 is therefore load-bearing for arming, not arbitrary.
+    /// Measured 2026-07-25: with no cap at all a light node wrote 1.3 GiB in
+    /// 14 h and grew forever.
+    #[serde(default = "default_light_retention_days")]
+    pub retention_days: u16,
+}
+
+/// 1 sealed day + today = the 2 shards the 24 h sigma window can need.
+fn default_light_retention_days() -> u16 {
+    1
 }
 
 impl SignedQuotesYml {
@@ -1077,7 +1094,7 @@ mod tests {
         );
     }
 
-    /// Lightweight-signer mode: opt-in flag + the exact ticker subset it scopes
+    /// Light-node mode: opt-in flag + the exact ticker subset it scopes
     /// the aggregator to (every feed symbol + every quote_via bridge leg).
     #[test]
     fn sign_only_defaults_false_and_signed_symbols_covers_bridge_legs() {

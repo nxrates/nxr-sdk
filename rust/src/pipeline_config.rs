@@ -165,6 +165,32 @@ pub struct SignedQuotesYml {
     /// append-only `feedIds[]` (idx never remaps); keeper cross-checks
     /// `feedIds(idx) == feed_id` at startup.
     pub feeds: Vec<SignedFeedYml>,
+    /// LIGHTWEIGHT SIGNER MODE (opt-in). When `true`, the aggregator restricts
+    /// its ticker universe to ONLY the symbols this signer must sign — every
+    /// `feeds[].symbol` and `feeds[].quote_via` — instead of the full config
+    /// universe (2000+ tickers). The UDP registry gate then drops all other
+    /// frames, so the emit cycle + s10/renko/σ producers run for ~30 tickers,
+    /// not thousands (~50-100x less CPU). σ for the signed symbols is
+    /// bit-identical to the full-universe path (same per-ticker pipeline); only
+    /// the ticker SET differs. `false` (default) keeps full-replica behavior.
+    #[serde(default)]
+    pub sign_only: bool,
+}
+
+impl SignedQuotesYml {
+    /// The exact ticker-symbol set this signer must aggregate to sign: every
+    /// feed symbol plus every bridge (`quote_via`) leg, uppercased/deduped.
+    /// This is the universe the `sign_only` mode restricts `symbol_map` to.
+    pub fn signed_symbols(&self) -> std::collections::BTreeSet<String> {
+        let mut s = std::collections::BTreeSet::new();
+        for f in &self.feeds {
+            s.insert(f.symbol.to_uppercase());
+            if let Some(v) = &f.quote_via {
+                s.insert(v.to_uppercase());
+            }
+        }
+        s
+    }
 }
 
 /// One countersigning replica. `signer` is the expected ECDSA address recovered
@@ -1005,6 +1031,42 @@ mod tests {
             serde_yml::from_str::<SignedQuotesYml>(legacy).is_err(),
             "legacy seconds/unpinned-peer config must fail closed"
         );
+    }
+
+    /// Lightweight-signer mode: opt-in flag + the exact ticker subset it scopes
+    /// the aggregator to (every feed symbol + every quote_via bridge leg).
+    #[test]
+    fn sign_only_defaults_false_and_signed_symbols_covers_bridge_legs() {
+        let sq: SignedQuotesYml = serde_yml::from_str(
+            "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 11155111\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
+             min_composite_freshness_bps: 500\nquorum: 2\npeers:\n\
+               - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
+             feeds:\n\
+               - { idx: 1, symbol: 'USDT-USD', cosign_tolerance_bps: 2.0 }\n\
+               - { idx: 3, symbol: 'usds-usdt', quote_via: 'USDT-USDC', cosign_tolerance_bps: 2.0 }\n\
+               - { idx: 17, symbol: 'ETH-USDC', cosign_tolerance_bps: 5.0 }\n",
+        )
+        .expect("parse sign_only-absent schema");
+        // Opt-in: absent ⇒ false, so full-replica behavior is untouched by default.
+        assert!(!sq.sign_only);
+        // signed_symbols() = every feed symbol + every quote_via leg, uppercased + deduped.
+        let s = sq.signed_symbols();
+        assert!(s.contains("USDT-USD"));
+        assert!(s.contains("USDS-USDT"), "case-normalized feed symbol");
+        assert!(s.contains("USDT-USDC"), "quote_via bridge leg MUST be scoped in");
+        assert!(s.contains("ETH-USDC"));
+        assert_eq!(s.len(), 4, "USDT-USD + USDS-USDT + USDT-USDC + ETH-USDC, deduped");
+
+        let on: SignedQuotesYml = serde_yml::from_str(
+            "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 2\n\
+             min_composite_freshness_bps: 9000\nquorum: 2\nsign_only: true\npeers:\n\
+               - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
+             feeds:\n  - { idx: 0, symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+        )
+        .expect("parse explicit sign_only:true");
+        assert!(on.sign_only);
     }
 
     /// PART B4 (2026-06-09): the per-pair forced-k escape hatch. The calibrator

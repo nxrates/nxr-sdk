@@ -479,7 +479,27 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
         // shard chokepoint (see `series_alias::series_canonical_ticker_id`).
 
         // Resolve remaining as base. Confident match or skip.
-        if let Some(base) = RESOLVER.find(&remaining, base_threshold, class_filter) {
+        //
+        // CR-then-FX (2026-07-25): the CR-only filter above is load-bearing
+        // against EQ mis-hits (`SUI` → "Sun Communities", `PEPE` → "pepsico" at
+        // 0.94) and must NOT be widened to `None`. But CR-ONLY made every
+        // FX-base × crypto-quote pair unresolvable — `EUR/USD` resolved while
+        // `EUR/USDT` did not — so 25 configured `cross_pairs` (AED, AUD, BRL,
+        // CAD, EUR, GBP, KZT, PLN, SGD, TRY, UAH against USDT/USDC/BTC/ETH) fell
+        // through to `resolve_ticker_id`'s FNV fallback and were sharded under
+        // PHANTOM ids whose decoded class/instrument-type is garbage
+        // (`EUR/USDT` → base_class=CB, quote_class=PM, itype=DIGI — published
+        // verbatim by `/v1/tickers/detail`). Fiat IS a legitimate base against a
+        // crypto quote, so fall back to FX — never to EQ, which is the mis-hit
+        // class the filter exists to exclude.
+        let base_match = RESOLVER
+            .find(&remaining, base_threshold, class_filter)
+            .or_else(|| {
+                class_filter
+                    .filter(|_| cr_quote)
+                    .and_then(|_| RESOLVER.find(&remaining, base_threshold, Some(AssetClass::FX)))
+            });
+        if let Some(base) = base_match {
             let tid = TickerId::new(instrument_type, base.asset.class, base.asset.class_id, quote.class, quote.class_id, 0)?;
             let name = format!("{}/{}", base.asset.name, quote.name);
             steps.push(format!("Resolved base asset: {} (confidence: {:.2})", base.asset.name, base.confidence));

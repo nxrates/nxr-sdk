@@ -119,6 +119,26 @@ pub struct ProviderEntry {
     /// EMA of inter-arrival time in seconds (alpha = 0.1).
     /// Initialized to 5 s - crypto adapts down quickly, FX stays near actual cadence.
     pub ema_ipi_secs: f64,
+    /// `true` when the latest value came from [`Self::inject_at`] (a
+    /// triangulator injection rule) rather than from a provider frame.
+    ///
+    /// Injected legs are DERIVED, not observed: `inject_at` stamps
+    /// `last_update = now` every cycle the product moves, so before this flag
+    /// existed an injected leg was indistinguishable from a venue ticking at
+    /// 10 Hz. That is how a composite whose real venues were all dead still
+    /// reported `active_count > 0` and `fresh_weight_ok = true` — satisfying
+    /// both liveness axes of the signed-quote gate on legs that never ticked
+    /// (audit 2026-07-25; same class as the 11 h `provider_status: dead` /
+    /// `status: fresh` incident).
+    ///
+    /// Injected legs still contribute their PRICE to the blend (the USDC→USDT
+    /// bridge is a deliberate product feature) and still count in the
+    /// fresh-weight DENOMINATOR, but they are excluded from `active_count` and
+    /// from the fresh-weight NUMERATOR. A composite of entirely-injected legs
+    /// therefore scores `active_count = 0` and `fresh_weight_share = 0` and
+    /// fails both axes — which is the correct answer to "is there a live
+    /// provider observation behind this mark".
+    pub injected: bool,
 }
 
 impl ProviderEntry {
@@ -135,6 +155,7 @@ impl ProviderEntry {
             base_weight,
             last_update: now,
             ema_ipi_secs: 5.0,
+            injected: false,
         }
     }
 
@@ -155,6 +176,8 @@ impl ProviderEntry {
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
         self.last_update = now;
         self.index = index;
+        // A real provider frame supersedes any earlier injected value.
+        self.injected = false;
     }
 
     /// Directly set prices for injection/triangulation.
@@ -175,6 +198,7 @@ impl ProviderEntry {
         self.index.ask = ask;
         self.index.vbid = vbid;
         self.index.vask = vask;
+        self.injected = true;
     }
 
     /// Adaptive exponential decay.
@@ -304,7 +328,22 @@ where
         }
         let half_life = (IPI_K * entry.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
         let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
-        let decay_floored = decay.max(0.001);
+        // The 0.001 floor exists so a briefly-quiet venue still contributes
+        // rather than snapping out of the blend. But it also cleared the
+        // `w <= 1e-9` cut for ANY age below corpse eviction, so a set of legs
+        // ALL past the stale threshold still produced `w_sum > 0` and was
+        // emitted as a full record — broadcast on WS and persisted with a FRESH
+        // header mts. Proven 2026-07-25: a single 59 s-old quote at
+        // `stale_threshold = 10 s` emitted, the only signal being
+        // `confidence == 0`, which is undecodable on any DTO that drops `flags`.
+        // Withhold the floor once a leg is past the stale threshold: it may
+        // still contribute if others carry the blend, but it can no longer
+        // manufacture weight on its own.
+        let decay_floored = if age > stale_threshold_secs {
+            decay
+        } else {
+            decay.max(0.001)
+        };
         let w = entry.base_weight * decay_floored;
 
         // Freshness numerator/denominator: accumulate for every valid-tick
@@ -317,7 +356,14 @@ where
         // `Index::confidence` bits 0..6 under `FLAG_CONF_ACTIVE` — it is the
         // liveness axis the signed-quote gate reads (`accepted` counts merely
         // NON-CORPSE legs, so it cannot see "10 accepted, 1 ticking").
-        if decay >= 0.1 {
+        //
+        // `!entry.injected` is what makes this axis mean OBSERVED rather than
+        // merely RECENT: `inject_at` refreshes `last_update` every cycle the
+        // triangulated product moves, so an injected leg always scores
+        // `decay ≈ 1` and used to be counted here. See `ProviderEntry::injected`.
+        // Note the asymmetry with `bw_sum` above (denominator, unconditional):
+        // an injected leg dilutes the fresh-weight share instead of inflating it.
+        if decay >= 0.1 && !entry.injected {
             active_count = active_count.saturating_add(1);
             active_bw_sum += entry.base_weight;
         }
@@ -498,6 +544,12 @@ struct ProviderFingerprint {
     ask_bits: u64,
     vbid: u32,
     vask: u32,
+    /// Part of the fingerprint because it changes `confidence` (active_count +
+    /// fresh-weight bit) WITHOUT changing any price field: a real frame whose
+    /// bid/ask happen to equal the injected value flips `injected` false and
+    /// must force a recompute, else the throttle replays a composite that
+    /// understates liveness.
+    injected: bool,
 }
 
 impl ProviderFingerprint {
@@ -509,6 +561,7 @@ impl ProviderFingerprint {
             ask_bits: e.index.ask.to_bits(),
             vbid: e.index.vbid,
             vask: e.index.vask,
+            injected: e.injected,
         }
     }
 }
@@ -697,6 +750,120 @@ pub fn default_refresh_interval_ms(stale_threshold_secs: f64, aggregation_interv
     let min_refresh_ms = (aggregation_interval_ms as f64) * 3.0;
     let clamped = hl_over_5_ms.max(min_refresh_ms);
     clamped.min(u64::MAX as f64) as u64
+}
+
+#[cfg(test)]
+mod injected_leg_liveness_tests {
+    use super::*;
+
+    fn leg(mid: f64) -> Index {
+        let half = mid * 0.0001;
+        Index::new(
+            448509915440349184,
+            mid - half,
+            mid + half,
+            16,
+            1_000,
+            1_000,
+            10,
+            1,
+            1,
+            0,
+        )
+    }
+
+    /// An entry whose latest value came from a triangulator INJECTION rule.
+    /// `inject_at` is what production calls (`triangulator::apply_injections`).
+    fn injected_entry(mid: f64, now: Instant) -> ProviderEntry {
+        let mut e = ProviderEntry::new_at(leg(mid), 1.0, now);
+        let half = mid * 0.0001;
+        e.inject_at(mid - half, mid + half, 0, 0, now);
+        e
+    }
+
+    /// THE regression. Before the fix, `inject_at` stamped `last_update = now`
+    /// every cycle the triangulated product moved, so injected legs scored
+    /// `decay ≈ 1` and were counted in BOTH liveness axes. A composite backed
+    /// only by injections therefore published `active_count = 2` and
+    /// `fresh_weight_ok = true` — satisfying breadth AND liveness on legs that
+    /// never ticked, which is what a signed mark is gated on.
+    #[test]
+    fn composite_of_only_injected_legs_fails_both_liveness_axes() {
+        let now = Instant::now();
+        let entries = [injected_entry(75.0, now), injected_entry(75.1, now)];
+
+        let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, now)
+            .expect("injected legs still produce a PRICE — only liveness is withheld");
+
+        assert_eq!(
+            mitch::index::conf_active_count(snap.confidence),
+            0,
+            "injected legs must not count as ticking"
+        );
+        assert!(
+            !mitch::index::conf_fresh_weight_ok(snap.confidence),
+            "fresh-weight numerator must exclude injected legs (bit 7 clear)"
+        );
+        // signed.rs gates on `active >= MIN_ACTIVE_PROVIDERS` (2).
+        assert!(
+            mitch::index::conf_active_count(snap.confidence) < 2,
+            "must fail the signed-quote breadth gate"
+        );
+        // The price is still blended (the USDC->USDT bridge is a real feature),
+        // and `accepted` still counts the legs as non-corpse — the two axes are
+        // deliberately independent.
+        assert!(snap.mid() > 74.0 && snap.mid() < 76.0);
+        assert_eq!(snap.accepted, 2);
+    }
+
+    /// One real provider alongside an injected leg: the real one counts, the
+    /// injected one does not. Pins that the fix is a numerator change, not a
+    /// blanket rejection.
+    #[test]
+    fn injected_leg_does_not_inflate_a_real_provider_count() {
+        let now = Instant::now();
+        let entries = [
+            ProviderEntry::new_at(leg(75.0), 1.0, now),
+            injected_entry(75.1, now),
+        ];
+        let snap =
+            compute_vwap_at(448509915440349184, entries.iter(), 10.0, now).expect("has a price");
+        assert_eq!(
+            mitch::index::conf_active_count(snap.confidence),
+            1,
+            "only the real provider ticks"
+        );
+        // active_bw_sum/bw_sum = 1.0/2.0 = 0.5 >= FRESH_WEIGHT_SHARE_FLOOR (0.20)
+        assert!(mitch::index::conf_fresh_weight_ok(snap.confidence));
+        assert!(
+            mitch::index::conf_active_count(snap.confidence) < 2,
+            "1 ticking leg still fails the signed breadth gate"
+        );
+    }
+
+    /// A real frame supersedes an injected value even when the prices are
+    /// bit-identical — the fingerprint carries `injected`, so the throttle
+    /// cannot replay a composite that understates liveness.
+    #[test]
+    fn real_frame_clears_injected_and_is_not_throttled_away() {
+        let now = Instant::now();
+        let mut e = injected_entry(75.0, now);
+        assert!(e.injected);
+        let before = ProviderFingerprint::from_entry(7, &e);
+
+        // Same bid/ask/vbid/vask as the injected value: ONLY `injected` differs.
+        let mut same = leg(75.0);
+        same.vbid = 0;
+        same.vask = 0;
+        e.update_at(same, now);
+
+        assert!(!e.injected, "a provider frame supersedes the injection");
+        assert_ne!(
+            before,
+            ProviderFingerprint::from_entry(7, &e),
+            "injected->real must break the fingerprint or the throttle replays stale liveness"
+        );
+    }
 }
 
 #[cfg(test)]

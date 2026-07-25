@@ -1,10 +1,17 @@
 //! Canonical per-bin volatility estimator — Rogers-Satchell over OHLC.
 //!
-//! ONE kernel, shared by every σ producer (offline `.vol` builder, the live
-//! [`crate::vol::LiveVolRing`], and the synth OHLC reconstruction). The ratified
-//! decision (2026-06): the canonical 30-min vol-bin σ is the Rogers-Satchell
-//! (1991) drift-robust range estimator computed over s10-resampled OHLC, with
-//! `offline == live` byte-for-byte.
+//! ONE kernel for the 30-min vol-bin σ, shared by the offline `.vol` builder,
+//! the live [`crate::vol::LiveVolRing`], and the synth OHLC reconstruction. The
+//! ratified decision (2026-06): the canonical 30-min vol-bin σ is the
+//! Rogers-Satchell (1991) drift-robust range estimator computed over
+//! s10-resampled OHLC, with `offline == live` byte-for-byte.
+//!
+//! ⚠ NOT every σ producer in the tree. `core/src/server/signed.rs` computes the
+//! co-signed-quote σ with its OWN private 48-bar Parkinson estimator, so a
+//! signed mark is gated on a σ that no `.vol` file or renko brick uses. That
+//! divergence is un-reconciled and is with the owner (audit 2026-07-25); this
+//! sentence used to claim "every σ producer", which is what would mislead the
+//! next reader into consolidating a money-path estimator as a cleanup.
 //!
 //! Per 30-min vol-bin OHLC (O = first s10.open, H = max s10.high,
 //! L = min s10.low, C = last s10.close, on the TDWAP mid):

@@ -103,8 +103,21 @@ pub fn try_resolve_ticker_id(symbol: &str) -> Option<u64> {
 pub fn resolve_ticker_id(symbol: &str) -> u64 {
     try_resolve_ticker_id(symbol).unwrap_or_else(|| {
         warn!(symbol, "mitch resolver failed, using FNV fallback");
-        fnv1a_64(symbol.as_bytes())
+        phantom_ticker_id(symbol)
     })
+}
+
+/// The FNV-1a id [`resolve_ticker_id`] falls back to when a symbol has no MITCH
+/// id — a **phantom**: unique (so the ticker-id collision gate is blind to it),
+/// but not a bit-packed `TickerId`, so anything decoding its class /
+/// instrument-type bits reads hash noise.
+///
+/// Exposed so the shard migration (`series-factory/src/bin/migrate_phantom_ids`)
+/// and the core boot check can compute a symbol's OLD directory name from ONE
+/// definition. Never call this to mint an id for new data.
+#[inline]
+pub fn phantom_ticker_id(symbol: &str) -> u64 {
+    fnv1a_64(symbol.as_bytes())
 }
 
 #[inline]

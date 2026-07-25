@@ -243,6 +243,20 @@ pub struct SignedFeedYml {
     /// boot (signed.rs `validate_feed_max_age_ms`).
     #[serde(default)]
     pub max_age_ms: Option<u64>,
+    /// DECLARED single-source allowance: this feed may be signed while only ONE
+    /// provider leg is live (`active_count == 1`), instead of the default floor of
+    /// `MIN_ACTIVE_PROVIDERS` (2).
+    ///
+    /// DECLARED, never inferred. The whole point is that a feed we have decided is
+    /// legitimately single-source passes at 1, while a feed that silently DEGRADES
+    /// from 2 legs to 1 still fails closed. Runtime leg counts must never grant this
+    /// allowance to themselves.
+    ///
+    /// PEGGED-ONLY, enforced structurally at boot (`signed.rs` refuses a
+    /// `single_source` feed whose symbol is not in the pegged class) — never by
+    /// convention. See that validator for the safety argument.
+    #[serde(default)]
+    pub single_source: bool,
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the

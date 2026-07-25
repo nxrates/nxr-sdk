@@ -37,10 +37,13 @@ use tracing::{error, info, warn};
 const DEFAULT_PHYSICAL_FRACTION: f64 = 0.60;
 
 /// Fraction of currently-available RAM we will claim. The rest stays for
-/// the user's foreground apps and the kernel's file cache. 0.75 of a 3 GiB
-/// free pool = 2.25 GiB cap (much tighter than the 60% physical default
-/// would give, and correctly reflective of actual pressure).
-const DEFAULT_AVAILABLE_FRACTION: f64 = 0.75;
+/// the user's foreground apps and — on the prod node — the kernel's file cache,
+/// which is what the archive core's 383G of mmap'd `.idx` is actually served
+/// from. Tightened 0.75 -> 0.60 on 2026-07-25: at 0.75 an offline tool bids for
+/// 3/4 of a pool the archive core needs for page cache, so the tool's anon
+/// growth silently converts the core's reads into disk faults (incident: node
+/// load 337, kubelet NodeNotReady flap at 13:10:35Z).
+const DEFAULT_AVAILABLE_FRACTION: f64 = 0.60;
 
 /// Absolute floor on the cap. Small enough that even a 4 GiB laptop with
 /// little free RAM can still run the binaries for a smoke test; below this
@@ -188,14 +191,22 @@ pub(crate) fn cgroup_limit_bytes() -> Option<u64> {
 /// Resolve the cap in bytes without applying it. Exposed so callers can log
 /// or validate before (or instead of) calling `apply_safe_cap`.
 pub fn default_cap_bytes() -> u64 {
-    if let Ok(s) = std::env::var("NXR_MAX_MEM_GB") {
-        if let Ok(gb) = s.trim().parse::<u64>() {
-            if gb > 0 {
-                return gb * GIB;
+    // Operator request: an UPPER BOUND, never a promise. It used to `return`
+    // here, bypassing every clamp below — which is how nxr-calibrate armed a
+    // 13 GiB cap while its own next log field read `available_gib=4`, grew to
+    // 8.9 GiB RSS, evicted the archive core's page cache and drove the node to
+    // load 337 / NodeNotReady (2026-07-25). The env var may only ever LOWER the
+    // computed cap; if it asks for more than the host or cgroup can safely give,
+    // it is clamped and we say so loudly.
+    let requested = std::env::var("NXR_MAX_MEM_GB").ok().and_then(|s| {
+        match s.trim().parse::<u64>() {
+            Ok(gb) if gb > 0 => Some(gb * GIB),
+            _ => {
+                warn!("NXR_MAX_MEM_GB={:?} is not a positive integer, ignoring", s);
+                None
             }
         }
-        warn!("NXR_MAX_MEM_GB={:?} is not a positive integer, ignoring", s);
-    }
+    });
     let physical_cap = physical_memory_bytes()
         .map(|total| (total as f64 * DEFAULT_PHYSICAL_FRACTION) as u64)
         .unwrap_or(FALLBACK_CAP_BYTES);
@@ -214,6 +225,18 @@ pub fn default_cap_bytes() -> u64 {
     }
     if let Some(c) = cgroup_cap {
         cap = cap.min(c);
+    }
+    if let Some(r) = requested {
+        if r > cap {
+            warn!(
+                requested_gib = r / GIB,
+                clamped_to_gib = cap / GIB,
+                available_gib = available_memory_bytes().unwrap_or(0) / GIB,
+                "NXR_MAX_MEM_GB asks for more than this host/cgroup can safely give \
+                 (page cache the archive core mmaps from is NOT spare memory) — CLAMPED"
+            );
+        }
+        cap = cap.min(r);
     }
     cap.max(MIN_CAP_BYTES)
 }

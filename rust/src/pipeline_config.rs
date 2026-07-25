@@ -381,6 +381,32 @@ impl ConfigHint {
 }
 
 impl PipelineYml {
+    /// Every symbol the config declares directly: `cexs.cross_pairs` plus every
+    /// `oracles.providers.<p>.symbols` key, uppercased. Does NOT include derived
+    /// auto-cross outputs (those come from `build_auto_cross_rules`, whose owner
+    /// is the aggregator) nor the `NXR_SYMBOLS` env base list.
+    ///
+    /// SINGLE SOURCE for "what symbols does this deployment declare". Both
+    /// `core`'s `register_config_symbols` (REST/WS resolution + the UDP registry
+    /// gate) and `nxr-calibrate`'s roster read it, so the set a ticker must be in
+    /// to be *served* can never drift from the set it must be in to be
+    /// *calibrated*. That drift is exactly what hid 17 of the 23 DEX pool assets
+    /// from calibration: the calibrator keyed its roster off `pair_volumes` (CEX
+    /// volume), so Pyth-only stables/metals/FX — which have full tick history and
+    /// need no volume for the fit — were never candidates (found 2026-07-25).
+    pub fn configured_symbols(&self) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for sym in &self.cexs.cross_pairs {
+            out.insert(sym.to_uppercase());
+        }
+        for prov in self.oracles.providers.values() {
+            for sym in prov.symbols.keys() {
+                out.insert(sym.to_uppercase());
+            }
+        }
+        out
+    }
+
     /// Read and parse a pipeline-yaml file from disk. Single source of truth
     /// for the 6+ `serde_yaml::from_str(&fs::read_to_string(p)?)?` callsites
     /// in `series-factory/src/bin/*`. Uses `serde_yml` (the maintained fork);

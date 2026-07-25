@@ -38,9 +38,9 @@ const DEFAULT_PHYSICAL_FRACTION: f64 = 0.60;
 
 /// Fraction of currently-available RAM we will claim. The rest stays for
 /// the user's foreground apps and — on the prod node — the kernel's file cache,
-/// which is what the archive core's 383G of mmap'd `.idx` is actually served
+/// which is what the full node's 383G of mmap'd `.idx` is actually served
 /// from. Tightened 0.75 -> 0.60 on 2026-07-25: at 0.75 an offline tool bids for
-/// 3/4 of a pool the archive core needs for page cache, so the tool's anon
+/// 3/4 of a pool the full node needs for page cache, so the tool's anon
 /// growth silently converts the core's reads into disk faults (incident: node
 /// load 337, kubelet NodeNotReady flap at 13:10:35Z).
 const DEFAULT_AVAILABLE_FRACTION: f64 = 0.60;
@@ -194,7 +194,7 @@ pub fn default_cap_bytes() -> u64 {
     // Operator request: an UPPER BOUND, never a promise. It used to `return`
     // here, bypassing every clamp below — which is how nxr-calibrate armed a
     // 13 GiB cap while its own next log field read `available_gib=4`, grew to
-    // 8.9 GiB RSS, evicted the archive core's page cache and drove the node to
+    // 8.9 GiB RSS, evicted the full node's page cache and drove the node to
     // load 337 / NodeNotReady (2026-07-25). The env var may only ever LOWER the
     // computed cap; if it asks for more than the host or cgroup can safely give,
     // it is clamped and we say so loudly.
@@ -233,7 +233,7 @@ pub fn default_cap_bytes() -> u64 {
                 clamped_to_gib = cap / GIB,
                 available_gib = available_memory_bytes().unwrap_or(0) / GIB,
                 "NXR_MAX_MEM_GB asks for more than this host/cgroup can safely give \
-                 (page cache the archive core mmaps from is NOT spare memory) — CLAMPED"
+                 (page cache the full node mmaps from is NOT spare memory) — CLAMPED"
             );
         }
         cap = cap.min(r);

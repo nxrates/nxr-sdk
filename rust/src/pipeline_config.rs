@@ -471,6 +471,22 @@ pub struct ExchangeYml {
     /// after the existing supported-set intersection.
     #[serde(default)]
     pub exclude_symbols: Vec<String>,
+    /// Per-provider inbound-silence watchdog threshold, seconds. Applied
+    /// PER SUBSCRIBED SYMBOL: a pair whose ticker has been silent this long,
+    /// while the session keeps streaming other pairs, has lost its subscription
+    /// venue-side and is silently shipping stale marks rather than showing an
+    /// outage (kraken, documented 2026-07-22 in
+    /// `ops/k0s/services/nxr-config-configmap.yaml:1278-1284`, then again
+    /// 2026-07-25: three stablecoin legs frozen at the subscribe instant for
+    /// 10.7 h with zero log lines). Enforced in
+    /// `crypto/src/client.rs::connect_and_process`: some symbols dark ⇒
+    /// unsubscribe+resubscribe those pairs only; all dark ⇒ reconnect with
+    /// backoff. `None` ⇒ `nxr_crypto::exchange::DEFAULT_STALE_TIMEOUT_MS`, `0`
+    /// disables. Raise for genuinely low-volume venues whose top-of-book can
+    /// legitimately sit unchanged for minutes; never set below the venue's own
+    /// `heartbeat_interval_ms`, or the watchdog will thrash.
+    #[serde(default)]
+    pub stale_timeout_s: Option<u64>,
 }
 
 /// Per-exchange historical-archive URL prefixes. Each field is the URL stem

@@ -42,10 +42,30 @@ pub fn now_mts() -> u64 {
 
 // ---- Quality gate ----
 
-/// Basic tick sanity check: positive prices, ask >= bid.
+/// Absurd-spread ceiling for [`is_valid_tick`], in basis points.
+///
+/// Deliberately loose (50%) — this is a CORRUPTION guard, not a market filter.
+/// The composite's real spread policy is `mitch::Index::reject_reason`'s
+/// 2000 bps cap; anything wider than 5000 bps at the single-tick level is a
+/// parse fault (wrong field read, mismatched sides of two different books, a
+/// price and a quantity swapped), never a quote. Before this, `1e-12 / 1e6`
+/// passed the gate and became a provider's mid.
+pub const MAX_TICK_SPREAD_BPS: f64 = 5_000.0;
+
+/// Basic tick sanity check: finite, positive prices, uncrossed, and not
+/// absurdly wide.
+///
+/// `bid == ask` is ACCEPTED and must stay accepted: trades-only venues and the
+/// oracle relays publish `bid == ask == px` and are marked with
+/// `FLAG_NO_BOOK` downstream (see `nxr_sdk::shard::FLAG_NO_BOOK`). Rejecting a
+/// locked book here would dark every one of them.
 #[inline]
 pub fn is_valid_tick(bid: f64, ask: f64) -> bool {
-    bid > 0.0 && ask > 0.0 && ask >= bid
+    if !(bid.is_finite() && ask.is_finite() && bid > 0.0 && ask > 0.0 && ask >= bid) {
+        return false;
+    }
+    let mid = (bid + ask) * 0.5;
+    (ask - bid) / mid * 10_000.0 <= MAX_TICK_SPREAD_BPS
 }
 
 // ---- Outlier detection ----
@@ -136,6 +156,22 @@ impl TickAccumulator {
     }
 
     /// Buffer a single raw tick's values (price = last-write-wins).
+    ///
+    /// ## `vbid` / `vask` unit contract — QUOTE NOTIONAL (changed 2026-07-26)
+    ///
+    /// Callers MUST pass top-of-book size as `round(price * quantity)`, not the
+    /// base-asset quantity. `Index.vbid/vask` are `u32` and the 40 B wire record
+    /// is frozen, so a base-quantity cast TRUNCATED toward zero: coinbase's
+    /// `0.28772224` BTC became `0` while a sub-cent memecoin's `4.1e6` tokens
+    /// stayed `4_100_000`. The field was therefore not comparable across assets
+    /// and not summable — structurally broken, not merely scaled.
+    ///
+    /// Prices are unaffected either way: TDWAP weights providers by
+    /// `base_weight * decay` and never by size (`crate::tdwap`), so no mark,
+    /// `ci`, or signed quote moves with this. Producer of record is
+    /// `crypto/src/client.rs::ingest_tick`; client-facing semantics are in
+    /// `docs/api-v1.md#volume-units-vbid--vask`, which also states that history
+    /// spanning the deploy carries both conventions with no per-row marker.
     #[inline]
     pub fn ingest(&mut self, bid: f64, ask: f64, vbid: u32, vask: u32) {
         self.last_bid = bid;

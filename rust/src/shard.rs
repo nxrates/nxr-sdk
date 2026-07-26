@@ -176,7 +176,7 @@ pub const FLAG_NO_BOOK: u8 = 0b0010_0000;
 /// distinguish quiet-market fill from real bars: render as doji/continuation,
 /// never drop the candle (dropping is what produced the 2026-07-07 staircase
 /// charts). Set by `bar_builder::flat_bar`; certifiers exempt flagged bars
-/// from microstructure gates. (Fable DQ audit GATE-3, 2026-07-07.)
+/// from microstructure gates. (Independent DQ audit GATE-3, 2026-07-07.)
 pub const FLAG_S10_FLAT_FILL: u8 = 0b0100_0000;
 
 /// Bit 7 (Bar flag space): this bar is a COMPOSED cross — derived on read from

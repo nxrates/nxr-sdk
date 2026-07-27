@@ -257,6 +257,12 @@ pub struct SignedFeedYml {
     /// convention. See that validator for the safety argument.
     #[serde(default)]
     pub single_source: bool,
+    /// When true, the signed mark is `1 / mid(symbol)` (σ/CI unchanged: relative
+    /// bps vol is invert-invariant to first order). Used for Pyth Lazer FX that
+    /// lands as `USD/X` while on-chain token marks need `X/USD` (QCAD←CAD/USD).
+    /// Mutually exclusive with `quote_via` (compose then invert is not defined).
+    #[serde(default)]
+    pub invert: bool,
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the

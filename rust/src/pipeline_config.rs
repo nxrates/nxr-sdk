@@ -263,6 +263,18 @@ pub struct SignedFeedYml {
     /// Mutually exclusive with `quote_via` (compose then invert is not defined).
     #[serde(default)]
     pub invert: bool,
+    /// When true, a failed `own_view` omits this feed from the signed blob instead
+    /// of 503ing the whole quote. Required (non-optional) feeds still fail closed.
+    /// Cosign accepts an ordered subsequence that includes every required feed.
+    /// Use for newly armed assets (FX) so a dark leg cannot darken stables.
+    #[serde(default)]
+    pub optional: bool,
+    /// Per-feed override for the LIVE ticking-leg floor (`MIN_ACTIVE_PROVIDERS`).
+    /// `None` = global const (2). Set `1` for declared single-venue FX (e.g. Pyth
+    /// AUD/USD) where `single_source` is illegal because the pair is not pegged.
+    /// Bounds 1..=64 enforced at boot.
+    #[serde(default)]
+    pub min_active_providers: Option<u8>,
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the

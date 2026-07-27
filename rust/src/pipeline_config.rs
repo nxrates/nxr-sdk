@@ -161,9 +161,12 @@ pub struct SignedQuotesYml {
     /// observation (ms). Default 250, hard-capped at 500.
     #[serde(default)]
     pub provenance_tolerance_ms: Option<i64>,
-    /// DEX feed subset. `idx` MUST equal the feed's position in the on-chain
-    /// append-only `feedIds[]` (idx never remaps); keeper cross-checks
-    /// `feedIds(idx) == feed_id` at startup.
+    /// Signable catalog (allowlist + per-feed policy). `idx` MUST equal the
+    /// feed's position in the on-chain append-only `feedIds[]` (idx never
+    /// remaps). Consumers subscribe dynamically via
+    /// `GET /v1/quote/signed?idxs=…` (catalog-ordered subset); absent `idxs`
+    /// defaults to this full list. Keeper cross-checks
+    /// `feedIds(idx) == feed_id` at startup and requires subscription ⊆ catalog.
     pub feeds: Vec<SignedFeedYml>,
     /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts
     /// its ticker universe to ONLY the symbols this signer must sign — every

@@ -33,8 +33,56 @@ use crate::agg::is_valid_tick;
 const IPI_ALPHA: f64 = 0.1;
 
 /// Half-life multiplier: weight halves after `IPI_K x ema_ipi` seconds.
-/// Larger values -> more tolerance for stale quotes.
+/// Used ONLY for the per-provider LIVENESS axis (`active_count`), never for the
+/// price weight — see [`price_half_life`].
 const IPI_K: f64 = 3.0;
+
+/// Half-life (seconds) of the PRICE weight, as a fraction of the staleness
+/// threshold. Uniform across every provider in a ticker, which is the whole
+/// point: normalisation divides by `w_sum`, so a decay factor applied EQUALLY
+/// to every leg cancels. A quiet interval in which all legs age together then
+/// leaves the composite exactly unchanged, instead of re-weighting it.
+///
+/// The previous price weight reused the per-provider adaptive half-life
+/// `clamp(IPI_K·ema_ipi, 1, stale/2)`. That is 1.0 s for anything ticking faster
+/// than ~0.33 s and 5.0 s for anything slower than ~1.67 s, so on a live
+/// BTC/USDT book (measured 2026-07-31: 15 venues, 0.09..3.29 frames/s) the legs
+/// decayed at rates differing by 5x. Share therefore migrated to whichever legs
+/// happened to tick last rather than to the deepest book, and the normalised
+/// share of a single venue swung by 8x..10431x within one capture. The
+/// composite's own records show the consequence: decay-weighted freshness
+/// averages 0.677 but falls to 0.548 on a downward spike, and the lowest-5%
+/// freshness records carry 7.92 bps of cross-venue dispersion against a 3.02 bps
+/// baseline. Uniform decay removes that redistribution channel; a leg that goes
+/// quiet ON ITS OWN still loses share to legs that keep ticking, which is the
+/// behaviour actually wanted.
+const PRICE_HALF_LIFE_FRACTION: f64 = 0.5;
+
+/// Price-weight half-life for a ticker. Uniform across providers by design.
+#[inline]
+fn price_half_life(stale_threshold_secs: f64) -> f64 {
+    (stale_threshold_secs * PRICE_HALF_LIFE_FRACTION).max(1.0)
+}
+
+/// Corpse horizon: a leg silent beyond this contributes nothing.
+#[inline]
+fn corpse_horizon(stale_threshold_secs: f64) -> f64 {
+    stale_threshold_secs * 6.0
+}
+
+/// Continuous fade to zero at the corpse horizon.
+///
+/// Eviction used to be a bare `continue` at `age > 6·stale`, which drops a leg's
+/// entire remaining weight in one cycle. With the uniform price half-life a leg
+/// still holds `2^-12` of its base weight at that boundary, so the step is small
+/// but it is a genuine discontinuity in the served mark, and the whole point of
+/// this pass is that a departing contributor must not step the output. Fading
+/// linearly to exactly 0.0 at the horizon makes exit continuous: the leg's share
+/// is already zero when it is finally dropped.
+#[inline]
+fn corpse_taper(age: f64, stale_threshold_secs: f64) -> f64 {
+    (1.0 - age / corpse_horizon(stale_threshold_secs)).clamp(0.0, 1.0)
+}
 
 /// No-book effective-spread reconstruction (operator 2026-07-05): when the
 /// composite has no real book (trades-only / honest_tick), the effective
@@ -186,7 +234,8 @@ impl ProviderEntry {
         // `coarsetime::Instant::duration_since` saturates on underflow
         // (uses `u64::saturating_sub` internally), so the previous
         // `saturating_duration_since` → `duration_since` rename is safe.
-        let ipi = now.duration_since(self.last_update)
+        let ipi = now
+            .duration_since(self.last_update)
             .as_f64()
             .clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
@@ -205,7 +254,8 @@ impl ProviderEntry {
 
     /// Injection variant with an explicit clock.
     pub fn inject_at(&mut self, bid: f64, ask: f64, vbid: u32, vask: u32, now: Instant) {
-        let ipi = now.duration_since(self.last_update)
+        let ipi = now
+            .duration_since(self.last_update)
             .as_f64()
             .clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
@@ -217,14 +267,12 @@ impl ProviderEntry {
         self.injected = true;
     }
 
-    /// Adaptive exponential decay.
+    /// Price weight: uniform-half-life exponential decay, faded to exactly zero
+    /// at the corpse horizon.
     ///
-    /// Half-life = clamp(IPI_K x ema_ipi_secs, 1 s, stale_threshold/2).
-    ///
-    /// Behaviour:
-    ///   - Crypto at 100 ms cadence:  ema -> 0.1 s -> half-life ~ 0.3 s (tight)
-    ///   - FX at 10 s cadence:        ema -> 10 s  -> half-life ~ 30 s (lenient)
-    ///   - Cold start (ema = 5 s):    half-life = 15 s (safe for both)
+    /// The half-life is a property of the TICKER ([`price_half_life`]), not of
+    /// this provider's own cadence, so a lull that ages every leg equally leaves
+    /// the normalised weight vector — and therefore the composite — unchanged.
     #[inline]
     pub fn effective_weight(&self, stale_threshold_secs: f64) -> f64 {
         self.effective_weight_at(stale_threshold_secs, Instant::now())
@@ -233,9 +281,8 @@ impl ProviderEntry {
     /// Effective-weight variant with an explicit clock.
     pub fn effective_weight_at(&self, stale_threshold_secs: f64, now: Instant) -> f64 {
         let age = now.duration_since(self.last_update).as_f64();
-        let half_life = (IPI_K * self.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
-        let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
-        self.base_weight * decay.max(0.001)
+        let decay = (-age * std::f64::consts::LN_2 / price_half_life(stale_threshold_secs)).exp();
+        self.base_weight * decay.max(0.001) * corpse_taper(age, stale_threshold_secs)
     }
 }
 
@@ -260,11 +307,7 @@ impl ProviderEntry {
 ///
 /// Floor: `max(conf_interval, (ask-bid)/2)` - never tighter than the spread itself.
 #[inline]
-pub fn compute_vwap<'a, I>(
-    ticker_id: u64,
-    entries: I,
-    stale_threshold_secs: f64,
-) -> Option<Index>
+pub fn compute_vwap<'a, I>(ticker_id: u64, entries: I, stale_threshold_secs: f64) -> Option<Index>
 where
     I: IntoIterator<Item = &'a ProviderEntry>,
 {
@@ -339,11 +382,18 @@ where
         // (decay floored at 0.001) and their unbounded stale_unc =
         // half_spread*sqrt(age/ipi) inflated published ci 400-1500x on
         // healthy majors, which then propagated into every cross/synth.
-        if age > stale_threshold_secs * 6.0 {
+        if age > corpse_horizon(stale_threshold_secs) {
             continue;
         }
-        let half_life = (IPI_K * entry.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
-        let decay = (-age * std::f64::consts::LN_2 / half_life).exp();
+        // LIVENESS half-life: per-provider, adaptive. Retained UNCHANGED because
+        // `active_count` below is a money-path gate (`server::signed`
+        // MIN_ACTIVE_PROVIDERS) and re-basing it on the uniform price half-life
+        // would silently widen the window in which a leg still counts as ticking.
+        let live_half_life = (IPI_K * entry.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
+        let live_decay = (-age * std::f64::consts::LN_2 / live_half_life).exp();
+        // PRICE half-life: uniform across the ticker, so an equal-ageing lull
+        // cancels under normalisation. See `price_half_life`.
+        let decay = (-age * std::f64::consts::LN_2 / price_half_life(stale_threshold_secs)).exp();
         // The 0.001 floor exists so a briefly-quiet venue still contributes
         // rather than snapping out of the blend. But it also cleared the
         // `w <= 1e-9` cut for ANY age below corpse eviction, so a set of legs
@@ -360,7 +410,9 @@ where
         } else {
             decay.max(0.001)
         };
-        let w = entry.base_weight * decay_floored;
+        // Taper to exactly 0.0 at the corpse horizon so the `continue` above can
+        // never drop a leg that still carried weight.
+        let w = entry.base_weight * decay_floored * corpse_taper(age, stale_threshold_secs);
 
         // Freshness numerator/denominator: accumulate for every valid-tick
         // provider BEFORE the weight-skip below, so floored-but-valid providers
@@ -379,7 +431,7 @@ where
         // `decay ≈ 1` and used to be counted here. See `ProviderEntry::injected`.
         // Note the asymmetry with `bw_sum` above (denominator, unconditional):
         // an injected leg dilutes the fresh-weight share instead of inflating it.
-        if decay >= 0.1 && !entry.injected {
+        if live_decay >= 0.1 && !entry.injected {
             active_count = active_count.saturating_add(1);
             active_bw_sum += entry.base_weight;
         }
@@ -891,7 +943,16 @@ mod tests {
         // Round-trip through encode/decode for a spread of plausible CI values.
         // Tolerance is loose: quantization by the sqrt-then-u16 cast introduces
         // up to ~(2 * sqrt(x) / CI_SCALE + 1 / CI_SCALE^2) absolute error in ubp.
-        for &ci_ubp in &[0.0, 1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0] {
+        for &ci_ubp in &[
+            0.0,
+            1.0,
+            10.0,
+            100.0,
+            1_000.0,
+            10_000.0,
+            100_000.0,
+            1_000_000.0,
+        ] {
             let encoded = encode_ci_ubp(ci_ubp);
             let decoded = decode_ci_ubp(encoded);
             // Error bound for sqrt-u16 quantization
@@ -907,16 +968,25 @@ mod tests {
     fn ci_does_not_saturate_at_10_percent_mid() {
         // 10% of mid = 1e7 ubp - must not saturate (prior linear encoding capped at 65535 ubp = 0.065%).
         let encoded = encode_ci_ubp(1e7);
-        assert!(encoded < u16::MAX, "10% CI should not saturate, got {encoded}");
+        assert!(
+            encoded < u16::MAX,
+            "10% CI should not saturate, got {encoded}"
+        );
         let decoded = decode_ci_ubp(encoded);
-        assert!((decoded - 1e7).abs() / 1e7 < 0.01, "decoded {decoded} differs from 1e7 by >1%");
+        assert!(
+            (decoded - 1e7).abs() / 1e7 < 0.01,
+            "decoded {decoded} differs from 1e7 by >1%"
+        );
     }
 
     #[test]
     fn ci_saturation_threshold_exceeds_old_limit() {
         // Old encoding saturated at 65535 ubp. New encoding must not saturate there.
         let encoded = encode_ci_ubp(65535.0);
-        assert!(encoded < u16::MAX, "new encoding must not saturate at old-linear-max, got {encoded}");
+        assert!(
+            encoded < u16::MAX,
+            "new encoding must not saturate at old-linear-max, got {encoded}"
+        );
     }
 
     #[test]
@@ -936,7 +1006,14 @@ mod tests {
 
     use crate::mitch::Index as MitchIndex;
 
-    fn mk_entry(bid: f64, ask: f64, vbid: u32, vask: u32, base_weight: f64, now: Instant) -> ProviderEntry {
+    fn mk_entry(
+        bid: f64,
+        ask: f64,
+        vbid: u32,
+        vask: u32,
+        base_weight: f64,
+        now: Instant,
+    ) -> ProviderEntry {
         let idx = MitchIndex::new(1, bid, ask, 0, vbid, vask, 1, 1, 1, 0);
         let mut e = ProviderEntry::new_at(idx, base_weight, now);
         // Anchor ema_ipi to a stable value so successive `update_at` calls in
@@ -983,8 +1060,8 @@ mod tests {
                     )
                 })
                 .collect();
-            let out = compute_vwap_at(1, entries.iter().map(|(_, e)| e), 30.0, t0)
-                .expect("composite");
+            let out =
+                compute_vwap_at(1, entries.iter().map(|(_, e)| e), 30.0, t0).expect("composite");
             assert_eq!(
                 out.flags & crate::shard::FLAG_CONF_ACTIVE,
                 crate::shard::FLAG_CONF_ACTIVE,
@@ -1013,18 +1090,14 @@ mod tests {
         let entries: Vec<(u16, ProviderEntry)> = vec![(1, p_a), (2, p_b)];
 
         let mut cache = WeightCache::new();
-        let first = compute_vwap_throttled_at(
-            42, &entries, 10.0, &mut cache, 1000, false, t0,
-        )
-        .expect("first call must produce a composite");
+        let first = compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t0)
+            .expect("first call must produce a composite");
 
         // 18 cycles at 50ms each = 900ms elapsed, still within the 1000ms refresh.
         for step in 1..=18u64 {
             let now = t0 + Duration::from_millis(step * 50);
-            let cur = compute_vwap_throttled_at(
-                42, &entries, 10.0, &mut cache, 1000, false, now,
-            )
-            .expect("cached replay must produce a composite");
+            let cur = compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, now)
+                .expect("cached replay must produce a composite");
             assert!(
                 idx_eq_bytewise(first, cur),
                 "cycle {step}: replay diverged from refresh; expected {first:?} got {cur:?}",
@@ -1045,20 +1118,16 @@ mod tests {
         let entries: Vec<(u16, ProviderEntry)> = vec![(1, p_a), (2, p_b)];
 
         let mut cache = WeightCache::new();
-        let first = compute_vwap_throttled_at(
-            42, &entries, 10.0, &mut cache, 200, false, t0,
-        )
-        .unwrap();
+        let first =
+            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 200, false, t0).unwrap();
 
         // 300ms later — well past the 200ms refresh interval.
         // Both providers age equally so normalized weights are unchanged in
         // ratio, but absolute decay still re-runs through `compute_vwap_at`
         // and the cached_index timestamp updates.
         let t1 = t0 + Duration::from_millis(300);
-        let refreshed = compute_vwap_throttled_at(
-            42, &entries, 10.0, &mut cache, 200, false, t1,
-        )
-        .unwrap();
+        let refreshed =
+            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 200, false, t1).unwrap();
         // The composite VWAP itself is invariant under uniform aging when
         // the same multiplicative decay applies to both providers, but the
         // refresh DID run — we verify the cache timestamp moved.
@@ -1079,19 +1148,24 @@ mod tests {
         let p_a = mk_entry(100.00, 100.00, 1_000, 1_000, 1.0, t0);
         let p_b = mk_entry(100.10, 100.10, 1_000, 1_000, 1.0, t0);
         let entries: Vec<(u16, ProviderEntry)> = vec![(1, p_a), (2, p_b)];
-        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, t0)
-            .expect("composite");
+        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, t0).expect("composite");
         // Copy packed fields to locals before use (packed struct → no field refs).
         let (bid, ask) = (idx.bid, idx.ask);
         // mid ~100.05, and a real (non-degenerate) spread synthesized from the
         // 0.10 cross-venue disagreement — NOT collapsed to bid==ask.
-        assert!(ask > bid, "no-book multi-venue must synthesize a spread, got bid={bid} ask={ask}");
+        assert!(
+            ask > bid,
+            "no-book multi-venue must synthesize a spread, got bid={bid} ask={ask}"
+        );
         let mid = (bid + ask) * 0.5;
         assert!((mid - 100.05).abs() < 0.02, "mid off: {mid}");
         // half-spread = k * sqrt(m2/w_sum); with equal weights the mid variance
         // is 0.05^2, so sqrt = 0.05, half-spread = k*0.05 (k default 1.0).
         let hs = (ask - bid) * 0.5;
-        assert!(hs > 0.0 && hs < 0.20, "half-spread out of expected band: {hs}");
+        assert!(
+            hs > 0.0 && hs < 0.20,
+            "half-spread out of expected band: {hs}"
+        );
     }
 
     #[test]
@@ -1101,10 +1175,13 @@ mod tests {
         let t0 = Instant::now();
         let p = mk_entry(100.00, 100.00, 1_000, 1_000, 1.0, t0);
         let entries: Vec<(u16, ProviderEntry)> = vec![(1, p)];
-        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, t0)
-            .expect("composite");
+        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, t0).expect("composite");
         let (bid, ask) = (idx.bid, idx.ask);
-        assert_eq!(bid.to_bits(), ask.to_bits(), "single no-book venue must stay collapsed (honest absence)");
+        assert_eq!(
+            bid.to_bits(),
+            ask.to_bits(),
+            "single no-book venue must stay collapsed (honest absence)"
+        );
     }
 
     #[test]
@@ -1118,10 +1195,8 @@ mod tests {
         let mut entries: Vec<(u16, ProviderEntry)> = vec![(1, p_a), (2, p_b)];
 
         let mut cache = WeightCache::new();
-        let first = compute_vwap_throttled_at(
-            42, &entries, 10.0, &mut cache, 1000, false, t0,
-        )
-        .unwrap();
+        let first =
+            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t0).unwrap();
 
         // 100ms in — well within refresh window. Push a new price into B.
         let t1 = t0 + Duration::from_millis(100);
@@ -1130,10 +1205,8 @@ mod tests {
             t1,
         );
 
-        let post_change = compute_vwap_throttled_at(
-            42, &entries, 10.0, &mut cache, 1000, false, t1,
-        )
-        .unwrap();
+        let post_change =
+            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t1).unwrap();
         assert!(
             post_change.bid > first.bid + 1.0,
             "VWAP must respond to a 5-unit move on provider B; first={first:?} post={post_change:?}",
@@ -1149,10 +1222,8 @@ mod tests {
         let mut entries: Vec<(u16, ProviderEntry)> = vec![(1, p_a)];
 
         let mut cache = WeightCache::new();
-        let _first = compute_vwap_throttled_at(
-            42, &entries, 10.0, &mut cache, 1000, false, t0,
-        )
-        .unwrap();
+        let _first =
+            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t0).unwrap();
         let cached_before_join = cache.cached_index.unwrap();
 
         // Add provider B 100ms later.
@@ -1160,14 +1231,126 @@ mod tests {
         let p_b = mk_entry(110.00, 110.02, 5_000, 5_500, 1.0, t1);
         entries.push((2, p_b));
 
-        let after_join = compute_vwap_throttled_at(
-            42, &entries, 10.0, &mut cache, 1000, false, t1,
-        )
-        .unwrap();
+        let after_join =
+            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t1).unwrap();
         assert_ne!(
-            cached_before_join.bid.to_bits(), after_join.bid.to_bits(),
+            cached_before_join.bid.to_bits(),
+            after_join.bid.to_bits(),
             "joining a provider with a different mid must shift the composite",
         );
+    }
+
+    /// A quiet interval must not move the mark.
+    ///
+    /// Every leg ages together and no quote changes, so the composite is pure
+    /// re-weighting. Under the old per-provider half-life the legs decayed at
+    /// rates differing by up to 5x, share migrated to whichever leg last ticked,
+    /// and the composite walked across a lull on its own. With one half-life per
+    /// ticker the decay factor is common to every leg and cancels in `w_sum`.
+    #[test]
+    fn quiet_interval_does_not_move_the_composite() {
+        let t0 = Instant::now();
+        // Deliberately heterogeneous cadences (the live BTC/USDT book spans
+        // 0.09..3.29 frames/s) and heterogeneous prices, so any residual
+        // re-weighting shows up as a mid move.
+        let mut legs = Vec::new();
+        for (i, (px, ipi, bw)) in [
+            (63_700.0f64, 0.21f64, 1.00f64),
+            (63_690.0, 0.47, 3.99),
+            (63_712.0, 1.18, 3.53),
+            (63_680.0, 6.65, 0.02),
+            (63_725.0, 7.12, 0.19),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut e = mk_entry(px - 0.5, px + 0.5, 1_000, 1_000, *bw, t0);
+            e.ema_ipi_secs = *ipi;
+            legs.push((i as u16 + 1, e));
+        }
+        let first = compute_vwap_at(1, legs.iter().map(|(_, e)| e), 10.0, t0).expect("composite");
+        let first_mid = first.mid();
+        // Walk 9 s of total silence: no leg updates, all ages advance together.
+        for step in 1..=90u64 {
+            let now = t0 + Duration::from_millis(step * 100);
+            let cur =
+                compute_vwap_at(1, legs.iter().map(|(_, e)| e), 10.0, now).expect("composite");
+            let drift_bps = ((cur.mid() - first_mid) / first_mid).abs() * 1e4;
+            assert!(
+                drift_bps < 0.01,
+                "t+{} ms: composite drifted {drift_bps:.4} bps on a quiet book \
+                 (mid {} -> {}); decay must cancel under normalisation",
+                step * 100,
+                first_mid,
+                cur.mid(),
+            );
+        }
+    }
+
+    /// A departing contributor must not step the mark.
+    ///
+    /// One leg goes silent and ages all the way through corpse eviction while the
+    /// rest keep ticking. Its share must fall to zero CONTINUOUSLY: the bare
+    /// `continue` at the corpse horizon used to discard whatever weight the leg
+    /// still held, printing a step into the served mark at exactly 6x stale.
+    #[test]
+    fn provider_dropout_does_not_step_the_composite() {
+        let t0 = Instant::now();
+        const STALE: f64 = 10.0;
+        // Survivors agree near 63 700; the departing leg sits 100 bps below, so
+        // any discontinuity in its weight is plainly visible in the mid.
+        let mut legs = vec![
+            (1u16, mk_entry(63_699.5, 63_700.5, 1_000, 1_000, 1.0, t0)),
+            (2u16, mk_entry(63_701.5, 63_702.5, 1_000, 1_000, 1.0, t0)),
+            (3u16, mk_entry(63_062.0, 63_063.0, 1_000, 1_000, 1.0, t0)),
+        ];
+        let mut prev = compute_vwap_at(1, legs.iter().map(|(_, e)| e), STALE, t0)
+            .expect("composite")
+            .mid();
+        let mut worst: f64 = 0.0;
+        // 70 s at 200 ms: past the 60 s corpse horizon.
+        for step in 1..=350u64 {
+            let now = t0 + Duration::from_millis(step * 200);
+            // Legs 1 and 2 keep ticking; leg 3 is silent from t0 onwards.
+            for (_, e) in legs.iter_mut().take(2) {
+                e.update_at(e.index, now);
+            }
+            let cur = compute_vwap_at(1, legs.iter().map(|(_, e)| e), STALE, now)
+                .expect("composite")
+                .mid();
+            let step_bps = ((cur - prev) / prev).abs() * 1e4;
+            worst = worst.max(step_bps);
+            assert!(
+                step_bps < 1.0,
+                "t+{} ms (age {:.1} s): departing leg stepped the composite by \
+                 {step_bps:.3} bps ({prev} -> {cur})",
+                step * 200,
+                (step * 200) as f64 / 1000.0,
+            );
+            prev = cur;
+        }
+        // And it really did leave: the composite must end on the survivors.
+        assert!(
+            (prev - 63_701.0).abs() < 1.0,
+            "after eviction the composite must be the survivors' blend, got {prev}"
+        );
+        assert!(
+            worst > 0.0,
+            "test must actually exercise a moving composite"
+        );
+    }
+
+    /// The corpse taper reaches exactly zero at the horizon, so the `continue`
+    /// that follows can never discard live weight.
+    #[test]
+    fn corpse_taper_reaches_zero_at_the_horizon() {
+        let stale = 10.0;
+        assert_eq!(corpse_taper(corpse_horizon(stale), stale), 0.0);
+        assert_eq!(corpse_taper(0.0, stale), 1.0);
+        assert!(corpse_taper(corpse_horizon(stale) * 0.99, stale) < 0.02);
+        // Uniform by construction: the price half-life must not read ema_ipi.
+        assert_eq!(price_half_life(10.0), 5.0);
+        assert_eq!(price_half_life(1.0), 1.0, "floored so decay cannot explode");
     }
 
     #[test]

@@ -278,6 +278,14 @@ pub struct SignedFeedYml {
     /// Bounds 1..=64 enforced at boot.
     #[serde(default)]
     pub min_active_providers: Option<u8>,
+    /// Per-feed σ-understatement allowance (PBPS) at co-sign, overriding the
+    /// global `SIGMA_UNDERSTATEMENT_TOL_PBPS` (100). A thin feed whose
+    /// independent 30 m Parkinson windows legitimately diverge more than the
+    /// absolute floor refuses every blob that includes it (XAUT, 2026-07-29:
+    /// 3-5 % replica divergence at σ > 2500 PBPS). Bounds 100..=2000 enforced
+    /// at boot (signed.rs); absent = global default.
+    #[serde(default)]
+    pub sigma_tol_pbps: Option<u32>,
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the

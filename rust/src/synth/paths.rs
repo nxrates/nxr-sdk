@@ -44,7 +44,10 @@ impl Leg {
     #[inline]
     pub fn new(sym: impl Into<String>, exp: i8) -> Self {
         debug_assert!(exp == 1 || exp == -1, "Leg exponent must be ±1, got {exp}");
-        Self { sym: sym.into(), exp }
+        Self {
+            sym: sym.into(),
+            exp,
+        }
     }
 }
 
@@ -76,19 +79,17 @@ pub static SYNTH_PATHS: LazyLock<Vec<SynthPath>> = LazyLock::new(|| {
         // ── Trivial identities (0-leg). Tick = (1,1,1, conf=10000). ──
         SynthPath::new("USDT/USDT", &[]),
         SynthPath::new("USDC/USDC", &[]),
-        SynthPath::new("USD/USD",   &[]),
-        SynthPath::new("EUR/EUR",   &[]),
-
+        SynthPath::new("USD/USD", &[]),
+        SynthPath::new("EUR/EUR", &[]),
         // ── Pure inversions (1 leg, exp=-1). ──
         // USDT/X = 1 / (X/USDT)
-        SynthPath::new("USDT/BTC",  &[("BTC/USDT",  -1)]),
-        SynthPath::new("USDT/ETH",  &[("ETH/USDT",  -1)]),
-        SynthPath::new("USDT/SOL",  &[("SOL/USDT",  -1)]),
+        SynthPath::new("USDT/BTC", &[("BTC/USDT", -1)]),
+        SynthPath::new("USDT/ETH", &[("ETH/USDT", -1)]),
+        SynthPath::new("USDT/SOL", &[("SOL/USDT", -1)]),
         SynthPath::new("USDT/PAXG", &[("PAXG/USDT", -1)]),
         // USDC/X = 1 / (X/USDC)
-        SynthPath::new("USDC/BTC",  &[("BTC/USDC",  -1)]),
-        SynthPath::new("USDC/ETH",  &[("ETH/USDC",  -1)]),
-
+        SynthPath::new("USDC/BTC", &[("BTC/USDC", -1)]),
+        SynthPath::new("USDC/ETH", &[("ETH/USDC", -1)]),
         // ── 2-leg crosses via USDT pivot (BTR ported, USDT-canonical). ──
         // ETH/BTC = (ETH/USDT) × (USDT/BTC) = (ETH/USDT) / (BTC/USDT)
         SynthPath::new("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]),
@@ -96,28 +97,39 @@ pub static SYNTH_PATHS: LazyLock<Vec<SynthPath>> = LazyLock::new(|| {
         SynthPath::new("SOL/ETH", &[("SOL/USDT", 1), ("ETH/USDT", -1)]),
         SynthPath::new("ADA/BTC", &[("ADA/USDT", 1), ("BTC/USDT", -1)]),
         SynthPath::new("XRP/BTC", &[("XRP/USDT", 1), ("BTC/USDT", -1)]),
-
         // ── 2-leg crosses via USDT pivot — BNB-quoted (operator priority). ──
         // ETH/BNB = (ETH/USDT) × (USDT/BNB) = (ETH/USDT) / (BNB/USDT)
         SynthPath::new("ETH/BNB", &[("ETH/USDT", 1), ("BNB/USDT", -1)]),
         SynthPath::new("BTC/BNB", &[("BTC/USDT", 1), ("BNB/USDT", -1)]),
-
         // ── Cross-quote (FX bridge). EUR-quoted via EUR/USDT inverse. ──
         // BTC/EUR = BTC/USDT × USDT/EUR = (BTC/USDT) / (EUR/USDT)
-        SynthPath::new("BTC/EUR",  &[("BTC/USDT",  1), ("EUR/USDT", -1)]),
-        SynthPath::new("ETH/EUR",  &[("ETH/USDT",  1), ("EUR/USDT", -1)]),
+        SynthPath::new("BTC/EUR", &[("BTC/USDT", 1), ("EUR/USDT", -1)]),
+        SynthPath::new("ETH/EUR", &[("ETH/USDT", 1), ("EUR/USDT", -1)]),
         SynthPath::new("PAXG/EUR", &[("PAXG/USDT", 1), ("EUR/USDT", -1)]),
-
         // ── Gold crosses (USDT-denominated). ──
         SynthPath::new("BTC/PAXG", &[("BTC/USDT", 1), ("PAXG/USDT", -1)]),
         SynthPath::new("ETH/PAXG", &[("ETH/USDT", 1), ("PAXG/USDT", -1)]),
+        // ── USDC-quoted FX and metals, pinned to the USD pivot. ──
+        // `derive_legs` returns the FIRST pivot that merely RESOLVES, so the
+        // moment a thin `<FX>/USDT` ticker is born it wins the USDT pivot and
+        // caps the cross at that ticker's history. EUR/USDT gained its first
+        // shard on 2026-07-31 and EUR/USDC collapsed from the full USD-pivot
+        // depth to 3 days. These entries make the deep pivot explicit: both
+        // legs are primaries, so the DAG invariant holds.
+        // ponytail: per-symbol pinning, not general. The general fix is the
+        // weighted cross graph in docs/internal/universal-cross-routing.md.
+        SynthPath::new("EUR/USDC", &[("EUR/USD", 1), ("USDC/USD", -1)]),
+        SynthPath::new("GBP/USDC", &[("GBP/USD", 1), ("USDC/USD", -1)]),
+        SynthPath::new("AUD/USDC", &[("AUD/USD", 1), ("USDC/USD", -1)]),
+        SynthPath::new("NZD/USDC", &[("NZD/USD", 1), ("USDC/USD", -1)]),
+        SynthPath::new("XAU/USDC", &[("XAU/USD", 1), ("USDC/USD", -1)]),
+        SynthPath::new("XAG/USDC", &[("XAG/USD", 1), ("USDC/USD", -1)]),
     ]
 });
 
 /// O(1) lookup table built once from [`SYNTH_PATHS`].
-static PATH_BY_SYM: LazyLock<HashMap<&'static str, &'static SynthPath>> = LazyLock::new(|| {
-    SYNTH_PATHS.iter().map(|p| (p.sym.as_str(), p)).collect()
-});
+static PATH_BY_SYM: LazyLock<HashMap<&'static str, &'static SynthPath>> =
+    LazyLock::new(|| SYNTH_PATHS.iter().map(|p| (p.sym.as_str(), p)).collect());
 
 /// Reverse map: leg sym → synth paths depending on that leg.
 static SYNTH_DEPS: LazyLock<HashMap<&'static str, Vec<&'static SynthPath>>> = LazyLock::new(|| {
@@ -243,7 +255,13 @@ mod tests {
         for (i, p) in SYNTH_PATHS.iter().enumerate() {
             for leg in &p.legs {
                 if let Some(&j) = order.get(leg.sym.as_str()) {
-                    assert!(j < i, "DAG violation: {} legs include {} at position ≥ {}", p.sym, leg.sym, i);
+                    assert!(
+                        j < i,
+                        "DAG violation: {} legs include {} at position ≥ {}",
+                        p.sym,
+                        leg.sym,
+                        i
+                    );
                 }
             }
         }
@@ -261,7 +279,36 @@ mod tests {
     fn dash_normalizes_to_slash() {
         assert_eq!(normalize_to_slash("BTC-USDT"), "BTC/USDT");
         assert_eq!(normalize_to_slash("BTC/USDT"), "BTC/USDT");
-        assert_eq!(normalize_to_slash("0x060A8D644C100000"), "0x060A8D644C100000");
+        assert_eq!(
+            normalize_to_slash("0x060A8D644C100000"),
+            "0x060A8D644C100000"
+        );
+    }
+
+    #[test]
+    fn usdc_quoted_fx_pins_the_usd_pivot() {
+        // `derive_legs` returns the first pivot that merely RESOLVES, so a
+        // newborn thin EUR/USDT would win the USDT pivot and cap EUR/USDC at
+        // that ticker's history (measured: 3 days, 2026-07-31). The explicit
+        // path must win, and it must route through USD.
+        for sym in [
+            "EUR/USDC", "GBP/USDC", "AUD/USDC", "NZD/USDC", "XAU/USDC", "XAG/USDC",
+        ] {
+            let p = path_for(sym).unwrap_or_else(|| panic!("{sym} must have an explicit path"));
+            let legs: Vec<&str> = p.legs.iter().map(|l| l.sym.as_str()).collect();
+            assert_eq!(
+                legs[1], "USDC/USD",
+                "{sym} must be quoted off the USD pivot"
+            );
+            assert!(
+                legs[0].ends_with("/USD"),
+                "{sym} base leg must be USD-quoted"
+            );
+            assert!(
+                !legs.iter().any(|l| l.contains("USDT")),
+                "{sym} must not route through USDT"
+            );
+        }
     }
 
     #[test]
@@ -282,10 +329,15 @@ mod tests {
         };
         let legs = derive_legs("USDT", "JPY", &resolve).expect("should resolve via USD pivot");
         assert!(
-            legs.iter().all(|(sym, _, id)| sym != "USDT/JPY" && *id != 999),
+            legs.iter()
+                .all(|(sym, _, id)| sym != "USDT/JPY" && *id != 999),
             "derive_legs must not self-reference: got {legs:?}"
         );
-        assert_eq!(legs.len(), 2, "expected USDT/USD + USD/JPY legs, got {legs:?}");
+        assert_eq!(
+            legs.len(),
+            2,
+            "expected USDT/USD + USD/JPY legs, got {legs:?}"
+        );
     }
 
     #[test]

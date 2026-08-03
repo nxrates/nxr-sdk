@@ -286,6 +286,25 @@ pub struct SignedFeedYml {
     /// at boot (signed.rs); absent = global default.
     #[serde(default)]
     pub sigma_tol_pbps: Option<u32>,
+    /// Per-feed DISK-SCAN horizon for the σ window, in 30 m units. `None` =
+    /// global `sigma_lookback_bars` (48 = 24 h), which is a CRYPTO shape: it
+    /// assumes the tape never stops, so 24 h always holds 48 real bars.
+    ///
+    /// A session-traded instrument breaks that assumption. USD/BRL ticks only
+    /// 12:00-21:00 UTC Mon-Fri (MEASURED over 2026-07-25..08-03: 9 h/day, 0
+    /// bars at any weekend hour), so a 24 h scan holds ~18 real bars mid-week
+    /// but ZERO from session close until the next open. σ then refuses for the
+    /// first 4 h of every session (8 bars x 30 m) even though the tape is live
+    /// and the mark is fresh: idx 27 was excluded as `mark_unavailable` for
+    /// exactly that reason on 2026-08-03 12:00-16:00 UTC.
+    ///
+    /// This widens ONLY the scan horizon. The estimator still takes the newest
+    /// `sigma_lookback_bars` REAL-tick bars (`tick_count > 0`), so dark slots
+    /// are never counted and σ is not smoothed across a wider sample. Bounded
+    /// by `retention_days` (7 d = 336) at boot: a scan cannot outrun the shards
+    /// retention keeps.
+    #[serde(default)]
+    pub sigma_window_bars: Option<u32>,
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the

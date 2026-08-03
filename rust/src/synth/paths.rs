@@ -124,6 +124,11 @@ pub static SYNTH_PATHS: LazyLock<Vec<SynthPath>> = LazyLock::new(|| {
         SynthPath::new("NZD/USDC", &[("NZD/USD", 1), ("USDC/USD", -1)]),
         SynthPath::new("XAU/USDC", &[("XAU/USD", 1), ("USDC/USD", -1)]),
         SynthPath::new("XAG/USDC", &[("XAG/USD", 1), ("USDC/USD", -1)]),
+        // DAI is Pyth-only (feed 202, min 3 publishers), so no venue book backs
+        // it. The USDT pivot resolved DAI/USDC off the dead kraken DAI/USDT
+        // (24 shards, last 2026-08-02) and capped the cross at 84 H1 bars;
+        // DAI/USD carries 757.
+        SynthPath::new("DAI/USDC", &[("DAI/USD", 1), ("USDC/USD", -1)]),
     ]
 });
 
@@ -292,7 +297,7 @@ mod tests {
         // that ticker's history (measured: 3 days, 2026-07-31). The explicit
         // path must win, and it must route through USD.
         for sym in [
-            "EUR/USDC", "GBP/USDC", "AUD/USDC", "NZD/USDC", "XAU/USDC", "XAG/USDC",
+            "EUR/USDC", "GBP/USDC", "AUD/USDC", "NZD/USDC", "XAU/USDC", "XAG/USDC", "DAI/USDC",
         ] {
             let p = path_for(sym).unwrap_or_else(|| panic!("{sym} must have an explicit path"));
             let legs: Vec<&str> = p.legs.iter().map(|l| l.sym.as_str()).collect();

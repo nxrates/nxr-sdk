@@ -95,6 +95,9 @@ pub struct PipelineYml {
     /// name (must exist in `mitch/ids/market-providers.csv`, e.g. `pyth`).
     #[serde(default)]
     pub oracles: OraclesYml,
+    /// cTrader Open API brokers consumed by `nxr-ctrader`. Absent = disabled.
+    #[serde(default)]
+    pub ctrader: CtraderYml,
     /// BTR DEX signed-quote endpoint (`/v1/quote/signed`). Absent = disabled.
     /// Domain binds to the DEPLOYED ExternalOracle (chain_id + address) —
     /// per-deployment config, never hardcoded. Signing key: env
@@ -114,6 +117,11 @@ fn default_domain_name() -> String {
     "BTR ExternalOracle".to_string()
 }
 
+/// `#[serde(default)]` for a bool that must stay on when the YAML is silent.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedQuotesYml {
@@ -131,8 +139,36 @@ pub struct SignedQuotesYml {
     /// Required blob rebuild/cache floor in milliseconds. Must be in 1..=10
     /// so a newly observed provider tick is not hidden behind a stale cache.
     pub min_interval_ms: u64,
-    /// Trailing 30 m bars for the Parkinson σ (mirrors keeper
-    /// `nxr.vol_lookback_bars`). Default 48.
+    /// Multi-timeframe Parkinson σ legs, in MINUTES, with optional per-leg
+    /// weights. Default 6 h / 2 d / 1 w, EQUAL-weighted.
+    ///
+    /// Each leg is a Parkinson σ over the same 30 m bar and differs only in
+    /// sample length, so the blend needs no annualisation. A leg that cannot
+    /// reach the arming floor is DROPPED and the weights renormalise over the
+    /// survivors; σ is never emitted from a short sample.
+    ///
+    /// Weights are EQUAL by design, not inverse-variance. Parkinson's sampling
+    /// variance falls like `1/n`, so inverse-variance would give the 336-bar
+    /// weekly leg ~28x the 12-bar 6 h leg and the blend would be the weekly
+    /// window with extra steps: exactly the lag this replaces. On the money
+    /// path σ is a risk premium with asymmetric loss (understating it is the
+    /// attack; overstating only widens the band and is separately capped at
+    /// co-sign), so responsiveness is bought deliberately with efficiency.
+    /// Override per deployment if a venue justifies it.
+    #[serde(default)]
+    pub sigma_windows_min: Option<crate::mtf::MtfWindows>,
+    /// DEPRECATED alias for [`Self::sigma_windows_min`]: the single 30 m
+    /// Parkinson window, in BARS, that predates the MTF blend.
+    ///
+    /// It exists ONLY so one release can parse a not-yet-migrated ConfigMap.
+    /// [`SignedQuotesYml`] is `deny_unknown_fields`, so without this field the
+    /// image and the ConfigMap can never be rolled in either order: migrating
+    /// the ConfigMap first crashloops the old image, rolling the image first
+    /// crashloops the new one. Accepting both keys makes IMAGE-FIRST valid.
+    ///
+    /// REMOVE once all three signer ConfigMaps (`nxr-signer-config`,
+    /// `nxr-signer-ref-config`, `nxr-signer-arc-config`) carry
+    /// `sigma_windows_min` and no longer carry this key.
     #[serde(default)]
     pub sigma_lookback_bars: Option<u32>,
     /// Required maximum age in milliseconds of the last real upstream provider
@@ -183,21 +219,80 @@ pub struct SignedQuotesYml {
     /// when `sign_only` is true: a full node's retention is the API contract
     /// (365 d `/v1/bars`) and is not this knob.
     ///
-    /// A light node signs real-time prices and needs history for exactly one
-    /// thing: the Parkinson sigma window (`sigma_lookback_bars` x 30 m = 24 h).
-    /// The floor of 1 is therefore load-bearing for arming, not arbitrary.
-    /// Measured 2026-07-25: with no cap at all a light node wrote 1.3 GiB in
-    /// 14 h and grew forever.
+    /// This bounds the INDEX tree (`indexes/*.idx`), which is the tree that
+    /// actually costs disk: one 56 B record per emit cycle per ticker. Measured
+    /// 2026-07-25: with no cap at all a light node wrote 1.3 GiB in 14 h and
+    /// grew forever, and the index is nearly all of it. Sigma reads `.s10`
+    /// bars, never the index, so this stays at 1 day while the bar trees are
+    /// retained for as long as the longest σ leg needs
+    /// ([`Self::bars_retention_days`]).
     #[serde(default = "default_light_retention_days")]
     pub retention_days: u16,
 }
 
-/// 1 sealed day + today = the 2 shards the 24 h sigma window can need.
+/// The index tree is the disk hog and σ never reads it: 1 sealed day + today.
 fn default_light_retention_days() -> u16 {
     1
 }
 
+/// Bar width the σ estimator rolls up to, in minutes.
+pub const SIGMA_BAR_MIN: u32 = 30;
+
 impl SignedQuotesYml {
+    /// σ legs for this signer, defaulted to 6 h / 2 d / 1 w equal-weighted.
+    ///
+    /// Resolves the deprecated [`Self::sigma_lookback_bars`] alias: neither key
+    /// gives the default blend, the alias alone gives the single pre-MTF window
+    /// it always meant (48 bars x 30 m = 1440 min, weight 1.0, numerically the
+    /// old single-window path), and `sigma_windows_min` wins when both are set.
+    pub fn sigma_windows(&self) -> crate::mtf::MtfWindows {
+        match (&self.sigma_windows_min, self.sigma_lookback_bars) {
+            (Some(w), _) => w.clone(),
+            (None, Some(bars)) => crate::mtf::MtfWindows::new(
+                vec![bars.max(1).saturating_mul(SIGMA_BAR_MIN)],
+                vec![1.0],
+            ),
+            (None, None) => crate::mtf::MtfWindows::default(),
+        }
+    }
+
+    /// True when the deprecated alias is present alongside the current key, so
+    /// the loader can name the offending file in its WARN.
+    fn has_stale_sigma_alias(&self) -> bool {
+        self.sigma_windows_min.is_some() && self.sigma_lookback_bars.is_some()
+    }
+
+    /// Whole days of `.s10` / `.renko` shards a light node must keep for the
+    /// LONGEST configured σ leg to be able to fill, derived rather than tuned.
+    ///
+    /// Derived, not a free knob, but also not the expensive tree: `.s10` is
+    /// 96 B x 8640 bars/day = 810 KiB/day/ticker, so a 26-feed signer holding
+    /// 14 days of bars is ~290 MiB. The 1.3 GiB/14 h figure that forced the
+    /// original 1-day cap is the INDEX tree, which keeps its own short window.
+    ///
+    /// The `+1` covers the partial day at the window's far edge: a window of
+    /// exactly N days spans N+1 UTC shards unless it lands on midnight.
+    ///
+    /// SESSION TAPES: a leg is N REAL-tick bars, and FX trades ~5 days in 7, so
+    /// 336 real 30 m bars span ~9-10 CALENDAR days, not 7. That is what the
+    /// per-feed `sigma_window_bars` scan horizon declares, so the widest one
+    /// configured is folded in here: retention can never be shorter than the
+    /// scan a feed is allowed to ask for. This is why per-asset-class WINDOW
+    /// SETS are not needed: the leg definition ("336 real bars") is universal,
+    /// only the calendar horizon it is hunted over is asset-class specific.
+    pub fn bars_retention_days(&self) -> u16 {
+        let leg_days = self.sigma_windows().max_days(SIGMA_BAR_MIN);
+        let scan_days = self
+            .feeds
+            .iter()
+            .filter_map(|f| f.sigma_window_bars)
+            .max()
+            .map_or(0, |b| {
+                (u64::from(b) * u64::from(SIGMA_BAR_MIN)).div_ceil(1_440) as u16
+            });
+        leg_days.max(scan_days).saturating_add(1)
+    }
+
     /// The exact ticker-symbol set this signer must aggregate to sign: every
     /// feed symbol plus every bridge (`quote_via`) leg, uppercased/deduped.
     /// This is the universe the `sign_only` mode restricts `symbol_map` to.
@@ -286,9 +381,10 @@ pub struct SignedFeedYml {
     /// at boot (signed.rs); absent = global default.
     #[serde(default)]
     pub sigma_tol_pbps: Option<u32>,
-    /// Per-feed DISK-SCAN horizon for the σ window, in 30 m units. `None` =
-    /// global `sigma_lookback_bars` (48 = 24 h), which is a CRYPTO shape: it
-    /// assumes the tape never stops, so 24 h always holds 48 real bars.
+    /// Per-feed DISK-SCAN horizon for the σ window, in 30 m units. `None` = the
+    /// longest configured σ leg (`sigma_windows_min`, 336 bars = 7 d), which is
+    /// a CRYPTO shape: it assumes the tape never stops, so 7 d always holds 336
+    /// real bars.
     ///
     /// A session-traded instrument breaks that assumption. USD/BRL ticks only
     /// 12:00-21:00 UTC Mon-Fri (MEASURED over 2026-07-25..08-03: 9 h/day, 0
@@ -338,6 +434,62 @@ pub struct OracleProviderYml {
     /// on `feedUpdateTimestamp` (any endpoint may die; no gap).
     #[serde(default)]
     pub urls: Vec<String>,
+}
+
+/// `ctrader:` block — cTrader Open API spot providers consumed by the
+/// `nxr-ctrader` forwarder. One entry per broker (IC Markets, Pepperstone,
+/// Tickmill are all cTrader brokers and share one Spotware application).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CtraderYml {
+    /// Forwarder flush cadence (ms). Default 250 when absent.
+    #[serde(default)]
+    pub aggregation_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub providers: BTreeMap<String, CtraderProviderYml>,
+}
+
+/// `ctrader.providers.<name>:` — one broker session + its symbol manifest.
+/// `<name>` must resolve in `mitch/ids/market-providers.csv`.
+/// Secrets come from env, never YAML: `NXR_CTRADER_CLIENT_ID`,
+/// `NXR_CTRADER_CLIENT_SECRET`, `NXR_CTRADER_ACCESS_TOKEN` for `openapi`, and
+/// `NXR_CTRADER_FIX_PASSWORD` for `fix`, each with an optional `_<NAME>`
+/// suffixed override (the app credentials are shared across brokers; the
+/// access token and the FIX password are per account).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CtraderProviderYml {
+    /// Inbound transport: `openapi` (Open API WS, needs an approved Spotware
+    /// application) or `fix` (FIX 4.4 QUOTE session, credentials self-served
+    /// from the platform UI). Defaults to `openapi`.
+    #[serde(default)]
+    pub transport: String,
+    /// FIX gateway host. Not published: it ships with the FIX credentials.
+    #[serde(default)]
+    pub fix_host: String,
+    /// FIX gateway port, likewise credential-supplied.
+    #[serde(default)]
+    pub fix_port: u16,
+    /// TLS on the FIX socket. Defaults to true; only a broker that publishes a
+    /// plaintext gateway should ever set it false.
+    #[serde(default = "default_true")]
+    pub fix_tls: bool,
+    /// SenderCompID exactly as the credentials page shows it:
+    /// `<environment>.<brokerUID>.<traderLogin>` (e.g. `live.theBroker.12345`).
+    /// TargetCompID (CSERVER) and the QUOTE sub-ids are fixed by the protocol.
+    #[serde(default)]
+    pub fix_sender_comp_id: String,
+    /// Canonical "BASE/QUOTE" → broker-side cTrader symbol name (e.g.
+    /// "XAU/USD" → "XAUUSD"). Symbol IDs are NOT configured: they differ per
+    /// broker, so they are resolved at connect via ProtoOASymbolsListReq.
+    #[serde(default)]
+    pub symbols: BTreeMap<String, String>,
+    /// Endpoint host: `demo.ctraderapi.com` or `live.ctraderapi.com`.
+    /// Demo and live are fully separate account systems.
+    #[serde(default)]
+    pub host: String,
+    /// `traderLogin` of the account to authenticate (the login shown in the
+    /// cTrader UI). Selects one `ctidTraderAccountId` out of the token grant.
+    #[serde(default)]
+    pub trader_login: i64,
 }
 
 /// `runtime:` block — forwarder + server tuning knobs. All `Option<…>`
@@ -483,6 +635,14 @@ impl PipelineYml {
                 out.insert(sym.to_uppercase());
             }
         }
+        // Broker symbols count too: this set is what the aggregator admits, so a
+        // section missing here is silently dropped as `unknown_ticker` no matter
+        // how healthy the forwarder is.
+        for prov in self.ctrader.providers.values() {
+            for sym in prov.symbols.keys() {
+                out.insert(sym.to_uppercase());
+            }
+        }
         out
     }
 
@@ -495,8 +655,21 @@ impl PipelineYml {
         use anyhow::Context;
         let s = std::fs::read_to_string(path)
             .with_context(|| format!("read pipeline yaml {}", path.display()))?;
-        serde_yml::from_str::<Self>(&s)
-            .with_context(|| format!("parse pipeline yaml {}", path.display()))
+        let parsed = serde_yml::from_str::<Self>(&s)
+            .with_context(|| format!("parse pipeline yaml {}", path.display()))?;
+        if parsed
+            .signed_quotes
+            .as_ref()
+            .is_some_and(SignedQuotesYml::has_stale_sigma_alias)
+        {
+            tracing::warn!(
+                config = %path.display(),
+                "signed_quotes carries BOTH sigma_windows_min and the DEPRECATED \
+                 sigma_lookback_bars: sigma_windows_min wins and the stale key is \
+                 ignored — delete sigma_lookback_bars from this file"
+            );
+        }
+        Ok(parsed)
     }
 
     /// Resolve the canonical NXR config path: env `NXR_CONFIG` if set,
@@ -1055,6 +1228,74 @@ mod tests {
         }
     }
 
+    /// Minimal `signed_quotes:` yaml with whatever σ keys the case needs.
+    fn signed_yml(sigma_keys: &str) -> SignedQuotesYml {
+        let y = format!(
+            "oracle: \"0x0000000000000000000000000000000000000000\"\n\
+             chain_id: 11155111\n\
+             min_interval_ms: 5\n\
+             mark_max_age_ms: 500\n\
+             min_accepted_providers: 2\n\
+             min_composite_freshness_bps: 500\n\
+             quorum: 2\n\
+             feeds: []\n{sigma_keys}"
+        );
+        serde_yml::from_str::<SignedQuotesYml>(&y).expect("signed_quotes parses")
+    }
+
+    #[test]
+    fn sigma_alias_both_keys_absent_is_the_default_blend() {
+        assert_eq!(
+            signed_yml("").sigma_windows(),
+            crate::mtf::MtfWindows::default()
+        );
+        assert_eq!(
+            signed_yml("").sigma_windows().windows_min,
+            crate::mtf::DEFAULT_SIGMA_WINDOWS_MIN.to_vec()
+        );
+    }
+
+    /// THE rollout-safety property: an UNMIGRATED ConfigMap must still parse
+    /// (`deny_unknown_fields` would otherwise crashloop the new image) and must
+    /// reproduce the pre-MTF single-window σ exactly — one leg of 48 x 30 m.
+    #[test]
+    fn sigma_alias_alone_reproduces_the_single_window_path() {
+        let w = signed_yml("sigma_lookback_bars: 48\n").sigma_windows();
+        assert_eq!(w.windows_min, vec![48 * SIGMA_BAR_MIN]);
+        assert_eq!(w.weights, vec![1.0]);
+        assert_eq!(
+            w.bars(SIGMA_BAR_MIN),
+            vec![48],
+            "48 bars, exactly as before"
+        );
+        assert_eq!(w.max_bars(SIGMA_BAR_MIN), 48);
+        // One leg at weight 1 IS that leg: the blend is the identity, so σ is
+        // numerically identical to the old single-window Parkinson value.
+        let single = 0.0137_f64;
+        assert_eq!(w.blend(&[Some((single, 1.0))]), Some(single));
+    }
+
+    #[test]
+    fn sigma_windows_min_alone_is_used_verbatim() {
+        let w =
+            signed_yml("sigma_windows_min:\n  windows_min: [360, 2880]\n  weights: [2.0, 1.0]\n")
+                .sigma_windows();
+        assert_eq!(w.windows_min, vec![360, 2_880]);
+        assert_eq!(w.weights, vec![2.0, 1.0]);
+    }
+
+    #[test]
+    fn sigma_windows_min_wins_when_both_keys_are_present() {
+        let c = signed_yml(
+            "sigma_lookback_bars: 48\nsigma_windows_min:\n  windows_min: [360, 2880, 10080]\n",
+        );
+        assert!(c.has_stale_sigma_alias(), "loader must WARN on this file");
+        assert_eq!(
+            c.sigma_windows().windows_min,
+            crate::mtf::DEFAULT_SIGMA_WINDOWS_MIN.to_vec()
+        );
+    }
+
     #[test]
     fn classed_resolution_order() {
         let c = cal();
@@ -1171,6 +1412,58 @@ mod tests {
 
     /// Light-node mode: opt-in flag + the exact ticker subset it scopes
     /// the aggregator to (every feed symbol + every quote_via bridge leg).
+    /// The repo `config.yml` must actually carry the MINUTE-based windows: a
+    /// serde default would silently paper over a stale `_days` key.
+    #[test]
+    fn repo_config_declares_vol_windows_in_minutes() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.yml");
+        let pl = PipelineYml::load(&root).expect("parse repo config.yml");
+        assert_eq!(
+            pl.series.vol.sigma_blend_windows_min.windows_min,
+            vec![20_160, 86_400, 259_200],
+            "14 d / 60 d / 180 d expressed in minutes"
+        );
+    }
+
+    /// Retention must be DERIVED so that the longest configured σ leg can
+    /// actually fill: a leg the retention cannot feed is a σ that silently
+    /// degrades forever.
+    #[test]
+    fn bars_retention_covers_the_longest_window() {
+        let base: SignedQuotesYml = serde_yml::from_str(
+            "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
+             min_composite_freshness_bps: 500\nquorum: 1\npeers: []\n\
+             feeds:\n\
+               - { idx: 0, symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+        )
+        .expect("parse");
+        // Default legs are 6 h / 2 d / 1 w ⇒ longest = 7 d ⇒ 7 + edge day.
+        assert_eq!(base.sigma_windows().max_days(SIGMA_BAR_MIN), 7);
+        assert_eq!(base.bars_retention_days(), 8);
+        // The INDEX window is untouched: σ never reads it and it is the tree
+        // that actually costs disk.
+        assert_eq!(base.retention_days, 1);
+
+        // A longer leg pulls retention up with it, no second knob to forget.
+        let long = SignedQuotesYml {
+            sigma_windows_min: Some(crate::mtf::MtfWindows::equal([360u32, 2_880, 17_280])),
+            ..base.clone()
+        };
+        assert_eq!(long.bars_retention_days(), 13, "12 d leg + edge day");
+
+        // A session-traded feed declaring a WIDER calendar scan (its 336 real
+        // bars span ~10 calendar days) must widen retention too, or the scan
+        // reads shards that were already deleted.
+        let mut fx = base.clone();
+        fx.feeds[0].sigma_window_bars = Some(480); // 10 d
+        assert_eq!(
+            fx.bars_retention_days(),
+            11,
+            "scan horizon wins over the leg"
+        );
+    }
+
     #[test]
     fn sign_only_defaults_false_and_signed_symbols_covers_bridge_legs() {
         let sq: SignedQuotesYml = serde_yml::from_str(

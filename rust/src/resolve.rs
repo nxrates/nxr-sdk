@@ -577,12 +577,20 @@ pub fn resolve_ticker(
         // verbatim by `/v1/tickers/detail`). Fiat IS a legitimate base against a
         // crypto quote, so fall back to FX — never to EQ, which is the mis-hit
         // class the filter exists to exclude.
+        //
+        // CM added 2026-08-13: the FX-only fallback left every commodity base ×
+        // crypto quote phantom in exactly the same way (52 live rows: `WTI/USDT`
+        // → base_class=SP quote_class=CL itype=FUT, `CATTLE/USDT` → itype=WAR).
+        // Metals, energy and softs are as legitimate a base against a stablecoin
+        // as fiat is, so the fallback walks FX then CM. EQ stays excluded.
         let base_match = RESOLVER
             .find(&remaining, base_threshold, class_filter)
             .or_else(|| {
-                class_filter
-                    .filter(|_| cr_quote)
-                    .and_then(|_| RESOLVER.find(&remaining, base_threshold, Some(AssetClass::FX)))
+                class_filter.filter(|_| cr_quote).and_then(|_| {
+                    [AssetClass::FX, AssetClass::CM]
+                        .into_iter()
+                        .find_map(|c| RESOLVER.find(&remaining, base_threshold, Some(c)))
+                })
             });
         if let Some(base) = base_match {
             let tid = TickerId::new(

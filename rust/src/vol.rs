@@ -14,7 +14,19 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::mtf::{DEFAULT_BRICK_WINDOWS_MIN, MtfWindows};
 use crate::vol_estimator::rs_sigma_from_ohlc;
+
+/// The canonical vol bin is 30 minutes wide; every window resolves against it.
+pub const VOL_BIN_MIN: u32 = 30;
+
+fn default_brick_windows() -> MtfWindows {
+    MtfWindows::equal(DEFAULT_BRICK_WINDOWS_MIN)
+}
+
+/// Arming floor for one brick-sizing leg: 48 bins = 24 h. Brick legs are all
+/// >= 14 d, so this only ever drops a leg during cold history warm-up.
+const MIN_BLEND_BINS: usize = 48;
 
 /// Abstract source of per-bin sigma values.
 ///
@@ -34,15 +46,18 @@ pub trait VolSource {
 
 /// Volatility calculation config (typically from pipeline.yml `vol` section).
 ///
-/// `sigma_blend_windows_days` controls the 2-layer MTF σ blend used at brick-
+/// `sigma_blend_windows_min` controls the 2-layer MTF σ blend used at brick-
 /// size compute time. The outer k-fit MTF lives on `CalibrationConfig` as
 /// `k_fit_windows_days`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolConfig {
     pub ema_period: usize,
-    /// Per-window lookback (in days) used to blend the σ estimate. Inverse-
-    /// variance weighted across windows.
-    pub sigma_blend_windows_days: Vec<usize>,
+    /// Per-window lookback in MINUTES, with optional per-window weights
+    /// ([`crate::mtf::MtfWindows`]). Brick sizing additionally weights each leg
+    /// by its inverse variance, so the configured weights are a prior on top of
+    /// statistical precision. Defaults to 14 d / 60 d / 180 d, equal-weighted.
+    #[serde(default = "default_brick_windows")]
+    pub sigma_blend_windows_min: MtfWindows,
     pub winsorize_pct: [f64; 2],
     pub winsorize_min_samples: usize,
     /// Minimum interval (ms) between brick-size recalibration recomputes. The
@@ -57,7 +72,7 @@ pub struct VolConfig {
     /// `σ_eff = max(σ_blend, σ_fast)` where `σ_fast` is a SHORT-halflife EWMA of
     /// the trailing per-bin Rogers-Satchell σ (the same `.vol` rows the slow MTF
     /// blend reads). The slow inverse-variance-weighted blend (the 14/60/180-day
-    /// `sigma_blend_windows_days`) is the FLOOR; the fast EWMA only ever raises
+    /// `sigma_blend_windows_min`) is the FLOOR; the fast EWMA only ever raises
     /// σ during a sudden vol spike.
     ///
     /// ## Why this dampens brick-storms (and ONLY storms)
@@ -129,7 +144,7 @@ impl Default for VolConfig {
     fn default() -> Self {
         Self {
             ema_period: 28,
-            sigma_blend_windows_days: vec![14, 60, 180],
+            sigma_blend_windows_min: default_brick_windows(),
             winsorize_pct: [0.05, 0.95],
             winsorize_min_samples: 5,
             recompute_cooldown_ms: DEFAULT_RECOMPUTE_COOLDOWN_MS,
@@ -153,7 +168,11 @@ pub struct MtfVolCalculator<'a, S: VolSource + ?Sized> {
 
 impl<'a, S: VolSource + ?Sized> MtfVolCalculator<'a, S> {
     pub fn new(source: &'a S, config: VolConfig) -> Self {
-        Self { source, config, buf: Vec::new() }
+        Self {
+            source,
+            config,
+            buf: Vec::new(),
+        }
     }
 
     /// Precompute sigma for every bin into a flat cache for O(1) lookup.
@@ -184,13 +203,15 @@ impl<'a, S: VolSource + ?Sized> MtfVolCalculator<'a, S> {
             return 0.01;
         }
 
-        let mut weighted_sum = 0.0;
-        let mut weight_sum = 0.0;
-
-        for &lookback_days in &self.config.sigma_blend_windows_days {
-            let lookback_periods = lookback_days * 48;
-            let start_idx = hour_idx.saturating_sub(lookback_periods);
-            if start_idx >= hour_idx || hour_idx - start_idx < 48 {
+        let windows = &self.config.sigma_blend_windows_min;
+        let mut legs: Vec<Option<(f64, f64)>> = Vec::with_capacity(windows.len());
+        for lookback_bins in windows.bars(VOL_BIN_MIN) {
+            let start_idx = hour_idx.saturating_sub(lookback_bins);
+            // A leg that cannot reach the arming floor is DROPPED, never
+            // emitted from a short sample; `MtfWindows::blend` renormalises the
+            // weights across the survivors.
+            if start_idx >= hour_idx || hour_idx - start_idx < MIN_BLEND_BINS {
+                legs.push(None);
                 continue;
             }
 
@@ -204,20 +225,15 @@ impl<'a, S: VolSource + ?Sized> MtfVolCalculator<'a, S> {
             let [lo_pct, hi_pct] = self.config.winsorize_pct;
             let (wmean, variance) =
                 winsorized_mean_and_var_inplace(&mut self.buf, min_samples, lo_pct, hi_pct);
-            if variance <= 0.0 || wmean <= 0.0 {
-                continue;
-            }
-
-            let inv_var = 1.0 / variance;
-            weighted_sum += inv_var * wmean;
-            weight_sum += inv_var;
+            // Inverse variance is this consumer's per-leg quality weight: brick
+            // sizing wants statistical efficiency, and every leg here is long
+            // enough (>= 14 d) for that to be a fair comparison.
+            legs.push((variance > 0.0 && wmean > 0.0).then(|| (wmean, 1.0 / variance)));
         }
 
-        let blend = if weight_sum > 0.0 {
-            weighted_sum / weight_sum
-        } else {
-            self.source.sigma_pct(hour_idx).max(0.01)
-        };
+        let blend = windows
+            .blend(&legs)
+            .unwrap_or_else(|| self.source.sigma_pct(hour_idx).max(0.01));
 
         // Spike-responsive floor (gated; default OFF — calm-regime unchanged).
         // σ_eff = max(σ_blend, σ_fast). The fast EWMA only ever RAISES σ during
@@ -441,8 +457,14 @@ impl LiveVolRing {
         l: f64,
         c: f64,
     ) -> bool {
-        if !(o.is_finite() && h.is_finite() && l.is_finite() && c.is_finite()
-            && o > 0.0 && h > 0.0 && l > 0.0 && c > 0.0)
+        if !(o.is_finite()
+            && h.is_finite()
+            && l.is_finite()
+            && c.is_finite()
+            && o > 0.0
+            && h > 0.0
+            && l > 0.0
+            && c > 0.0)
         {
             return false;
         }
@@ -590,7 +612,14 @@ fn winsorized_mean_and_var_inplace(
     if n < min_samples {
         let mean = values.iter().sum::<f64>() / n.max(1) as f64;
         let var = if n > 1 {
-            values.iter().map(|v| { let d = v - mean; d * d }).sum::<f64>() / (n - 1) as f64
+            values
+                .iter()
+                .map(|v| {
+                    let d = v - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / (n - 1) as f64
         } else {
             0.0
         };
@@ -610,7 +639,14 @@ fn winsorized_mean_and_var_inplace(
         sum += *v;
     }
     let mean = sum / n as f64;
-    let var = values.iter().map(|v| { let d = v - mean; d * d }).sum::<f64>() / (n - 1) as f64;
+    let var = values
+        .iter()
+        .map(|v| {
+            let d = v - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / (n - 1) as f64;
     (mean, var)
 }
 
@@ -621,9 +657,15 @@ mod tests {
     struct StaticSource(Vec<f64>);
 
     impl VolSource for StaticSource {
-        fn len(&self) -> usize { self.0.len() }
-        fn sigma_pct(&self, i: usize) -> f64 { self.0.get(i).copied().unwrap_or(0.0) }
-        fn find_index_for_mts(&self, _mts: u64) -> usize { self.0.len().saturating_sub(1) }
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+        fn sigma_pct(&self, i: usize) -> f64 {
+            self.0.get(i).copied().unwrap_or(0.0)
+        }
+        fn find_index_for_mts(&self, _mts: u64) -> usize {
+            self.0.len().saturating_sub(1)
+        }
     }
 
     #[test]
@@ -631,7 +673,11 @@ mod tests {
         let mut values: Vec<f64> = (1..=20).map(|i| i as f64).collect();
         values[19] = 1000.0;
         let (mean, _var) = winsorized_mean_and_var_inplace(&mut values, 5, 0.05, 0.95);
-        assert!(mean < 12.0, "winsorized mean should suppress outlier: got {}", mean);
+        assert!(
+            mean < 12.0,
+            "winsorized mean should suppress outlier: got {}",
+            mean
+        );
     }
 
     #[test]
@@ -646,9 +692,15 @@ mod tests {
     /// refresh lands on the right bin during the spike-window replay).
     struct VecVolSource(Vec<f64>);
     impl VolSource for VecVolSource {
-        fn len(&self) -> usize { self.0.len() }
-        fn sigma_pct(&self, i: usize) -> f64 { self.0.get(i).copied().unwrap_or(0.0) }
-        fn find_index_for_mts(&self, _mts: u64) -> usize { self.0.len().saturating_sub(1) }
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+        fn sigma_pct(&self, i: usize) -> f64 {
+            self.0.get(i).copied().unwrap_or(0.0)
+        }
+        fn find_index_for_mts(&self, _mts: u64) -> usize {
+            self.0.len().saturating_sub(1)
+        }
     }
 
     /// SPIKE-RESPONSIVE σ (vol-spike brick-storm damping).
@@ -679,7 +731,7 @@ mod tests {
         // SLOW blend still lags the freshest few bins (it averages over 14 days
         // of bins = 672 samples >> the 6 spike bins).
         let cfg_off = VolConfig {
-            sigma_blend_windows_days: vec![14],
+            sigma_blend_windows_min: MtfWindows::equal([14 * 1_440u32]),
             winsorize_min_samples: 5,
             spike_responsive: false,
             ..VolConfig::default()
@@ -759,11 +811,14 @@ mod tests {
         let src = VecVolSource(sigmas);
 
         let cfg_off = VolConfig {
-            sigma_blend_windows_days: vec![14],
+            sigma_blend_windows_min: MtfWindows::equal([14 * 1_440u32]),
             spike_responsive: false,
             ..VolConfig::default()
         };
-        let cfg_on = VolConfig { spike_responsive: true, ..cfg_off.clone() };
+        let cfg_on = VolConfig {
+            spike_responsive: true,
+            ..cfg_off.clone()
+        };
 
         for i in 0..src.len() {
             let blend = MtfVolCalculator::new(&src, cfg_off.clone()).compute_sigma(i);
@@ -804,7 +859,11 @@ mod tests {
         for (i, &(_, o, h, l, c)) in bins.iter().enumerate() {
             let sigma = rs(o, h, l, c);
             let ema = if i < ema_period {
-                bins[..=i].iter().map(|&(_, a, b, d, e)| rs(a, b, d, e)).sum::<f64>() / (i + 1) as f64
+                bins[..=i]
+                    .iter()
+                    .map(|&(_, a, b, d, e)| rs(a, b, d, e))
+                    .sum::<f64>()
+                    / (i + 1) as f64
             } else {
                 alpha * sigma + (1.0 - alpha) * prev.unwrap_or(sigma)
             };
@@ -839,7 +898,7 @@ mod tests {
         // 3 s10 bars in bin 0.
         ring.observe(0, 100.0, 101.0, 99.5, 100.5);
         ring.observe(10_000, 100.5, 103.0, 100.0, 102.0); // new high
-        ring.observe(20_000, 102.0, 102.5, 98.0, 99.0);   // new low + last close
+        ring.observe(20_000, 102.0, 102.5, 98.0, 99.0); // new low + last close
         // Advance to bin 1 to finalize bin 0.
         ring.observe(bin + 1, 99.0, 99.0, 99.0, 99.0);
         // Expected RS over rolled-up O=100, H=103, L=98, C=99.
@@ -851,7 +910,9 @@ mod tests {
     #[test]
     fn live_vol_ring_prime_continues_ema() {
         let mut ring = LiveVolRing::new(100, 28);
-        let rows: Vec<(i64, f64)> = (0..50).map(|i| (i as i64 * 1_800_000, 0.01 + 0.0001 * i as f64)).collect();
+        let rows: Vec<(i64, f64)> = (0..50)
+            .map(|i| (i as i64 * 1_800_000, 0.01 + 0.0001 * i as f64))
+            .collect();
         ring.prime_from_slice(&rows);
         assert_eq!(ring.len(), 50);
         // last primed row becomes the EMA carry

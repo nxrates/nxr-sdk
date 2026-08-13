@@ -68,12 +68,6 @@ pub struct PipelineYml {
     pub network: NetworkYml,
     #[serde(default)]
     pub server: ServerYml,
-    /// Offline-tool / runtime operator-facing pipeline knobs that aren't
-    /// part of the canonical core data path. Currently:
-    ///   - `sweep.pairs`: the `mtf_sweep` calibration sweep universe (was:
-    ///     hardcoded `series-factory/src/bin/mtf_sweep.rs::SWEEP_PAIRS`).
-    #[serde(default)]
-    pub pipeline: PipelineSectionYml,
     /// Synth-pair registry. Currently:
     ///   - `initial_pairs`: launch synth-pair list (was: hardcoded
     ///     `sdk/rust/src/synth/pairs.rs::INITIAL_SYNTH_PAIRS`).
@@ -523,31 +517,6 @@ pub const DEFAULT_RUNTIME_FRAME_BUF_MAX: usize = 2 * 1024 * 1024;
 pub const DEFAULT_RUNTIME_HEALTH_STALE_SECS: u64 = 20;
 pub const DEFAULT_RUNTIME_DAILY_REFRESH_OFFSET_SECS: u64 = 30;
 pub const DEFAULT_RUNTIME_WS_FLUSH_MS: u64 = 200;
-
-/// `pipeline:` block — offline-tool operator-facing knobs (sweep universe,
-/// future: per-bin overrides). Distinct from `series.pipeline:` (which holds
-/// replay/backfill knobs).
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct PipelineSectionYml {
-    #[serde(default)]
-    pub sweep: SweepYml,
-}
-
-/// `pipeline.sweep:` — `mtf_sweep` bin universe.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct SweepYml {
-    /// `<BASE>/<QUOTE>` pair list for the `mtf_sweep` calibration sweep.
-    /// Empty ⇒ fall back to [`crate::synth::pairs::DEFAULT_SWEEP_PAIRS`].
-    #[serde(default)]
-    pub pairs: Vec<PairSpec>,
-}
-
-/// One `<BASE>/<QUOTE>` spec — yaml-friendly version of `(&str, &str)`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PairSpec {
-    pub base: String,
-    pub quote: String,
-}
 
 /// `synths:` block — optional manual override for synth-pipeline pairs.
 /// Leave `initial_pairs` empty: the live kernel derives crosses from

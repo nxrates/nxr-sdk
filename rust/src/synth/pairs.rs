@@ -30,28 +30,6 @@ pub const DEFAULT_INITIAL_SYNTH_PAIRS: &[SynthPairSpec] = &[
     SynthPairSpec { synth_sym: "SOL/ETH", base_sym: "SOL/USDT", quote_sym: "ETH/USDT" },
 ];
 
-/// Audit-frozen fallback `mtf_sweep` calibration sweep universe. Only used
-/// when `pipeline.sweep.pairs` in YAML is empty (warn-logged). Promoted to
-/// sdk from `series-factory/src/bin/mtf_sweep.rs::SWEEP_PAIRS` (phase 59.R3.M2).
-pub const DEFAULT_SWEEP_PAIRS: &[(&str, &str)] = &[
-    // Volatile USDT-quoted
-    ("BTC", "USDT"),
-    ("ETH", "USDT"),
-    ("BNB", "USDT"),
-    ("SOL", "USDT"),
-    ("XAUT", "USDT"),
-    // Crypto crosses (operator priority)
-    ("ETH", "BTC"),
-    ("BNB", "ETH"),
-    ("BNB", "BTC"),
-    ("SOL", "BTC"),
-    ("SOL", "ETH"),
-    // Stable/USDT (target = 50)
-    ("USDC", "USDT"),
-    ("USDE", "USDT"),
-    ("USD1", "USDT"),
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;

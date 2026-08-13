@@ -221,7 +221,22 @@ export class NxrClient {
     // /v1/tickers/detail is the sole id↔symbol source of truth; it populates
     // symbolToId. (The redundant /v1/symbols endpoint was retired 2026-07-14.)
     if (this.symbolToId.size === 0) await this.tickersDetail();
-    return this.symbolToId.get(symbol);
+    const listed = this.symbolToId.get(symbol);
+    if (listed !== undefined) return listed;
+    // Not listed is not unresolvable: the listing holds pairs the server has
+    // registered, while `/v1/price` composes ANY pair whose legs are live and
+    // answers with the composed id. Without this, every cross that is merely
+    // routable (XAU/JPY, GER40/BTC) looked unknown to a caller.
+    try {
+      const { ticker } = await this.json<{ ticker: number | string }>(
+        `/v1/price/${urlSym(symbol)}`,
+      );
+      const id = BigInt(ticker);
+      this.symbolToId.set(symbol, id);
+      return id;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Fetch provider_id → name from `/v1/providers`. */

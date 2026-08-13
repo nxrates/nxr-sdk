@@ -171,7 +171,7 @@ pub struct CrossGraph {
     ///
     /// `resolve_ticker` is not a function of the two sides independently: the
     /// quote it detects changes the class filter on the base, so `ETH/USDT`
-    /// resolves base CR:5801 (Ethereum) while `ETH/USD` resolves base IN:2101
+    /// resolves base CR:5801 (Ethereum) while `ETH/USD` resolves base IP:2101
     /// (indices.csv "Ethereum Index" carries the alias ETH and loads after the
     /// crypto class, so it wins the unfiltered exact-name map). Keyed on strings
     /// that mismatch was invisible; keyed on asset ids it would strand every
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(route(&broker, "EUR/JPY"), route(&oracle, "EUR/JPY"));
     }
 
-    /// `resolve_ticker_id("ETH/USD")` decodes base IN:2101 ("Ethereum Index",
+    /// `resolve_ticker_id("ETH/USD")` decodes base IP:2101 ("Ethereum Index",
     /// whose alias ETH shadows the crypto asset once the quote is fiat), while
     /// `ETH/USDT` decodes base CR:5801. The books must win, or ETH/USD strands
     /// on an asset that has no edges anywhere.

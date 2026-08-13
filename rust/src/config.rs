@@ -180,12 +180,11 @@ impl NxrConfig {
             // amended 2026-07-08): NO VOLATILE crypto symbol is quoted vs USD
             // natively — `<crypto>/USD` stays SYNTH `<crypto>/USDT × USDT/USD`
             // (see `synth::triangulation_rules`, USDT/USD-anchored). Native
-            // `/USD` tickers are (a) the CEX fiat-book anchors USDT/USD +
-            // USDC/USD (kraken/binance/bitstamp/gemini/coinbase, listed here),
-            // and (b) STABLECOIN/USD pegs fed by the pyth oracle relay — the
-            // golden source for stable pegs — declared in `config.yml
-            // oracles.providers.pyth.symbols`, NOT in this manifest (this env
-            // list drives CEX forwarder subscriptions only).
+            // `/USD` tickers are the CEX fiat-book anchors USDT/USD + USDC/USD
+            // (kraken/binance/bitstamp/gemini/coinbase, listed here). The Pyth
+            // grant covers 7 feeds (`config.yml oracles.providers.pyth.symbols`);
+            // every other stablecoin peg is parked since 2026-08-10 and composes
+            // on read off the CEX legs.
             // G5 feed-coverage adds (2026-07-22, signed-quotes tier): native
             // books the BASE/USD fallback cannot reach — RLUSD/USDC +
             // USDG/USDC (kraken lists both; neither was ever subscribed),

@@ -275,8 +275,17 @@ impl CrossGraph {
     /// depth in USD (`0.0` when unknown). `None` = the pair is not composable
     /// from the current primaries, which is the honest answer, not an error.
     pub fn route(&self, base: AssetId, quote: AssetId, vol: &dyn Fn(u64) -> f64) -> Option<Route> {
+        // A parity wrap (EURC, QCAD, …) IS its underlying node: identifying the
+        // two computes what a 1.0 peg edge would, with no synthetic leg that has
+        // no book, no ticker_id and no age behind it (`series_alias::peg_asset`).
+        let (base, quote) = (
+            crate::series_alias::peg_asset(base),
+            crate::series_alias::peg_asset(quote),
+        );
         if base == quote {
-            return None; // self-pair: not a cross, and never a listed ticker
+            // Self-pair: not a cross, and never a listed ticker. `EURC/EUR` lands
+            // here too: that price is the peg, not something the books can say.
+            return None;
         }
         let mut heap: BinaryHeap<Cand> = BinaryHeap::new();
         heap.push(Cand {
@@ -636,6 +645,51 @@ mod tests {
         assert!(c.bid <= c.ask);
         assert!((c.bid - 1.0 / 150.3).abs() < 1e-12);
         assert!((c.ask - 1.0 / 150.0).abs() < 1e-12);
+    }
+
+    /// A parity FX wrapper carries NO feed of its own, so it must route over its
+    /// underlying currency's legs and mark IDENTICALLY: the peg is 1:1, so any
+    /// difference at all would be invented.
+    #[test]
+    fn a_parity_wrap_marks_exactly_like_its_underlying() {
+        let g = graph(&["EUR/USD", "USD/CAD", "USDC/USD"]);
+        assert_eq!(route(&g, "EURC/USD"), vec![("EUR/USD".into(), 1)]);
+        // CAD's primary is `USD/CAD`, so the wrap inherits the inversion.
+        assert_eq!(route(&g, "QCAD/USD"), vec![("USD/CAD".into(), -1)]);
+        let q = |_| Some(LegQuote { tick: tick(1.0913, 1.0915, 9_000), age_ms: Some(70) });
+        for (wrap, under) in [("EURC/USD", "EUR/USD"), ("QCAD/USD", "CAD/USD")] {
+            let w = g.route_sym(wrap, &blind).expect("routes").compose(q).expect("composes");
+            let u = g.route_sym(under, &blind).expect("routes").compose(q).expect("composes");
+            assert_eq!(w.mid, u.mid, "{wrap} mid must equal {under} EXACTLY");
+            assert_eq!(w.bid, u.bid);
+            assert_eq!(w.ask, u.ask);
+            // Provenance is the underlying leg's, never wall clock.
+            assert_eq!(w.age_ms, u.age_ms);
+            assert_eq!(w.conf, u.conf);
+        }
+    }
+
+    /// The peg is an asset identity, not a per-pair pin, so a wrap crosses
+    /// anything its underlying can reach.
+    #[test]
+    fn a_parity_wrap_crosses_like_its_underlying() {
+        let g = graph(&["EUR/USD", "USDC/USD", "USD/JPY"]);
+        assert_eq!(
+            route(&g, "EURC/USDC"),
+            vec![("EUR/USD".into(), 1), ("USDC/USD".into(), -1)]
+        );
+        assert_eq!(
+            route(&g, "EURC/JPY"),
+            vec![("EUR/USD".into(), 1), ("USD/JPY".into(), 1)]
+        );
+    }
+
+    /// A custodial BTC wrap has books of its own, so it must NOT be pegged away:
+    /// `WBTC/USDT` stays the WBTC book, not BTC's.
+    #[test]
+    fn a_custodial_wrap_is_not_pegged_to_its_underlying() {
+        let g = graph(&["WBTC/USDT", "BTC/USDT"]);
+        assert_eq!(route(&g, "WBTC/USDT"), vec![("WBTC/USDT".into(), 1)]);
     }
 
     #[test]

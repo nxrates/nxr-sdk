@@ -94,6 +94,28 @@ fn fiat_quote_resolves_in_fx() {
     assert_eq!(m.ticker.quote.name.to_lowercase(), "thai baht");
 }
 
+/// The BTR FX Core wrappers must resolve STRICTLY to their OWN new
+/// crypto-assets.csv rows: an FNV phantom would shard them under hash-noise ids,
+/// and being absorbed by the fiat row they wrap (`KRW1` → `KRW` via suffix
+/// stripping is the near miss) would erase the distinct id a de-peg needs.
+#[test]
+fn fx_wrapper_assets_resolve_to_themselves_not_to_their_currency() {
+    for (sym, base) in [
+        ("EURC/USD", "euro coin"),
+        ("QCAD/USD", "qcad"),
+        ("AUDF/USD", "aud forte"),
+        ("BRLA/USD", "brla digital"),
+        ("JPYC/USD", "jpy coin"),
+        ("KRW1/USD", "krw1"),
+    ] {
+        assert!(
+            nxr_sdk::try_resolve_ticker_id(sym).is_some(),
+            "{sym} must resolve strictly, not through the FNV fallback"
+        );
+        assert_eq!(base_name_of(sym).to_lowercase(), base, "{sym} base asset");
+    }
+}
+
 /// CAT-2 custodial BTC wraps keep a DISTINCT exposed ticker_id (de-peg risk is
 /// observable) but `series_canonical_ticker_id` redirects them to BTC's series.
 #[test]

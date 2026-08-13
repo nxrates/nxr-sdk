@@ -85,7 +85,7 @@ pub use vol_estimator::rs_sigma_from_ohlc;
 // ---- Ticker resolution ----
 
 pub use resolve::resolve_ticker;
-pub use series_alias::series_canonical_ticker_id;
+pub use series_alias::{is_parity_wrap, peg_asset, series_canonical_ticker_id};
 pub use ticker::{
     TickerIdCache, phantom_ticker_id, resolve_ticker_id, split_pair, split_pair_multi,
     try_resolve_ticker_id,

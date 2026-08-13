@@ -10,14 +10,13 @@
 //!    as a synthetic provider into an existing target ticker's VWAP state.
 //!    Provider id = `SYNTH_BASE + offset` (offset = registry position).
 //!
-//! ## Relation to [`crate::synth::paths`]
+//! ## Relation to [`crate::synth::cross`]
 //!
-//! `SYNTH_PATHS` (paths.rs) drives the *synth pipeline* (per-tick bar reconstruction
-//! via Parkinson/Rogers-Satchell math) for crypto-crypto crosses (ETH/BTC, …).
-//!
-//! `SYNTHESIS_RULES` (this file) drives the *aggregator cycle* triangulator that
-//! publishes new Index entries (USDT/JPY, BTC/USD, …). The two registries are
-//! complementary, not redundant — the engines they feed are different.
+//! `cross` RESOLVES any pair on demand and is the single authority on whether a
+//! pair is composable. These rules only say which outputs the aggregator cycle
+//! MATERIALIZES as tickers of their own, which is a disk and cardinality choice.
+//! A rule must never contradict the resolver;
+//! `every_synthesis_rule_is_routable_from_its_own_legs` pins that.
 //!
 //! ## Leg symbol convention
 //!
@@ -273,63 +272,42 @@ mod tests {
         }
     }
 
+    /// Every synthesis rule's output must be routable by the ONE resolver from
+    /// the rule's own legs, and never through the output itself.
+    ///
+    /// The graph is built from the rule LEGS only, which is the resolver's
+    /// contract (edges are primaries). That contract is what retired the
+    /// `derive_legs` self-reference guard: the USDT/JPY bug was a registered
+    /// synthesis OUTPUT winning a pivot leg, and an output is not a primary, so
+    /// it is not in the graph to win.
     #[test]
-    fn synthesis_rules_derive_legs_round_trip_without_self_reference() {
-        // Simulates the real runtime hazard from the USDT/JPY bug fixed in
-        // `synth::paths::derive_legs`: once the triangulator registers an
-        // out_sym into symbol_map, `resolve` will find it. If derive_legs ever
-        // regresses to accepting a self-referential candidate, this test (which
-        // primes the resolver with every out_sym pointing at a synthetic id,
-        // exactly like the live symbol_map) catches it for the FULL rule set,
-        // not just the one hand-picked USDT/JPY regression case in paths.rs.
-        use crate::synth::paths::derive_legs;
-        use std::collections::HashMap;
+    fn every_synthesis_rule_is_routable_from_its_own_legs() {
+        use crate::synth::cross::CrossGraph;
 
-        // Registered primaries: every leg symbol any rule depends on, plus the
-        // two pivots' identity pairs. Distinct id range from synth outputs so a
-        // self-reference bug (leg id == the out_sym's own id) is unambiguous.
-        let mut ids: HashMap<String, u64> = HashMap::new();
-        let mut next_primary_id = 1u64;
-        for r in SYNTHESIS_RULES {
-            for leg in [r.leg1_sym, r.leg2_sym] {
-                ids.entry(leg.to_string()).or_insert_with(|| {
-                    let id = next_primary_id;
-                    next_primary_id += 1;
-                    id
-                });
-            }
-        }
-        // Every rule's own output is ALSO registered (as the live triangulator
-        // does), with ids disjoint from the primaries above.
-        let mut next_synth_id = 1_000_000u64;
-        for r in SYNTHESIS_RULES {
-            ids.entry(r.out_sym.to_string()).or_insert_with(|| {
-                let id = next_synth_id;
-                next_synth_id += 1;
-                id
-            });
-        }
-        let resolve = |s: &str| -> Option<u64> { ids.get(s).copied() };
+        let primaries: Vec<(String, u64)> = SYNTHESIS_RULES
+            .iter()
+            .flat_map(|r| [r.leg1_sym, r.leg2_sym])
+            .map(|s| (s.to_string(), crate::resolve_ticker_id(s)))
+            .collect();
+        let g = CrossGraph::from_primaries(primaries);
 
         for r in SYNTHESIS_RULES {
-            let Some((base, quote)) = r.out_sym.split_once('/') else {
-                continue; // not a base/quote-shaped symbol; not derive_legs's concern
-            };
-            let self_id = ids[r.out_sym];
-            match derive_legs(base, quote, &resolve) {
-                Some(legs) => {
-                    assert!(
-                        legs.iter().all(|(_, _, id)| *id != self_id),
-                        "{} derive_legs self-referenced (id {self_id}): {legs:?}",
-                        r.out_sym
-                    );
-                }
-                None => {
-                    // Some out_syms only resolve via the curated SYNTH_PATHS table
-                    // (compose_cross_ohlc tries that first) rather than generic
-                    // pivot derivation - not itself a failure of this invariant.
-                }
-            }
+            let self_id = crate::resolve_ticker_id(r.out_sym);
+            let route = g
+                .route_sym(r.out_sym, &|_| 0.0)
+                .unwrap_or_else(|| panic!("{} must route from its own legs", r.out_sym));
+            assert!(
+                route.legs.iter().all(|l| l.ticker_id != self_id),
+                "{} routed through itself: {:?}",
+                r.out_sym,
+                route.legs
+            );
+            // Route length may EXCEED the rule's 2 legs: several rules treat
+            // USDT as if it were USD (`BTC/EUR = BTC/USDT × (EUR/USD)⁻¹`), which
+            // silently prices the peg at 1. The graph is dimensionally honest
+            // and inserts the USDT/USD hop, so it can only be longer, never
+            // shorter, than a rule that skips a conversion.
+            assert!(!route.legs.is_empty());
         }
     }
 }

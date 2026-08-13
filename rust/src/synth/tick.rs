@@ -47,8 +47,20 @@ pub fn compute_synth_tick(
     path: &SynthPath,
     legs: &HashMap<&str, LegTick>,
 ) -> Option<SynthTick> {
+    let signed: Vec<(i8, LegTick)> = path
+        .legs
+        .iter()
+        .map(|l| legs.get(l.sym.as_str()).map(|k| (l.exp, *k)))
+        .collect::<Option<_>>()?;
+    compose_legs(&signed)
+}
+
+/// The composition itself, over `(exponent, quote)` pairs. Keyed on nothing: the
+/// caller has already matched legs to quotes, by symbol ([`compute_synth_tick`])
+/// or by MITCH ticker id ([`super::cross::Route::compose`]).
+pub fn compose_legs(legs: &[(i8, LegTick)]) -> Option<SynthTick> {
     // Trivial-identity path (e.g. EUR/EUR with 0 legs) → 1.0 quote, full conf.
-    if path.legs.is_empty() {
+    if legs.is_empty() {
         return Some(SynthTick { bid: 1.0, ask: 1.0, mid: 1.0, conf: 10_000 });
     }
 
@@ -57,8 +69,7 @@ pub fn compute_synth_tick(
     let mut ask = 1.0_f64;
     let mut conf: u16 = 10_000;
 
-    for leg in &path.legs {
-        let k = legs.get(leg.sym.as_str())?;
+    for (exp, k) in legs {
         // is_finite() + magnitude cap (not just >0.0): a poisoned leg (finite
         // but astronomical) multiplied straight into `mid`/`bid`/`ask` below
         // would otherwise silently corrupt the whole cross (2026-07-10
@@ -69,7 +80,7 @@ pub fn compute_synth_tick(
         {
             return None;
         }
-        if leg.exp == 1 {
+        if *exp == 1 {
             mid *= k.mid;
             bid *= k.bid;
             ask *= k.ask;

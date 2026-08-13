@@ -12,7 +12,7 @@ use nxr_sdk::synth::{
     OhlcLite, RollingCorrelation, TimedOhlc, VarianceEstimator,
     compute_synth_tick, reconstruct_synth_ohlc, reconstruct_synth_series_at_base_tf_then_rollup,
 };
-use nxr_sdk::synth::paths::{SynthPath, Leg, path_for, is_synth};
+use nxr_sdk::synth::paths::{SynthPath, Leg};
 use nxr_sdk::synth::tick::LegTick;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -34,19 +34,6 @@ fn mk_path(sym: &str, legs: &[(&str, i8)]) -> SynthPath {
         sym: sym.to_string(),
         legs: legs.iter().map(|(s, e)| Leg::new(*s, *e)).collect(),
     }
-}
-
-// ─── Path registry sanity ──────────────────────────────────────────────
-
-#[test]
-fn registry_lookup() {
-    assert!(path_for("ETH/BTC").is_some());
-    assert!(path_for("BTC/EUR").is_some());
-    assert!(path_for("USDT/BTC").is_some());
-    assert!(path_for("EUR/EUR").is_some());
-    assert!(path_for("BTC/USDT").is_none(), "raw symbol should not be in synth registry");
-    assert!(is_synth("ETH/BTC"));
-    assert!(!is_synth("BTC/USDT"));
 }
 
 // ─── computeSynthTick (port of synth-tick.test.ts) ─────────────────────
@@ -79,7 +66,7 @@ fn two_leg_product() {
 /// NXR uses `USDT/BTC = 1 / (BTC/USDT)`.
 #[test]
 fn one_leg_inversion() {
-    let path = path_for("USDT/BTC").expect("USDT/BTC present");
+    let path = &mk_path("USDT/BTC", &[("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, LegTick> = HashMap::new();
     legs.insert("BTC/USDT", tick(99_500.0, 100_500.0));
     let out = compute_synth_tick(path, &legs).expect("composable");
@@ -94,7 +81,7 @@ fn one_leg_inversion() {
 /// NXR uses `ETH/BTC = (ETH/USDT) / (BTC/USDT)`.
 #[test]
 fn two_leg_ratio() {
-    let path = path_for("ETH/BTC").expect("ETH/BTC present");
+    let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, LegTick> = HashMap::new();
     legs.insert("ETH/USDT", tick(2_790.0, 2_810.0));    // mid 2800
     legs.insert("BTC/USDT", tick(99_500.0, 100_500.0)); // mid 100_000
@@ -154,7 +141,7 @@ fn nonpositive_quote_returns_none() {
 /// Port of BTR test "identity (0-leg) → 1.0 w/ full conf".
 #[test]
 fn identity_zero_leg() {
-    let path = path_for("EUR/EUR").expect("identity present");
+    let path = &mk_path("EUR/EUR", &[]);
     let legs: HashMap<&str, LegTick> = HashMap::new();
     let out = compute_synth_tick(path, &legs).expect("identity composable");
     assert_eq!(out.mid, 1.0);
@@ -166,7 +153,7 @@ fn identity_zero_leg() {
 /// Port of BTR test "bid ≤ mid ≤ ask preserved across random 2-leg compositions".
 #[test]
 fn bid_mid_ask_invariant() {
-    let path = path_for("ETH/BTC").expect("ETH/BTC present");
+    let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     for s in 1..=50_u32 {
         let eth = 1000.0 + s as f64 * 50.0;
         let btc = 50_000.0 + s as f64 * 1000.0;
@@ -187,7 +174,7 @@ fn bid_mid_ask_invariant() {
 /// - log_range > 0 when legs have nonzero range
 #[test]
 fn ohlc_single_bucket_two_leg_ratio() {
-    let path = path_for("ETH/BTC").expect("ETH/BTC present");
+    let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, OhlcLite> = HashMap::new();
     legs.insert("ETH/USDT", OhlcLite { o: 2800.0, h: 2820.0, l: 2780.0, c: 2810.0 });
     legs.insert("BTC/USDT", OhlcLite { o: 100_000.0, h: 100_500.0, l: 99_500.0, c: 100_200.0 });
@@ -204,7 +191,7 @@ fn ohlc_single_bucket_two_leg_ratio() {
 /// Parkinson vs Rogers-Satchell produce different (but same-order) ranges.
 #[test]
 fn parkinson_vs_rs_estimators_diverge() {
-    let path = path_for("ETH/BTC").expect("ETH/BTC present");
+    let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, OhlcLite> = HashMap::new();
     legs.insert("ETH/USDT", OhlcLite { o: 2800.0, h: 2820.0, l: 2780.0, c: 2810.0 });
     legs.insert("BTC/USDT", OhlcLite { o: 100_000.0, h: 100_500.0, l: 99_500.0, c: 100_200.0 });
@@ -218,7 +205,7 @@ fn parkinson_vs_rs_estimators_diverge() {
 
 #[test]
 fn ohlc_missing_leg_returns_none() {
-    let path = path_for("ETH/BTC").expect("ETH/BTC present");
+    let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, OhlcLite> = HashMap::new();
     legs.insert("ETH/USDT", OhlcLite { o: 2800.0, h: 2820.0, l: 2780.0, c: 2810.0 });
     // BTC/USDT missing.
@@ -227,7 +214,7 @@ fn ohlc_missing_leg_returns_none() {
 
 #[test]
 fn ohlc_identity_path_returns_unit() {
-    let path = path_for("EUR/EUR").expect("identity present");
+    let path = &mk_path("EUR/EUR", &[]);
     let legs: HashMap<&str, OhlcLite> = HashMap::new();
     let synth = reconstruct_synth_ohlc(path, &legs, VarianceEstimator::RogersSatchell, |_, _| 0.0)
         .expect("identity composable");

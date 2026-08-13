@@ -642,12 +642,26 @@ pub fn resolve_ticker(
         // crypto quote phantom in exactly the same way (52 live rows: `WTI/USDT`
         // → base_class=SP quote_class=CL itype=FUT, `CATTLE/USDT` → itype=WAR).
         // Metals, energy and softs are as legitimate a base against a stablecoin
-        // as fiat is, so the fallback walks FX then CM. EQ stays excluded.
+        // as fiat is, so the fallback walks FX then CM.
+        //
+        // IP added 2026-08-14 so an index CFD can be crossed into crypto
+        // (`GER40/BTC`), EQ last so an equity can too (`AAPL/BTC`).
+        // EQ IS ONLY SAFE WHILE EVERY TRADED TOKEN HAS ITS OWN crypto-assets.csv
+        // ROW: with no CR row, the same-ticker equity is the only EXACT alias
+        // holder and wins outright regardless of order (CFG → Citizens
+        // Financial, MET → MetLife, FF → F&F, INF → Informa, until those rows
+        // were added). Registering a new traded token is therefore mandatory,
+        // not cosmetic. Guarded by `crypto_quoted_bases_never_lose_to_an_equity`.
         let base_match = RESOLVER
             .find(&remaining, base_threshold, class_filter)
             .or_else(|| {
                 class_filter.filter(|_| cr_quote).and_then(|_| {
-                    [AssetClass::FX, AssetClass::CM]
+                    [
+                        AssetClass::FX,
+                        AssetClass::CM,
+                        AssetClass::IP,
+                        AssetClass::EQ,
+                    ]
                         .into_iter()
                         .find_map(|c| RESOLVER.find(&remaining, base_threshold, Some(c)))
                 })

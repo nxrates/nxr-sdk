@@ -364,3 +364,65 @@ fn stablecoin_audit_2026_07_21_new_oracle_symbols_resolve_strictly() {
         );
     }
 }
+
+#[test]
+fn crypto_quoted_bases_never_lose_to_an_equity() {
+    // The CR class filter on a crypto-quoted base falls back through FX, CM,
+    // IP then EQ (2026-08-14), so GER40/BTC and AAPL/BTC resolve instead of
+    // falling to the FNV phantom path. EQ is last and only safe while every
+    // traded token holds a crypto-assets.csv row: without one, the same-ticker
+    // equity is the sole EXACT alias holder and wins outright regardless of
+    // order (CFG → Citizens Financial, MET → MetLife, FF → F&F, INF →
+    // Informa, all fixed by registering the token). This pins both halves.
+    use mitch::common::AssetClass::{CM, CR, EQ, FX, IP};
+    use mitch::constants::CRYPTO_ASSETS_DATA;
+
+    let base_class = |id: u64| mitch::ticker::TickerId::from_raw(id).base_asset_class();
+
+    let mut stolen = Vec::new();
+    for entry in CRYPTO_ASSETS_DATA {
+        let Some(alias) = entry.aliases.split('|').find(|a| !a.is_empty()) else {
+            continue;
+        };
+        // USDT quotes itself; a self-pair is not a cross.
+        if alias.eq_ignore_ascii_case("usdt") {
+            continue;
+        }
+        let sym = format!("{alias}/USDT");
+        match nxr_sdk::try_resolve_ticker_id(&sym) {
+            Some(id) if base_class(id) != CR => {
+                stolen.push(format!("{sym} -> {:?}", base_class(id)))
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        stolen.is_empty(),
+        "{} crypto assets lost their own ticker to another class:\n{}",
+        stolen.len(),
+        stolen.join("\n")
+    );
+
+    // Every token traded against a crypto quote must own its ticker, including
+    // the ones whose ticker an equity also uses.
+    for sym in [
+        "CFG/USDT", "MET/USDT", "FF/USDT", "INF/USDT", "BARD/USDT", "ENS/USDT", "GNO/USDT",
+        "GRT/USDT", "KMNO/USDT", "RENDER/USDT", "RNDR/USDT", "XVS/USDT",
+    ] {
+        let id = nxr_sdk::try_resolve_ticker_id(sym)
+            .unwrap_or_else(|| panic!("{sym} unresolvable: would shard under an FNV phantom id"));
+        assert_eq!(base_class(id), CR, "{sym} lost its ticker to another class");
+    }
+
+    for (sym, want) in [
+        ("GER40/BTC", IP),
+        ("JPN225/USDT", IP),
+        ("WTI/USDT", CM),
+        ("EUR/USDT", FX),
+        ("AAPL/BTC", EQ),
+    ] {
+        let id = nxr_sdk::try_resolve_ticker_id(sym)
+            .unwrap_or_else(|| panic!("{sym} unresolvable: would shard under an FNV phantom id"));
+        assert_eq!(base_class(id), want, "{sym} base class");
+    }
+}

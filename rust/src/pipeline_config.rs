@@ -646,6 +646,47 @@ impl PipelineYml {
         out
     }
 
+    /// Every symbol a RELAY forwarder observes directly: `oracles.providers.*`
+    /// (`nxr-oracle`) plus `ctrader.providers.*` (`nxr-ctrader`). This is
+    /// `configured_symbols()` minus the cross-only remainder of
+    /// `cexs.cross_pairs`, and it is the half that gets a persisted `.idx`.
+    ///
+    /// Used by the offline tools that must not touch a cross: a cross is a pure
+    /// function of its legs, is composed on read, and is gated out of the sink
+    /// by `core::aggregator::append_idx_unless_composed`, so backfilling one or
+    /// reporting its absent `.idx` as a fault is always wrong. A relay symbol
+    /// that is ALSO listed as a cross stays here: observed beats derived, the
+    /// same precedence `composed_gate_set` applies.
+    pub fn relay_symbols(&self) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for prov in self.oracles.providers.values() {
+            for sym in prov.symbols.keys() {
+                out.insert(sym.to_uppercase());
+            }
+        }
+        for prov in self.ctrader.providers.values() {
+            for sym in prov.symbols.keys() {
+                out.insert(sym.to_uppercase());
+            }
+        }
+        out
+    }
+
+    /// Relay provider names (`oracles.providers` ∪ `ctrader.providers` keys).
+    /// Each must resolve in `mitch/ids/market-providers.csv`, so a per-provider
+    /// staging tree (`indexes/<provider>/…`) is named after this key exactly the
+    /// way `cexs.exchanges` keys are. Offline re-aggregation needs the union:
+    /// keying only off `cexs.exchanges` makes an oracle- or broker-sourced
+    /// ticker look sourceless.
+    pub fn relay_providers(&self) -> Vec<String> {
+        self.oracles
+            .providers
+            .keys()
+            .chain(self.ctrader.providers.keys())
+            .cloned()
+            .collect()
+    }
+
     /// Read and parse a pipeline-yaml file from disk. Single source of truth
     /// for the 6+ `serde_yaml::from_str(&fs::read_to_string(p)?)?` callsites
     /// in `series-factory/src/bin/*`. Uses `serde_yml` (the maintained fork);
@@ -1327,7 +1368,9 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.yml");
         let pl = PipelineYml::load(&root).expect("parse repo config.yml");
         assert_eq!(
-            pl.series.calibration.target_for_pair_classed("EURC/USDC", "crypto_stable"),
+            pl.series
+                .calibration
+                .target_for_pair_classed("EURC/USDC", "crypto_stable"),
             300.0,
             "EURC/USDC must resolve to the FX-appropriate 300bpd tier, not the 50bpd $1-stable tier"
         );
@@ -1345,22 +1388,30 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.yml");
         let pl = PipelineYml::load(&root).expect("parse repo config.yml");
         assert_eq!(
-            pl.series.calibration.target_for_pair_classed("SYRUPUSDC/USDC", "crypto_alt"),
+            pl.series
+                .calibration
+                .target_for_pair_classed("SYRUPUSDC/USDC", "crypto_alt"),
             50.0,
             "SYRUPUSDC/USDC override must win over the crypto_alt default"
         );
         assert_eq!(
-            pl.series.calibration.target_for_pair_classed("SYRUPUSDC/USDT", "crypto_alt"),
+            pl.series
+                .calibration
+                .target_for_pair_classed("SYRUPUSDC/USDT", "crypto_alt"),
             50.0,
             "SYRUPUSDC/USDT override must win over the crypto_alt default"
         );
         assert_eq!(
-            pl.series.calibration.target_for_pair_classed("SYRUPUSDC/USD", "fx_cross"),
+            pl.series
+                .calibration
+                .target_for_pair_classed("SYRUPUSDC/USD", "fx_cross"),
             300.0,
             "SYRUPUSDC/USD must stay at the FX-like default - NOT overridden to the $1-stable tier"
         );
         assert_eq!(
-            pl.series.calibration.target_for_pair_classed("AUSD/USD", "fx_cross"),
+            pl.series
+                .calibration
+                .target_for_pair_classed("AUSD/USD", "fx_cross"),
             50.0,
             "AUSD/USD must resolve to 50bpd via explicit override (same-class fix as U/USD)"
         );
@@ -1483,9 +1534,16 @@ mod tests {
         let s = sq.signed_symbols();
         assert!(s.contains("USDT-USD"));
         assert!(s.contains("USDS-USDT"), "case-normalized feed symbol");
-        assert!(s.contains("USDT-USDC"), "quote_via bridge leg MUST be scoped in");
+        assert!(
+            s.contains("USDT-USDC"),
+            "quote_via bridge leg MUST be scoped in"
+        );
         assert!(s.contains("ETH-USDC"));
-        assert_eq!(s.len(), 4, "USDT-USD + USDS-USDT + USDT-USDC + ETH-USDC, deduped");
+        assert_eq!(
+            s.len(),
+            4,
+            "USDT-USD + USDS-USDT + USDT-USDC + ETH-USDC, deduped"
+        );
 
         let on: SignedQuotesYml = serde_yml::from_str(
             "oracle: '0x1111111111111111111111111111111111111111'\n\
@@ -1582,5 +1640,38 @@ mod tests {
         assert_eq!(minimal.rolling_window_days, 365);
         assert_eq!(minimal.bracket_max_iters, 12);
         assert!((minimal.accept_tol - 0.05).abs() < 1e-12);
+    }
+
+    /// A broker section must reach BOTH rosters: `configured_symbols` (what is
+    /// served / calibrated) and `relay_symbols` (what is materialized, backfilled
+    /// and held to account by the checkers). Every section-blind union found so
+    /// far dropped the newest section silently, so pin both.
+    #[test]
+    fn relay_rosters_cover_every_forwarder_section() {
+        let y: PipelineYml = serde_yml::from_str(
+            "series:\n  renko: { min_pct: 0.001 }\n\
+             \x20 vol: { ema_period: 1, winsorize_pct: [0.05, 0.95], winsorize_min_samples: 1 }\n\
+             \x20 calibration: { target_bpd: 300, min_window_days: 30, mult_bounds: [0.05, 4.0] }\n\
+             \x20 pipeline: { bootstrap_days: 1 }\n\
+             cexs:\n  cross_pairs: [\"ETH/BTC\"]\n\
+             oracles:\n  providers:\n    pyth:\n      symbols:\n        XAU/USD: \"1\"\n\
+             ctrader:\n  providers:\n    pepperstone:\n      symbols:\n        eur/usd: EURUSD\n",
+        )
+        .expect("parse pipeline yaml with all three sections");
+
+        let all = y.configured_symbols();
+        assert!(all.contains("EUR/USD"), "broker symbol must be served");
+        assert!(all.contains("ETH/BTC") && all.contains("XAU/USD"));
+
+        let relay = y.relay_symbols();
+        assert!(
+            relay.contains("EUR/USD") && relay.contains("XAU/USD"),
+            "every forwarder-observed symbol is materializable: {relay:?}"
+        );
+        assert!(
+            !relay.contains("ETH/BTC"),
+            "a cross composes on read and must never be backfilled or reported missing"
+        );
+        assert_eq!(y.relay_providers(), vec!["pyth", "pepperstone"]);
     }
 }

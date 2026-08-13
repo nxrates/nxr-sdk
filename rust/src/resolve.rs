@@ -200,9 +200,35 @@ fn strip_ticker_suffixes(symbol: &str) -> String {
 
 // ---- Asset resolver ----
 
+/// Strength of an EXACT hit of `key` on `asset`: 0 = canonical name or PRIMARY
+/// (first) alias, 1 = secondary alias, `None` = no exact hit.
+///
+/// Load order used to decide which row owned a shared key (last write wins), so
+/// an index's 11th alias outranked an equity's own ticker: `ES` → S&P 500 not
+/// Eversource, `TW` → Taiwan Weighted not Tradeweb, `BSX` → Sensex not Boston
+/// Scientific. Rank first, then lowest (class, class_id), makes the winner
+/// independent of CSV order.
+fn exact_rank(asset: &Asset, key: &str) -> Option<u8> {
+    if normalize_asset_name(&asset.name) == key {
+        return Some(0);
+    }
+    asset
+        .aliases
+        .split('|')
+        .filter(|s| !s.is_empty())
+        .position(|a| normalize_asset_name(a) == key)
+        .map(|i| u8::from(i > 0))
+}
+
+/// Deterministic exact-match precedence key: primary before secondary, then
+/// lowest class then lowest class_id.
+fn exact_key(asset: &Asset, rank: u8) -> (u8, u8, u16) {
+    (rank, asset.class as u8, asset.class_id)
+}
+
 struct AssetResolver {
     by_id: HashMap<(AssetClass, u16), Asset>,
-    by_normalized: HashMap<String, Asset>,
+    by_normalized: HashMap<String, (Asset, u8)>,
     by_class: HashMap<AssetClass, Vec<Asset>>,
     all: Vec<Asset>,
 }
@@ -219,7 +245,9 @@ impl AssetResolver {
         r.load_class(AssetClass::CR, CRYPTO_ASSETS_DATA);
         r.load_class(AssetClass::EQ, EQUITIES_DATA);
         r.load_class(AssetClass::FX, FOREX_DATA);
-        r.load_class(AssetClass::IN, INDICES_DATA);
+        // IP (10) = Indices & Index Products. IN (9) is Infrastructure: the
+        // two-letter alias reads like "INdices" and was wrong until 2026-08-14.
+        r.load_class(AssetClass::IP, INDICES_DATA);
         r.load_class(AssetClass::SD, SOVEREIGN_DEBT_DATA);
         r
     }
@@ -245,7 +273,8 @@ impl AssetResolver {
             // "Ethereum" 5801 incident). Panic at load so the boot CI gate /
             // collision SLA catches it instead of shipping a ghost id.
             let mut insert_checked = |norm: String, asset: &Asset| {
-                if let Some(existing) = self.by_normalized.get(&norm)
+                let rank = exact_rank(asset, &norm).unwrap_or(1);
+                if let Some((existing, _)) = self.by_normalized.get(&norm)
                     && (existing.class, existing.class_id) != (asset.class, asset.class_id)
                 {
                     // Hard gate scoped to CR↔CR (the collision SLA, RCA ROOT1c):
@@ -279,11 +308,17 @@ impl AssetResolver {
                             key = %norm,
                             existing = %existing.name,
                             incoming = %asset.name,
-                            "cross-class / non-crypto asset normalized-key collision (last-write-wins; disambiguated by class_filter at lookup)"
+                            "cross-class / non-crypto asset normalized-key collision (resolved by exact_rank; disambiguated by class_filter at lookup)"
                         );
                     }
                 }
-                self.by_normalized.insert(norm, asset.clone());
+                if self
+                    .by_normalized
+                    .get(&norm)
+                    .is_none_or(|(ex, er)| exact_key(asset, rank) < exact_key(ex, *er))
+                {
+                    self.by_normalized.insert(norm, (asset.clone(), rank));
+                }
             };
 
             let norm = normalize_asset_name(entry.name);
@@ -313,32 +348,46 @@ impl AssetResolver {
             return None;
         }
 
-        let cleaned = strip_ticker_suffixes(query);
-        let norm = normalize_asset_name(&cleaned);
-
-        // Exact normalized match
-        if let Some(asset) = self.by_normalized.get(&norm)
-            && class_filter.is_none_or(|c| c == asset.class)
-        {
-            return Some(AssetMatch {
-                asset: asset.clone(),
-                confidence: 1.0,
-                matched_field: "exact".into(),
-            });
-        }
+        let norm = normalize_asset_name(&strip_ticker_suffixes(query));
 
         let candidates: Vec<&Asset> = match class_filter {
             Some(c) => self.by_class.get(&c)?.iter().collect(),
             None => self.all.iter().collect(),
         };
 
-        // Exact alias match
-        for asset in &candidates {
-            if asset.aliases.split('|').any(|a| a == norm) {
+        // Exact name/alias match ALWAYS beats any fuzzy hit, in any class.
+        //
+        // The RAW normalized query is tried BEFORE the suffix-stripped one:
+        // `strip_ticker_suffixes` eats a trailing `-b`/`-c`/`-d`/... which is a
+        // share-class marker, not a broker suffix, so "BRK-B" collapsed to
+        // "brk" and lost the exact alias to a 0.91 fuzz on commodity "BR"
+        // (Brent) — signing crude oil under Berkshire's id (2026-08-14).
+        // Aliases are compared NORMALIZED: the CSV column is uppercase, so the
+        // raw `a == norm` compare here never fired for any asset.
+        for key in [normalize_asset_name(query), norm.clone()] {
+            if key.is_empty() {
+                continue;
+            }
+            if let Some((asset, _)) = self.by_normalized.get(&key)
+                && class_filter.is_none_or(|c| c == asset.class)
+            {
                 return Some(AssetMatch {
-                    asset: (*asset).clone(),
+                    asset: asset.clone(),
                     confidence: 1.0,
-                    matched_field: format!("Exact alias match on '{}'", norm),
+                    matched_field: "exact".into(),
+                });
+            }
+            // Class-filtered fallback: the global winner sits in another class.
+            if let Some(asset) = candidates
+                .iter()
+                .filter_map(|a| exact_rank(a, &key).map(|r| (exact_key(a, r), *a)))
+                .min_by_key(|(k, _)| *k)
+                .map(|(_, a)| a)
+            {
+                return Some(AssetMatch {
+                    asset: asset.clone(),
+                    confidence: 1.0,
+                    matched_field: format!("Exact alias match on '{}'", key),
                 });
             }
         }
@@ -359,9 +408,20 @@ impl AssetResolver {
             }
 
             if best_sim >= min_confidence {
+                // Ties break on shortest name, then lowest (class, class_id),
+                // so the winner never depends on CSV load order.
                 let is_better = best.as_ref().is_none_or(|cur| {
-                    best_sim > cur.confidence
-                        || (best_sim == cur.confidence && asset.name.len() <= cur.asset.name.len())
+                    (
+                        best_sim,
+                        cur.asset.name.len(),
+                        cur.asset.class as u8,
+                        cur.asset.class_id,
+                    ) > (
+                        cur.confidence,
+                        asset.name.len(),
+                        asset.class as u8,
+                        asset.class_id,
+                    )
                 });
                 if is_better {
                     best = Some(AssetMatch {

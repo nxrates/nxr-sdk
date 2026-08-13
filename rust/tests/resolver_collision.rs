@@ -58,7 +58,11 @@ fn priority_and_collision_set_ids_distinct() {
             panic!("ticker_id collision: {prev} and {sym} both resolved to id {id:#x}");
         }
     }
-    assert_eq!(seen.len(), symbols.len(), "all priority+collision ids distinct");
+    assert_eq!(
+        seen.len(),
+        symbols.len(),
+        "all priority+collision ids distinct"
+    );
 }
 
 /// The majors must resolve to the CORRECT base asset, not a fuzzy neighbour.
@@ -88,8 +92,7 @@ fn eth_not_absorbed_by_ethereum_plus() {
 /// Fiat-quote pairs must stay distinct from USD-forced fuzz (ROOT1b).
 #[test]
 fn fiat_quote_resolves_in_fx() {
-    let m = resolve_ticker("USDT/THB", InstrumentType::SPOT)
-        .expect("USDT/THB must resolve");
+    let m = resolve_ticker("USDT/THB", InstrumentType::SPOT).expect("USDT/THB must resolve");
     assert_eq!(m.ticker.base.name.to_lowercase(), "tether");
     assert_eq!(m.ticker.quote.name.to_lowercase(), "thai baht");
 }
@@ -126,18 +129,40 @@ fn wrapped_btc_distinct_id_shares_btc_series() {
     let btc_usdc = id_of("BTC/USDC");
 
     // Distinct exposed ids (NOT collapsed at resolution).
-    assert_ne!(resolve_ticker_id("CBBTC/USDT"), btc_usdt, "cbBTC keeps own id");
-    assert_ne!(resolve_ticker_id("WBTC/USDT"), btc_usdt, "WBTC keeps own id");
+    assert_ne!(
+        resolve_ticker_id("CBBTC/USDT"),
+        btc_usdt,
+        "cbBTC keeps own id"
+    );
+    assert_ne!(
+        resolve_ticker_id("WBTC/USDT"),
+        btc_usdt,
+        "WBTC keeps own id"
+    );
 
     // But series-shared with BTC at the same quote.
-    assert_eq!(series_canonical_ticker_id(resolve_ticker_id("CBBTC/USDT")), btc_usdt);
-    assert_eq!(series_canonical_ticker_id(resolve_ticker_id("WBTC/USDT")), btc_usdt);
-    assert_eq!(series_canonical_ticker_id(resolve_ticker_id("CBBTC-USDC")), btc_usdc);
-    assert_eq!(series_canonical_ticker_id(resolve_ticker_id("WBTC-USDC")), btc_usdc);
+    assert_eq!(
+        series_canonical_ticker_id(resolve_ticker_id("CBBTC/USDT")),
+        btc_usdt
+    );
+    assert_eq!(
+        series_canonical_ticker_id(resolve_ticker_id("WBTC/USDT")),
+        btc_usdt
+    );
+    assert_eq!(
+        series_canonical_ticker_id(resolve_ticker_id("CBBTC-USDC")),
+        btc_usdc
+    );
+    assert_eq!(
+        series_canonical_ticker_id(resolve_ticker_id("WBTC-USDC")),
+        btc_usdc
+    );
 
     // cbBTC still resolves to its own (Coinbase BTC) asset, not Bitcoin.
     assert!(
-        base_name_of("CBBTC/USDC").to_lowercase().contains("coinbase"),
+        base_name_of("CBBTC/USDC")
+            .to_lowercase()
+            .contains("coinbase"),
         "cbBTC base must be its own asset"
     );
 }
@@ -148,16 +173,31 @@ fn wrapped_btc_distinct_id_shares_btc_series() {
 fn cat1_aliases_single_id() {
     use nxr_sdk::resolve_ticker_id;
 
-    assert_eq!(resolve_ticker_id("MATIC/USDT"), resolve_ticker_id("POL/USDT"));
-    assert_eq!(resolve_ticker_id("USDT0/USDC"), resolve_ticker_id("USDT/USDC"));
-    assert_eq!(resolve_ticker_id("BTC/USDT0"), resolve_ticker_id("BTC/USDT"));
+    assert_eq!(
+        resolve_ticker_id("MATIC/USDT"),
+        resolve_ticker_id("POL/USDT")
+    );
+    assert_eq!(
+        resolve_ticker_id("USDT0/USDC"),
+        resolve_ticker_id("USDT/USDC")
+    );
+    assert_eq!(
+        resolve_ticker_id("BTC/USDT0"),
+        resolve_ticker_id("BTC/USDT")
+    );
     // DAI un-aliased from USDS 2026-07-08: pyth publishes DISTINCT DAI/USD
     // and USDS/USD pegs (~5 bps basis) and BTR stable pools price the two
     // tokens separately on-chain - DAI now owns crypto-assets.csv id 04801.
     assert_ne!(resolve_ticker_id("ETH/DAI"), resolve_ticker_id("ETH/USDS"));
     assert_ne!(resolve_ticker_id("DAI/USD"), resolve_ticker_id("USDS/USD"));
-    assert_eq!(resolve_ticker_id("WETH/USDT"), resolve_ticker_id("ETH/USDT"));
-    assert_eq!(resolve_ticker_id("WSOL/USDT"), resolve_ticker_id("SOL/USDT"));
+    assert_eq!(
+        resolve_ticker_id("WETH/USDT"),
+        resolve_ticker_id("ETH/USDT")
+    );
+    assert_eq!(
+        resolve_ticker_id("WSOL/USDT"),
+        resolve_ticker_id("SOL/USDT")
+    );
 }
 
 /// CAT-2 wraps: distinct id, shared BTC series. cbETH stays fully distinct
@@ -167,7 +207,13 @@ fn cat2_distinct_id_shared_series() {
     use nxr_sdk::{resolve_ticker_id, series_canonical_ticker_id};
 
     let btc_usdt = id_of("BTC/USDT");
-    for wrap in ["WBTC/USDT", "CBBTC/USDT", "TBTC/USDT", "BTCB/USDT", "BBTC/USDT"] {
+    for wrap in [
+        "WBTC/USDT",
+        "CBBTC/USDT",
+        "TBTC/USDT",
+        "BTCB/USDT",
+        "BBTC/USDT",
+    ] {
         let wid = resolve_ticker_id(wrap);
         assert_ne!(wid, btc_usdt, "{wrap} must keep a distinct exposed id");
         assert_eq!(
@@ -195,8 +241,113 @@ fn cbeth_distinct_from_eth_index() {
     assert_ne!(cbeth, eth, "cbETH/USDT must not share ETH/USDT id");
     assert!(
         base_name_of("cbETH/USDT").to_lowercase().contains("staked")
-            || base_name_of("cbETH/USDT").to_lowercase().contains("coinbase"),
+            || base_name_of("cbETH/USDT")
+                .to_lowercase()
+                .contains("coinbase"),
         "cbETH base must resolve to cbETH asset, not ethereum"
+    );
+}
+
+/// Share-class tickers (`BRK-B`, `BF-B`, ...) must resolve to their equity.
+///
+/// `strip_ticker_suffixes` eats a trailing `-b`/`-a`, so "BRK-B" collapsed to
+/// "brk" and lost its exact alias to a 0.91 Jaro fuzz on commodity `BR`
+/// (Brent Crude) — Berkshire's id would have signed crude oil's price
+/// (2026-08-14). `BF-B` and `HM-B` did not resolve at all.
+#[test]
+fn share_class_tickers_resolve_to_their_own_equity() {
+    use mitch::common::AssetClass;
+    for (sym, want) in [
+        ("BRK-B/USD", 1521u16),
+        ("BF-B/USD", 1821),
+        ("HM-B/USD", 6231),
+        ("COLO-B/USD", 3001),
+        ("SKA-B/USD", 12551),
+        ("SCA-B/USD", 13201),
+    ] {
+        let id = nxr_sdk::try_resolve_ticker_id(sym).unwrap_or_else(|| panic!("{sym} unresolved"));
+        let tid = mitch::ticker::TickerId::from_raw(id);
+        assert_eq!(tid.base_asset_class(), AssetClass::EQ, "{sym} base class");
+        assert_eq!(tid.base_asset_id(), want, "{sym} base id");
+    }
+}
+
+/// EXHAUSTIVE audit: every equities.csv and indices.csv row resolved by its
+/// primary alias against USD must land on a row that actually CARRIES that
+/// key — never on a fuzzy neighbour in another asset class.
+///
+/// This is the money-path gate for the cTrader equity/index feed: signing a
+/// commodity's price under an equity's ticker id is unrecoverable on-chain.
+/// Where a key is carried by several rows (duplicate tickers across listings,
+/// e.g. `BA` = Boeing + BAE Systems) the resolver's deterministic precedence
+/// (primary alias before secondary, then lowest class then lowest class_id)
+/// picks one; the test only demands the winner be a genuine carrier.
+#[test]
+fn every_equity_and_index_resolves_to_a_real_carrier() {
+    use mitch::common::AssetClass;
+    use mitch::constants::{
+        COMMODITIES_DATA, CRYPTO_ASSETS_DATA, EQUITIES_DATA, FOREX_DATA, INDICES_DATA,
+        SOVEREIGN_DEBT_DATA,
+    };
+
+    fn norm(s: &str) -> String {
+        s.trim()
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '+' || *c == '-')
+            .collect()
+    }
+
+    // key -> every (class, class_id) whose name or alias list carries it.
+    let mut carriers: HashMap<String, Vec<(AssetClass, u16)>> = HashMap::new();
+    for (class, data) in [
+        (AssetClass::CM, COMMODITIES_DATA),
+        (AssetClass::CR, CRYPTO_ASSETS_DATA),
+        (AssetClass::EQ, EQUITIES_DATA),
+        (AssetClass::FX, FOREX_DATA),
+        (AssetClass::IP, INDICES_DATA),
+        (AssetClass::SD, SOVEREIGN_DEBT_DATA),
+    ] {
+        for e in data {
+            for key in std::iter::once(e.name).chain(e.aliases.split('|')) {
+                let k = norm(key);
+                if !k.is_empty() {
+                    carriers.entry(k).or_default().push((class, e.id as u16));
+                }
+            }
+        }
+    }
+
+    let mut failures = Vec::new();
+    for (class, data) in [
+        (AssetClass::EQ, EQUITIES_DATA),
+        (AssetClass::IP, INDICES_DATA),
+    ] {
+        for e in data {
+            let Some(alias) = e.aliases.split('|').find(|a| !a.is_empty()) else {
+                continue;
+            };
+            let sym = format!("{alias}/USD");
+            let Some(id) = nxr_sdk::try_resolve_ticker_id(&sym) else {
+                failures.push(format!("{sym} ({}) unresolved", e.name));
+                continue;
+            };
+            let tid = mitch::ticker::TickerId::from_raw(id);
+            let got = (tid.base_asset_class(), tid.base_asset_id());
+            let want = (class, e.id as u16);
+            if got != want && !carriers[&norm(alias)].contains(&got) {
+                failures.push(format!(
+                    "{sym} ({}) want {want:?} got {got:?} — winner does not carry '{alias}'",
+                    e.name
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} equity/index rows resolve to a non-carrier:\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }
 

@@ -166,13 +166,23 @@ pub fn synth_deps(leg: &str) -> &'static [&'static SynthPath] {
     SYNTH_DEPS.get(leg).map(Vec::as_slice).unwrap_or(&[])
 }
 
-/// Generic pivot derivation for compose-on-read: `A/B = (A/P) × (B/P)⁻¹`,
-/// trying pivots USDT then USD. Each leg is accepted direct (`X/P`) or
-/// inverted (`P/X`, exponent flipped); a leg equal to the pivot is the
-/// identity and is dropped. `resolve` maps a candidate leg symbol to its
-/// ticker id iff that symbol is a REGISTERED live feed (typically a
-/// `symbol_map` lookup) — mere resolvability is not enough, the leg must
-/// actually have data behind it.
+/// Candidate pivots for compose-on-read, in tie-break order. USDT and USD come
+/// first so a volume-blind caller keeps the historical route exactly; USDC is
+/// reachable only here, and before it was added a PYUSD or RLUSD cross could not
+/// route through its deepest book (Coinbase/Bullish quote those against USDC).
+pub const PIVOTS: [&str; 3] = ["USDT", "USD", "USDC"];
+
+/// Generic pivot derivation for compose-on-read: `A/B = (A/P) × (B/P)⁻¹`, over
+/// [`PIVOTS`]. Each leg is accepted direct (`X/P`) or inverted (`P/X`, exponent
+/// flipped); a leg equal to the pivot is the identity and is dropped. `resolve`
+/// maps a candidate leg symbol to its ticker id iff that symbol is a REGISTERED
+/// live feed (typically a `symbol_map` lookup) — mere resolvability is not
+/// enough, the leg must actually have data behind it.
+///
+/// Volume-blind: takes the first pivot that resolves. Prefer
+/// [`derive_legs_ranked`] anywhere 24h volumes are available, because
+/// first-resolves-wins will happily route a cross through a near-dead book when
+/// a far deeper one exists at the next pivot.
 ///
 /// Used by `/v1/ohlc` to serve any cross with no persisted series and no
 /// static [`SYNTH_PATHS`] entry. Returns `(leg_symbol, exponent, ticker_id)`.
@@ -180,6 +190,23 @@ pub fn derive_legs(
     base: &str,
     quote: &str,
     resolve: &dyn Fn(&str) -> Option<u64>,
+) -> Option<Vec<(String, i8, u64)>> {
+    derive_legs_ranked(base, quote, resolve, &|_| 0.0)
+}
+
+/// [`derive_legs`], but picks the DEEPEST viable pivot instead of the first.
+///
+/// `vol` returns a leg's 24h USD volume (0.0 when unknown). A route is scored by
+/// its THINNEST leg, not the sum: a composition is only as trustworthy as its
+/// weakest hop, and summing lets one deep leg mask a leg with no book behind it.
+/// Highest score wins; ties (notably the all-zero case, i.e. no volume data at
+/// all) fall back to [`PIVOTS`] order, so a caller with no weights file behaves
+/// exactly as the volume-blind path did.
+pub fn derive_legs_ranked(
+    base: &str,
+    quote: &str,
+    resolve: &dyn Fn(&str) -> Option<u64>,
+    vol: &dyn Fn(&str) -> f64,
 ) -> Option<Vec<(String, i8, u64)>> {
     if base.is_empty() || quote.is_empty() || base == quote {
         return None;
@@ -191,7 +218,8 @@ pub fn derive_legs(
     // any candidate equal to the symbol being derived so the loop falls
     // through to the next pivot instead of self-composing.
     let self_sym = format!("{base}/{quote}");
-    for pivot in ["USDT", "USD"] {
+    let mut best: Option<(f64, Vec<(String, i8, u64)>)> = None;
+    for pivot in PIVOTS {
         let leg = |asset: &str, exp: i8| -> Option<Option<(String, i8, u64)>> {
             if asset == pivot {
                 return Some(None); // identity leg
@@ -208,14 +236,25 @@ pub fn derive_legs(
             }
             resolve(&inv).map(|id| Some((inv, -exp, id)))
         };
-        if let (Some(a), Some(b)) = (leg(base, 1), leg(quote, -1)) {
-            let legs: Vec<_> = [a, b].into_iter().flatten().collect();
-            if !legs.is_empty() {
-                return Some(legs);
-            }
+        let (Some(a), Some(b)) = (leg(base, 1), leg(quote, -1)) else {
+            continue;
+        };
+        let legs: Vec<_> = [a, b].into_iter().flatten().collect();
+        if legs.is_empty() {
+            continue;
+        }
+        // Bottleneck depth. An identity leg (pivot == base or quote) is dropped
+        // above and so cannot pull the score down: a one-leg route is scored on
+        // the only book it actually reads.
+        let score = legs
+            .iter()
+            .map(|(sym, _, _)| vol(sym))
+            .fold(f64::INFINITY, f64::min);
+        if best.as_ref().is_none_or(|(s, _)| score > *s) {
+            best = Some((score, legs));
         }
     }
-    None
+    best.map(|(_, legs)| legs)
 }
 
 /// Normalize any text symbol form to slash. Dash → slash. No-op on slash.
@@ -349,5 +388,133 @@ mod tests {
     fn derive_legs_no_resolvable_pivot_returns_none() {
         let resolve = |_: &str| -> Option<u64> { None };
         assert!(derive_legs("FOO", "BAR", &resolve).is_none());
+    }
+
+    /// Registry where a stable is quoted on BOTH the USDT and USDC pivots, so
+    /// the choice is decided purely by depth, never by pivot order.
+    fn two_pivot_resolve(sym: &str) -> Option<u64> {
+        match sym {
+            "PYUSD/USDT" => Some(1),
+            "PYUSD/USDC" => Some(2),
+            "USDC/USD" => Some(3),
+            "USDT/USD" => Some(4),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn ranked_picks_the_deeper_pivot_not_the_first() {
+        // PYUSD's real book is on Coinbase/Bullish against USDC; the USDT quote
+        // is an order of magnitude thinner. Volume-blind derivation takes USDT
+        // purely because it is first in PIVOTS, which is the bug this fixes.
+        let vol = |sym: &str| -> f64 {
+            match sym {
+                "PYUSD/USDT" => 1_000_000.0,
+                "PYUSD/USDC" => 90_000_000.0,
+                "USDC/USD" => 500_000_000.0,
+                "USDT/USD" => 500_000_000.0,
+                _ => 0.0,
+            }
+        };
+        let blind = derive_legs("PYUSD", "USD", &two_pivot_resolve).unwrap();
+        assert_eq!(blind[0].0, "PYUSD/USDT", "volume-blind keeps the old route");
+
+        let ranked = derive_legs_ranked("PYUSD", "USD", &two_pivot_resolve, &vol).unwrap();
+        assert_eq!(
+            ranked[0].0, "PYUSD/USDC",
+            "ranked must route through the deeper book, got {ranked:?}"
+        );
+    }
+
+    #[test]
+    fn ranked_scores_the_bottleneck_leg_not_the_sum() {
+        // USDC route: one enormous leg beside a dead one. USDT route: both legs
+        // moderate. Summing picks the route with the dead leg (500.001M vs 4M);
+        // bottleneck picks USDT, which is the only one that can actually fill.
+        let vol = |sym: &str| -> f64 {
+            match sym {
+                "PYUSD/USDC" => 1_000.0,
+                "USDC/USD" => 500_000_000.0,
+                "PYUSD/USDT" => 2_000_000.0,
+                "USDT/USD" => 2_000_000.0,
+                _ => 0.0,
+            }
+        };
+        let legs = derive_legs_ranked("PYUSD", "USD", &two_pivot_resolve, &vol).unwrap();
+        assert_eq!(
+            legs[0].0, "PYUSD/USDT",
+            "a route is only as good as its thinnest leg, got {legs:?}"
+        );
+    }
+
+    #[test]
+    fn ranked_falls_back_to_pivot_order_without_volume_data() {
+        // No weights file yet (fresh pod, or nxr-calibrate): every score is 0,
+        // so the ranker must degrade to exactly the volume-blind route rather
+        // than to whichever pivot happens to sort last.
+        let legs = derive_legs_ranked("PYUSD", "USD", &two_pivot_resolve, &|_| 0.0).unwrap();
+        assert_eq!(legs[0].0, "PYUSD/USDT");
+    }
+
+    #[test]
+    fn ranked_keeps_the_self_reference_guard() {
+        // Same trap as the volume-blind case, but now the ranker scores every
+        // pivot before choosing: a self-referential candidate must stay rejected
+        // rather than win on a high score.
+        let resolve = |sym: &str| -> Option<u64> {
+            match sym {
+                "USDT/USD" => Some(1),
+                "USD/JPY" => Some(2),
+                "USDT/JPY" => Some(999),
+                _ => None,
+            }
+        };
+        let vol = |sym: &str| -> f64 { if sym == "USDT/JPY" { 1e12 } else { 1.0 } };
+        let legs = derive_legs_ranked("USDT", "JPY", &resolve, &vol).unwrap();
+        assert!(
+            legs.iter()
+                .all(|(sym, _, id)| sym != "USDT/JPY" && *id != 999),
+            "ranked must not self-reference even when the self leg scores highest: {legs:?}"
+        );
+    }
+
+    #[test]
+    fn ranked_reaches_usdc_only_books() {
+        // Before USDC joined PIVOTS this cross was underivable: neither asset
+        // has a USDT or USD quote, so both pivots failed and the pair went dark.
+        let resolve = |sym: &str| -> Option<u64> {
+            match sym {
+                "RLUSD/USDC" => Some(1),
+                "PYUSD/USDC" => Some(2),
+                _ => None,
+            }
+        };
+        let legs = derive_legs_ranked("RLUSD", "PYUSD", &resolve, &|_| 1.0).unwrap();
+        assert_eq!(legs.len(), 2, "expected both USDC legs, got {legs:?}");
+        assert!(legs.iter().all(|(sym, _, _)| sym.ends_with("/USDC")));
+    }
+
+    #[test]
+    fn ranked_drops_identity_leg_and_scores_the_real_book() {
+        // base == pivot: the USDC leg is the identity and is dropped, so the
+        // score must come from the surviving leg alone. If the identity were
+        // scored as 0 it would sink every pivot that touches it.
+        let resolve = |sym: &str| -> Option<u64> {
+            match sym {
+                "PYUSD/USDC" => Some(1),
+                "PYUSD/USDT" => Some(2),
+                _ => None,
+            }
+        };
+        let vol = |sym: &str| -> f64 {
+            match sym {
+                "PYUSD/USDC" => 90_000_000.0,
+                "PYUSD/USDT" => 1_000.0,
+                _ => 0.0,
+            }
+        };
+        let legs = derive_legs_ranked("USDC", "PYUSD", &resolve, &vol).unwrap();
+        assert_eq!(legs.len(), 1, "identity leg must be dropped: {legs:?}");
+        assert_eq!(legs[0].0, "PYUSD/USDC");
     }
 }

@@ -42,23 +42,23 @@ pub mod stats;
 pub mod synth;
 pub mod tdwap;
 pub mod ticker;
-pub mod udp_auth;
 #[cfg(feature = "transport")]
 pub mod transport;
+pub mod udp_auth;
 pub mod vol;
 pub mod vol_estimator;
 pub mod weights_schema;
-pub mod ws_frame;
 #[cfg(feature = "client")]
 pub mod ws_client;
+pub mod ws_frame;
 
 // ---- MITCH types ----
 
 pub use mitch;
-pub use mitch::timestamp;
+pub use mitch::bar::Bar;
 pub use mitch::index::Index;
 pub use mitch::tick::Tick;
-pub use mitch::bar::Bar;
+pub use mitch::timestamp;
 
 // ---- IPC primitives ----
 
@@ -77,19 +77,19 @@ pub use shard::{BarShardWriter, IdxShardWriter};
 
 // ---- Renko engine (live + offline shared) ----
 
-pub use vol::{read_vol_tail, LiveVolRing, MtfVolCalculator, VolConfig, VolSource};
-pub use vol_estimator::rs_sigma_from_ohlc;
-pub use renko::{RenkoConfig, RenkoGenerator};
 pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
+pub use renko::{RenkoConfig, RenkoGenerator};
+pub use vol::{LiveVolRing, MtfVolCalculator, VolConfig, VolSource, read_vol_tail};
+pub use vol_estimator::rs_sigma_from_ohlc;
 
 // ---- Ticker resolution ----
 
+pub use resolve::resolve_ticker;
+pub use series_alias::series_canonical_ticker_id;
 pub use ticker::{
     TickerIdCache, phantom_ticker_id, resolve_ticker_id, split_pair, split_pair_multi,
     try_resolve_ticker_id,
 };
-pub use resolve::resolve_ticker;
-pub use series_alias::series_canonical_ticker_id;
 
 // ---- Provider lookups ----
 
@@ -97,10 +97,7 @@ pub use providers::{get_market_provider_by_id, get_market_provider_id_by_name};
 
 // ---- Aggregation primitives ----
 
-pub use agg::{
-    TickAccumulator, RunningStats, is_valid_tick,
-    now_ns, now_ms, now_sec, now_mts,
-};
+pub use agg::{RunningStats, TickAccumulator, is_valid_tick, now_ms, now_mts, now_ns, now_sec};
 
 // ---- TDWAP aggregation ----
 
@@ -124,7 +121,7 @@ pub use client::NxrClient;
 
 // ---- Plan-tier typed errors ----
 
-pub use errors::{PlanErrorCode, PlanLimitError, PlanLimitErrorBody, PLAN_ERROR_DISCRIMINANT};
+pub use errors::{PLAN_ERROR_DISCRIMINANT, PlanErrorCode, PlanLimitError, PlanLimitErrorBody};
 
 /// Resolve when either SIGINT (ctrl-c) or SIGTERM arrives. k8s sends
 /// SIGTERM on pod stop; as PID 1 the default handler is a hard kill with

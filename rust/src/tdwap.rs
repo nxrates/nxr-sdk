@@ -70,6 +70,97 @@ fn corpse_horizon(stale_threshold_secs: f64) -> f64 {
     stale_threshold_secs * 6.0
 }
 
+/// Age of a leg that is still inside the corpse horizon, `None` once it is
+/// past it. Single source for the corpse rule: the UNMAPPED-BLOC pre-pass and
+/// the blend loop below must admit exactly the same set of legs, or the bound
+/// is computed against a different population than it is applied to.
+#[inline]
+fn live_age(entry: &ProviderEntry, now: Instant, stale_threshold_secs: f64) -> Option<f64> {
+    let age = now.duration_since(entry.last_update).as_f64();
+    (age <= corpse_horizon(stale_threshold_secs)).then_some(age)
+}
+
+/// Ceiling on the base-weight mass the UNMAPPED bloc may carry, as a fraction
+/// of the MAPPED mass: `Σ w_unmapped <= FRAC · Σ w_mapped`, enforced by scaling
+/// every unmapped leg by a common factor (so their relative order is kept and
+/// none of them is delisted).
+///
+/// Why a BLOC bound and not a per-leg constant. A `(provider, ticker)` absent
+/// from `ticker-params.json` used to fall back to `1.0` — the MEDIAN venue's
+/// weight, above the <=0.60 HHI ceiling every mapped venue is held to, so the
+/// venue we had no volume evidence for outweighed every venue we did. The
+/// obvious repair (a small per-leg constant) overshoots in the other
+/// direction: it DELISTS the tail instead of demoting it, hands a single
+/// mapped venue 93-98% of the composite, and its correct value depends on how
+/// many unmapped legs a ticker happens to have. Bounding the GROUP fixes both
+/// failure modes with one number: dilution is capped because the bloc cannot
+/// exceed `FRAC` of the mapped mass, concentration is capped because the bloc
+/// keeps a guaranteed `FRAC/(1+FRAC)` share of the blend, and adding unmapped
+/// legs subdivides that share instead of growing it.
+///
+/// 0.40 = the unmapped tail is worth at most ~29% of the composite
+/// (`0.4/1.4`), so the evidence-backed venues always hold the majority.
+///
+/// No mapped leg (`Σ w_mapped == 0`) means no bound: a fully unmapped ticker
+/// composites exactly as it did before, equal-weight. 227 of 339 live tickers
+/// are in that class (every FX pair and every metal), so this is the property
+/// the whole design is built around, not an edge case.
+///
+/// Overridable via `NXR_UNMAPPED_BLOC_FRAC`. Read once (per-cycle hot path).
+fn unmapped_bloc_frac() -> f64 {
+    static F: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        std::env::var("NXR_UNMAPPED_BLOC_FRAC")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.40)
+    })
+}
+
+/// Same concentration ceiling the OFFLINE weight policy caps a mapped venue at
+/// (`weights::policy_weights` Stage B, `NXR_MAX_WEIGHT_CONCENTRATED`, 0.60).
+///
+/// It is a FLOOR on the unmapped bloc, not a second ceiling: the volume scrape
+/// prices only the top pairs of each venue, so most alt tickers have exactly
+/// ONE mapped venue (live 2026-08-11: ORCA/USDT, CRV/USDT and ALGO/USDT each
+/// have one). Bounding the bloc purely at `0.40 · Σw_mapped` would hand that
+/// single venue `1/1.4 = 71.4%` of the composite, past the ceiling the same
+/// venue would have been capped at had the ticker been fully priced. Reusing
+/// the policy's own constant keeps the runtime and offline halves of the
+/// weighting from disagreeing about how concentrated a mark may be, instead of
+/// introducing an unrelated number.
+///
+/// Applied to BASE weights (pre-decay), like the offline policy: it bounds
+/// configured concentration, not the transient decay state.
+fn max_leg_share() -> f64 {
+    static C: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *C.get_or_init(|| {
+        crate::config::NxrConfig::from_env()
+            .max_weight_concentrated
+            .clamp(0.01, 1.0)
+    })
+}
+
+/// Per-ticker weight-composition diagnostics, computed for free inside
+/// [`compute_vwap_at`] and surfaced through [`WeightCache::weight_profile`].
+///
+/// Exists because there was NO per-ticker weight visibility: `/metrics`
+/// counted weight-map misses per provider and nothing published what the legs
+/// actually ended up worth, so the effect of a weight-policy change could only
+/// be reconstructed offline. Both fields are measured on the FINAL blend
+/// weights (`base_weight · bloc_scale · decay · taper`), i.e. on real composite
+/// influence rather than on the configured inputs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WeightProfile {
+    /// Share of the blend held by the single heaviest leg, in `[0, 1]`.
+    /// 1.0 means the composite is a single-venue mark.
+    pub top_weight_share: f64,
+    /// Effective venue count `(Σw)² / Σw²`. Equals N for N equal legs and
+    /// collapses toward 1 as one leg takes over.
+    pub n_eff: f64,
+}
+
 /// Continuous fade to zero at the corpse horizon.
 ///
 /// Eviction used to be a bare `continue` at `age > 6·stale`, which drops a leg's
@@ -203,6 +294,22 @@ pub struct ProviderEntry {
     /// fails both axes — which is the correct answer to "is there a live
     /// provider observation behind this mark".
     pub injected: bool,
+    /// `true` when `base_weight` came from a real per-(provider, ticker) entry
+    /// in `ticker-params.json` (or from an explicitly configured non-CEX
+    /// provider weight), `false` when it is the coverage FALLBACK for a
+    /// (provider, ticker) the weights file never priced.
+    ///
+    /// This is the axis the UNMAPPED-BLOC BOUND in [`compute_vwap_at`] splits
+    /// on: evidence-backed legs are weighted as the policy says, and everything
+    /// with no volume evidence behind it is capped AS A GROUP at
+    /// [`unmapped_bloc_frac`] of the mapped mass. Injected legs are unmapped by
+    /// construction (a derived quote carries no venue volume), which is what
+    /// keeps a synth product from outweighing the books it is derived from.
+    ///
+    /// Default `false`. A ticker with NO mapped leg is therefore entirely
+    /// unmapped, the bloc bound does not apply, and the blend is the same
+    /// equal-weight composite it was before the bound existed.
+    pub mapped: bool,
 }
 
 impl ProviderEntry {
@@ -220,7 +327,16 @@ impl ProviderEntry {
             last_update: now,
             ema_ipi_secs: 5.0,
             injected: false,
+            mapped: false,
         }
+    }
+
+    /// Mark whether `base_weight` is evidence-backed (see [`Self::mapped`]).
+    #[inline]
+    #[must_use]
+    pub const fn with_mapped(mut self, mapped: bool) -> Self {
+        self.mapped = mapped;
+        self
     }
 
     /// Replace the stored Index and update timing.
@@ -310,6 +426,7 @@ impl ProviderEntry {
 pub fn compute_vwap<'a, I>(ticker_id: u64, entries: I, stale_threshold_secs: f64) -> Option<Index>
 where
     I: IntoIterator<Item = &'a ProviderEntry>,
+    I::IntoIter: Clone,
 {
     compute_vwap_at(ticker_id, entries, stale_threshold_secs, Instant::now())
 }
@@ -320,7 +437,11 @@ where
 /// the first tick so decay is computed against data time, not wall-clock.
 ///
 /// Accepts any iterator over `&ProviderEntry` so callers can pass a slice, a
-/// `HashMap::values()`, or a `SmallVec` without cloning.
+/// `HashMap::values()`, or a `SmallVec` without cloning. The iterator must be
+/// `Clone` because the UNMAPPED-BLOC bound needs the mapped/unmapped mass
+/// BEFORE the blend runs; cloning an iterator is a pointer copy, so the
+/// pre-pass costs one extra walk of the (typically 5-15 entry) leg list and no
+/// allocation.
 pub fn compute_vwap_at<'a, I>(
     ticker_id: u64,
     entries: I,
@@ -329,7 +450,62 @@ pub fn compute_vwap_at<'a, I>(
 ) -> Option<Index>
 where
     I: IntoIterator<Item = &'a ProviderEntry>,
+    I::IntoIter: Clone,
 {
+    compute_vwap_profiled_at(ticker_id, entries, stale_threshold_secs, now).map(|(idx, _)| idx)
+}
+
+/// [`compute_vwap_at`] plus the per-ticker [`WeightProfile`]. Internal: the
+/// profile reaches the aggregator through [`WeightCache::weight_profile`], so
+/// it is never recomputed and never duplicates the weighting rules.
+pub(crate) fn compute_vwap_profiled_at<'a, I>(
+    ticker_id: u64,
+    entries: I,
+    stale_threshold_secs: f64,
+    now: Instant,
+) -> Option<(Index, WeightProfile)>
+where
+    I: IntoIterator<Item = &'a ProviderEntry>,
+    I::IntoIter: Clone,
+{
+    let entries = entries.into_iter();
+
+    // ── UNMAPPED-BLOC PRE-PASS ──────────────────────────────────────────────
+    // Σ base_weight over admissible legs, split by evidence. Same admission
+    // test as the blend below (`is_valid_tick` + `live_age`), so the bound is
+    // measured on exactly the population it is applied to.
+    let (mut mapped_bw, mut unmapped_bw, mut top_mapped_bw) = (0.0f64, 0.0f64, 0.0f64);
+    for entry in entries.clone() {
+        if !is_valid_tick(entry.index.bid, entry.index.ask)
+            || live_age(entry, now, stale_threshold_secs).is_none()
+        {
+            continue;
+        }
+        if entry.mapped {
+            mapped_bw += entry.base_weight;
+            top_mapped_bw = top_mapped_bw.max(entry.base_weight);
+        } else {
+            unmapped_bw += entry.base_weight;
+        }
+    }
+    // Common factor applied to every unmapped leg. Target bloc mass:
+    //   clamp(FRAC · Σw_mapped, w_top_mapped / c - Σw_mapped, Σw_unmapped)
+    // Upper clamp = the bloc is never INFLATED, only demoted. Lower clamp =
+    // the demotion never pushes the heaviest mapped venue past the same
+    // concentration ceiling `c` the offline policy caps it at (see
+    // `max_leg_share`); with a single mapped venue that floor is what stops the
+    // ticker collapsing into a single-venue mark. No mapped leg means no bound
+    // at all, and a fully unmapped ticker is left exactly as it was.
+    let bloc_scale = if mapped_bw > 0.0 && unmapped_bw > 0.0 {
+        let anti_concentration = (top_mapped_bw / max_leg_share() - mapped_bw).max(0.0);
+        let target = (unmapped_bloc_frac() * mapped_bw)
+            .max(anti_concentration)
+            .min(unmapped_bw);
+        target / unmapped_bw
+    } else {
+        1.0
+    };
+
     let mut w_bid_sum = 0.0f64;
     let mut w_ask_sum = 0.0f64;
     let mut w_sum = 0.0f64;
@@ -364,8 +540,21 @@ where
     // our deepest books scored it 0.059 (BTC-USDC, 10 venues) and 0.082
     // (ETH-USDC), so ANY meaningful floor on it rejects the best-corroborated
     // feeds FIRST. Do not reintroduce it as an admission axis.
+    //
+    // Both sums are on BLOC-SCALED base weight, not raw. They must be: the
+    // share feeds the signed-quote gate (`server::signed`), so measuring it on
+    // weights the composite does not actually use lets an unmapped bloc that
+    // contributes ~29% of the price move the liveness verdict as if it
+    // contributed all of it — in either direction (quiet mapped venue +
+    // ticking unmapped tail scoring healthy, or the inverse stopping signing
+    // while real venues are live).
     let mut bw_sum = 0.0f64;
     let mut active_bw_sum = 0.0f64;
+
+    // Blend-weight concentration, for `WeightProfile`. Measured on the FINAL
+    // weights so it reports composite influence, not configured inputs.
+    let mut w_sq_sum = 0.0f64;
+    let mut w_max = 0.0f64;
 
     for entry in entries {
         if !is_valid_tick(entry.index.bid, entry.index.ask) {
@@ -374,7 +563,6 @@ where
         }
 
         // Inline effective-weight computation so `exp` and the age read happen once.
-        let age = now.duration_since(entry.last_update).as_f64();
         // CORPSE EVICTION (audit F-01, 2026-07-04): a provider silent for
         // > 6x the stale threshold is DEAD, not stale — exclude it from
         // EVERYTHING (blend, freshness numerator/denominator, active count,
@@ -382,9 +570,17 @@ where
         // (decay floored at 0.001) and their unbounded stale_unc =
         // half_spread*sqrt(age/ipi) inflated published ci 400-1500x on
         // healthy majors, which then propagated into every cross/synth.
-        if age > corpse_horizon(stale_threshold_secs) {
+        let Some(age) = live_age(entry, now, stale_threshold_secs) else {
             continue;
-        }
+        };
+        // UNMAPPED-BLOC BOUND: legs with no volume evidence behind them are
+        // demoted AS A GROUP (see `unmapped_bloc_frac`), never individually
+        // delisted — the relative order inside the bloc is untouched.
+        let base_weight = if entry.mapped {
+            entry.base_weight
+        } else {
+            entry.base_weight * bloc_scale
+        };
         // LIVENESS half-life: per-provider, adaptive. Retained UNCHANGED because
         // `active_count` below is a money-path gate (`server::signed`
         // MIN_ACTIVE_PROVIDERS) and re-basing it on the uniform price half-life
@@ -412,12 +608,12 @@ where
         };
         // Taper to exactly 0.0 at the corpse horizon so the `continue` above can
         // never drop a leg that still carried weight.
-        let w = entry.base_weight * decay_floored * corpse_taper(age, stale_threshold_secs);
+        let w = base_weight * decay_floored * corpse_taper(age, stale_threshold_secs);
 
         // Freshness numerator/denominator: accumulate for every valid-tick
         // provider BEFORE the weight-skip below, so floored-but-valid providers
         // still drag freshness down via the denominator.
-        bw_sum += entry.base_weight;
+        bw_sum += base_weight;
 
         // Active provider: any with non-floored decay >= 10 percent, regardless
         // of whether its weight contributes to TDWAP this cycle. PUBLISHED in
@@ -433,7 +629,7 @@ where
         // an injected leg dilutes the fresh-weight share instead of inflating it.
         if live_decay >= 0.1 && !entry.injected {
             active_count = active_count.saturating_add(1);
-            active_bw_sum += entry.base_weight;
+            active_bw_sum += base_weight;
         }
 
         if w <= 1e-9 {
@@ -447,6 +643,8 @@ where
 
         w_bid_sum += bid * w;
         w_ask_sum += ask * w;
+        w_sq_sum += w * w;
+        w_max = w_max.max(w);
 
         let w_new = w_sum + w;
         let delta = mid - mean_mid;
@@ -470,6 +668,15 @@ where
     if w_sum < 1e-12 {
         return None;
     }
+
+    let profile = WeightProfile {
+        top_weight_share: (w_max / w_sum).clamp(0.0, 1.0),
+        n_eff: if w_sq_sum > 0.0 {
+            (w_sum * w_sum) / w_sq_sum
+        } else {
+            0.0
+        },
+    };
 
     let tdwap_bid = w_bid_sum / w_sum;
     let tdwap_ask = w_ask_sum / w_sum;
@@ -534,31 +741,34 @@ where
         0u16
     };
 
-    Some(Index {
-        ticker: ticker_id,
-        bid: final_bid,
-        ask: final_ask,
-        vbid: total_bid_vol.min(u32::MAX as u64) as u32,
-        vask: total_ask_vol.min(u32::MAX as u64) as u32,
-        ci,
-        tick_count: accepted as u16,
-        confidence,
-        accepted,
-        rejected,
-        // Signal that `confidence` is the PACKED active-count byte (bits 0..6
-        // count, bit 7 fresh-weight-ok), not a legacy count and not the legacy
-        // freshness fraction. Single-source bit in `nxr_sdk::shard`.
-        // FLAG_NO_BOOK when NO provider carried depth (oracle relays publish
-        // price±conf without book sizes): honest absence marker so the
-        // integrity/dq phantom-quote gates don't flag oracle tickers. A
-        // healthy multi-provider CEX composite always sums nonzero depth.
-        flags: crate::shard::FLAG_CONF_ACTIVE
-            | if total_bid_vol == 0 && total_ask_vol == 0 {
-                crate::shard::FLAG_NO_BOOK
-            } else {
-                0
-            },
-    })
+    Some((
+        Index {
+            ticker: ticker_id,
+            bid: final_bid,
+            ask: final_ask,
+            vbid: total_bid_vol.min(u32::MAX as u64) as u32,
+            vask: total_ask_vol.min(u32::MAX as u64) as u32,
+            ci,
+            tick_count: accepted as u16,
+            confidence,
+            accepted,
+            rejected,
+            // Signal that `confidence` is the PACKED active-count byte (bits 0..6
+            // count, bit 7 fresh-weight-ok), not a legacy count and not the legacy
+            // freshness fraction. Single-source bit in `nxr_sdk::shard`.
+            // FLAG_NO_BOOK when NO provider carried depth (oracle relays publish
+            // price±conf without book sizes): honest absence marker so the
+            // integrity/dq phantom-quote gates don't flag oracle tickers. A
+            // healthy multi-provider CEX composite always sums nonzero depth.
+            flags: crate::shard::FLAG_CONF_ACTIVE
+                | if total_bid_vol == 0 && total_ask_vol == 0 {
+                    crate::shard::FLAG_NO_BOOK
+                } else {
+                    0
+                },
+        },
+        profile,
+    ))
 }
 
 // ── Throttled TDWAP: weight-vector freeze with change-triggered refresh ─────
@@ -653,6 +863,11 @@ pub struct WeightCache {
     /// Scratch buffer for the *current* call's fingerprints. Reused across
     /// cycles to avoid per-cycle Vec allocation.
     scratch: Vec<ProviderFingerprint>,
+    /// Weight composition measured at the last refresh, alongside
+    /// `cached_index`. Published as per-ticker gauges by the aggregator; it is
+    /// a by-product of the blend, so observing it costs nothing and cannot
+    /// disagree with the composite it describes.
+    profile: Option<WeightProfile>,
 }
 
 impl WeightCache {
@@ -663,6 +878,7 @@ impl WeightCache {
             cached_index: None,
             fingerprints: Vec::new(),
             scratch: Vec::new(),
+            profile: None,
         }
     }
 
@@ -672,6 +888,16 @@ impl WeightCache {
         self.last_refresh = None;
         self.cached_index = None;
         self.fingerprints.clear();
+        self.profile = None;
+    }
+
+    /// Weight composition measured by the most recent REFRESH, consumed once.
+    /// Returns `None` on every replay cycle, so a caller publishing it as a
+    /// gauge does the work only when the composite actually changed and a
+    /// quiet ticker costs nothing.
+    #[inline]
+    pub fn take_weight_profile(&mut self) -> Option<WeightProfile> {
+        self.profile.take()
     }
 
     /// Returns the cached composite without recomputation. Test/debug aid;
@@ -758,7 +984,7 @@ pub(crate) fn compute_vwap_throttled_at(
 
     // Cold path: full recomputation. Reuse the existing `compute_vwap_at`
     // implementation by walking the (pid, entry) pairs as `&ProviderEntry`.
-    let composite = compute_vwap_at(
+    let (composite, profile) = compute_vwap_profiled_at(
         ticker_id,
         entries.iter().map(|(_, e)| e),
         stale_threshold_secs,
@@ -770,6 +996,7 @@ pub(crate) fn compute_vwap_throttled_at(
     std::mem::swap(&mut cache.fingerprints, &mut cache.scratch);
     cache.scratch.clear();
     cache.cached_index = Some(composite);
+    cache.profile = Some(profile);
     cache.last_refresh = Some(now);
     Some(composite)
 }
@@ -930,6 +1157,186 @@ mod injected_leg_liveness_tests {
             before,
             ProviderFingerprint::from_entry(7, &e),
             "injected->real must break the fingerprint or the throttle replays stale liveness"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unmapped_bloc_tests {
+    use super::*;
+
+    fn leg(mid: f64) -> Index {
+        let half = mid * 0.0001;
+        Index::new(
+            448509915440349184,
+            mid - half,
+            mid + half,
+            16,
+            1_000,
+            1_000,
+            10,
+            1,
+            1,
+            0,
+        )
+    }
+
+    /// `(entry, profile)` for a set of `(base_weight, mapped)` legs, all at the
+    /// same mid and the same age so decay is a common factor and every measured
+    /// share is a pure function of the weighting.
+    fn profile_of(legs: &[(f64, bool)]) -> WeightProfile {
+        let now = Instant::now();
+        let entries: Vec<ProviderEntry> = legs
+            .iter()
+            .enumerate()
+            .map(|(i, (w, mapped))| {
+                ProviderEntry::new_at(leg(100.0 + i as f64), *w, now).with_mapped(*mapped)
+            })
+            .collect();
+        compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, now)
+            .expect("legs blend")
+            .1
+    }
+
+    /// NON-NEGOTIABLE: a ticker with no mapped leg has no bound applied and
+    /// composites exactly as it always did. 227 of 339 live tickers are in this
+    /// class (every FX pair, every metal).
+    #[test]
+    fn fully_unmapped_ticker_is_unchanged() {
+        let now = Instant::now();
+        let mids = [100.0_f64, 101.0, 102.0, 103.0, 104.0];
+        let unmapped: Vec<ProviderEntry> = mids
+            .iter()
+            .map(|m| ProviderEntry::new_at(leg(*m), 1.0, now))
+            .collect();
+        // Same legs declared MAPPED: the bound cannot apply either way, so the
+        // two composites must be bit-identical. That equality is the property
+        // "the bound never touches a fully-unmapped ticker".
+        let mapped: Vec<ProviderEntry> = unmapped.iter().map(|e| e.with_mapped(true)).collect();
+        let (a, pa) =
+            compute_vwap_profiled_at(448509915440349184, unmapped.iter(), 10.0, now).unwrap();
+        let (b, _) =
+            compute_vwap_profiled_at(448509915440349184, mapped.iter(), 10.0, now).unwrap();
+        assert_eq!(a.bid.to_bits(), b.bid.to_bits());
+        assert_eq!(a.ask.to_bits(), b.ask.to_bits());
+        // Equal weights: exactly 5 effective venues, each holding one fifth.
+        assert!((pa.n_eff - 5.0).abs() < 1e-9, "n_eff {}", pa.n_eff);
+        assert!((pa.top_weight_share - 0.2).abs() < 1e-9);
+        assert!((a.mid() - 102.0).abs() < 1e-6, "equal-weight mean");
+    }
+
+    /// The failure the per-leg constant caused: with ONE mapped venue (the
+    /// live shape of ORCA/USDT, CRV/USDT and ALGO/USDT, whose volume rows the
+    /// CMC scrape covers for a single exchange each) a small per-leg fallback
+    /// hands that venue 93-98% of the composite. The bloc bound must keep it at
+    /// the same concentration ceiling the offline policy would have capped it
+    /// at, and must keep real breadth in the mark.
+    #[test]
+    fn single_mapped_venue_never_becomes_a_single_venue_mark() {
+        for n_unmapped in [1_usize, 2, 4, 8, 16] {
+            let mut legs = vec![(1.0, true)];
+            legs.extend(std::iter::repeat_n((1.0, false), n_unmapped));
+            let p = profile_of(&legs);
+            assert!(
+                p.top_weight_share <= max_leg_share() + 1e-9,
+                "{n_unmapped} unmapped: top share {} breaches the {} ceiling",
+                p.top_weight_share,
+                max_leg_share()
+            );
+            if n_unmapped >= 2 {
+                assert!(p.n_eff >= 2.0, "{n_unmapped} unmapped: n_eff {}", p.n_eff);
+            }
+        }
+    }
+
+    /// The other direction: an unmapped bloc can never dilute a priced book.
+    /// The old `1.0` fallback let 8 unpriced legs outvote a mapped venue 8:1.
+    #[test]
+    fn unmapped_bloc_cannot_outvote_the_mapped_mass() {
+        let mut legs = vec![(1.0, true)];
+        legs.extend(std::iter::repeat_n((1.0, false), 8));
+        let p = profile_of(&legs);
+        // Mapped mass = 1.0; bloc is held to max(0.40, anti-concentration) of
+        // it, so the mapped venue keeps the majority of the blend.
+        assert!(p.top_weight_share >= 0.5, "share {}", p.top_weight_share);
+        assert!(p.top_weight_share <= max_leg_share() + 1e-9);
+    }
+
+    /// A ticker with enough mapped mass is left ALONE: the bound must not
+    /// reweight books that were never in trouble. Live DOT/USDT shape
+    /// (2026-08-11): 4 mapped venues summing ~5.95, 2 unmapped legs.
+    #[test]
+    fn mapped_rich_ticker_is_untouched() {
+        let legs = [
+            (3.76, true),
+            (1.0, true),
+            (0.68, true),
+            (0.51, true),
+            (1.0, false),
+            (1.0, false),
+        ];
+        let bounded = profile_of(&legs);
+        let all_mapped: Vec<(f64, bool)> = legs.iter().map(|(w, _)| (*w, true)).collect();
+        let unbounded = profile_of(&all_mapped);
+        assert!(
+            (bounded.top_weight_share - unbounded.top_weight_share).abs() < 1e-12,
+            "{} != {}",
+            bounded.top_weight_share,
+            unbounded.top_weight_share
+        );
+        assert!((bounded.n_eff - unbounded.n_eff).abs() < 1e-12);
+    }
+
+    /// PHASE 4 — the signed-quote liveness gate. `fresh_weight_share` is
+    /// `active_bw_sum / bw_sum` and both sums are now BLOC-SCALED, so the gate
+    /// sees the weights the composite is actually built from.
+    ///
+    /// Case: the mapped venue goes quiet while the unmapped tail keeps ticking.
+    /// On RAW base weights an unmapped bloc rescaled downward drags the share
+    /// with it, so signing stops with five real venues live (measured 0.032 at
+    /// a 0.01 per-leg fallback, against a 0.20 floor). Under the bloc bound the
+    /// tail keeps its bounded-but-real share and the gate stays open.
+    #[test]
+    fn fresh_weight_share_is_measured_on_the_weights_actually_used() {
+        let now = Instant::now();
+        // Quiet mapped venue: silent long enough that live_decay < 0.1, but
+        // still inside the corpse horizon so it holds its weight in bw_sum.
+        let quiet =
+            ProviderEntry::new_at(leg(100.0), 1.0, coarse_now_backdated(30_000)).with_mapped(true);
+        let mut entries = vec![quiet];
+        entries.extend(
+            (0..5).map(|i| ProviderEntry::new_at(leg(100.0 + f64::from(i) * 0.01), 1.0, now)),
+        );
+        let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, now).unwrap();
+        assert_eq!(
+            mitch::index::conf_active_count(snap.confidence),
+            5,
+            "five unmapped venues are genuinely ticking"
+        );
+        assert!(
+            mitch::index::conf_fresh_weight_ok(snap.confidence),
+            "five live venues must not read as a decayed composite"
+        );
+    }
+
+    /// The inverse: ONE ticking mapped venue behind a dead unmapped tail must
+    /// not be reported as a healthy multi-venue composite. The weight axis
+    /// alone cannot see this (the live leg holds most of the mass by design),
+    /// which is why `active_count` is the companion gate — pin that it is the
+    /// axis that fails here.
+    #[test]
+    fn one_live_venue_still_fails_the_breadth_gate() {
+        let now = Instant::now();
+        let stale = coarse_now_backdated(30_000);
+        let mut entries = vec![ProviderEntry::new_at(leg(100.0), 1.0, now).with_mapped(true)];
+        entries.extend(
+            (0..5).map(|i| ProviderEntry::new_at(leg(100.0 + f64::from(i) * 0.01), 1.0, stale)),
+        );
+        let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, now).unwrap();
+        assert_eq!(mitch::index::conf_active_count(snap.confidence), 1);
+        assert!(
+            u32::from(mitch::index::conf_active_count(snap.confidence)) < 2,
+            "one ticking leg must fail MIN_ACTIVE_PROVIDERS regardless of weight share"
         );
     }
 }

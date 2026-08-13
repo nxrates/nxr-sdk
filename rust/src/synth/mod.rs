@@ -46,22 +46,23 @@ pub mod cross_expand;
 pub mod idx_source;
 pub mod ohlc;
 pub mod pairs;
-pub mod pipeline_pairs;
 pub mod paths;
+pub mod pipeline_pairs;
 pub mod replay;
 pub mod rolling;
 pub mod tick;
 pub mod triangulation_rules;
 
 pub use compose::compose_cross_s10;
-pub use idx_source::{EphemeralIdxSource, DEFAULT_EPHEMERAL_CAPACITY};
-pub use replay::{compute_synth_index, SynthReplayState, LEG_STALE_TTL_MS, SYNTH_KERNEL_PROVIDER_ID};
+pub use idx_source::{DEFAULT_EPHEMERAL_CAPACITY, EphemeralIdxSource};
+pub use replay::{
+    LEG_STALE_TTL_MS, SYNTH_KERNEL_PROVIDER_ID, SynthReplayState, compute_synth_index,
+};
 
 pub use bar::{
-    build_rolling_rho_cache, reconstruct_synth_bar_series,
-    reconstruct_synth_bar_series_at_base_tf_then_rollup,
-    reconstruct_synth_bar_series_rolling_rho, rho_cache_callback, DEFAULT_RHO_WINDOW_BUCKETS,
-    RhoCache,
+    DEFAULT_RHO_WINDOW_BUCKETS, RhoCache, build_rolling_rho_cache, reconstruct_synth_bar_series,
+    reconstruct_synth_bar_series_at_base_tf_then_rollup, reconstruct_synth_bar_series_rolling_rho,
+    rho_cache_callback,
 };
 pub use ohlc::{
     OhlcLite, OhlcWithRange, TimedOhlc, TimedOhlcCount, VarianceEstimator, reconstruct_synth_ohlc,

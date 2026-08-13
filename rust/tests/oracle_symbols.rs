@@ -2,8 +2,8 @@
 //!
 //! Locks: (a) every configured oracle symbol resolves STRICTLY (no FNV
 //! fallback - a miss means phantom shard ids on disk), (b) slash form ≡
-//! MT4 6-char form for FX/metals so the pyth provider MERGES into the
-//! MT4-fed tickers instead of forking them, (c) base assets land in the
+//! 6-char broker form for FX/metals so the pyth provider MERGES into the
+//! broker-fed tickers instead of forking them, (c) base assets land in the
 //! intended class/id (cross-class shadowing guard: the resolver's
 //! normalized-key map is last-write-wins across classes).
 
@@ -22,8 +22,8 @@ const CM: u64 = 0x4;
 const CR: u64 = 0x6;
 
 #[test]
-fn oracle_fx_slash_equals_mt4_form() {
-    for (slash, mt4) in [
+fn oracle_fx_slash_equals_six_char_form() {
+    for (slash, six) in [
         ("EUR/USD", "EURUSD"),
         ("GBP/USD", "GBPUSD"),
         ("AUD/USD", "AUDUSD"),
@@ -54,23 +54,23 @@ fn oracle_fx_slash_equals_mt4_form() {
         ("USD/THB", "USDTHB"),
     ] {
         let a = try_resolve_ticker_id(slash).unwrap_or_else(|| panic!("{slash} unresolvable"));
-        let b = try_resolve_ticker_id(mt4).unwrap_or_else(|| panic!("{mt4} unresolvable"));
-        assert_eq!(a, b, "{slash} must merge with MT4 {mt4} ticker");
+        let b = try_resolve_ticker_id(six).unwrap_or_else(|| panic!("{six} unresolvable"));
+        assert_eq!(a, b, "{slash} must merge with {six} ticker");
         assert_eq!(base_class(a), FX, "{slash} base class");
     }
 }
 
 #[test]
-fn oracle_metals_slash_equals_mt4_form() {
-    for (slash, mt4, cm_id) in [
+fn oracle_metals_slash_equals_six_char_form() {
+    for (slash, six, cm_id) in [
         ("XAU/USD", "XAUUSD", 161),
         ("XAG/USD", "XAGUSD", 411),
         ("XPT/USD", "XPTUSD", 321),
         ("XPD/USD", "XPDUSD", 301),
     ] {
         let a = try_resolve_ticker_id(slash).unwrap_or_else(|| panic!("{slash} unresolvable"));
-        let b = try_resolve_ticker_id(mt4).unwrap_or_else(|| panic!("{mt4} unresolvable"));
-        assert_eq!(a, b, "{slash} must merge with MT4 {mt4} ticker");
+        let b = try_resolve_ticker_id(six).unwrap_or_else(|| panic!("{six} unresolvable"));
+        assert_eq!(a, b, "{slash} must merge with {six} ticker");
         assert_eq!((base_class(a), base_id(a)), (CM, cm_id), "{slash} base");
     }
     // Tokenized golds stay DISTINCT from spot gold.
@@ -133,13 +133,13 @@ fn oracle_watch_commodities() {
     // XTI moved from WTI Crude's alias column to the new Titanium row
     // (2026-07-08, pyth Metal.XTI = spot titanium); WTI keeps CL/WTI/USOIL.
     for (sym, cm_id) in [
-        ("XCU/USD", 101),  // Copper
-        ("XTI/USD", 486),  // Titanium (NOT WTI crude)
-        ("XAL/USD", 1),    // Aluminum
-        ("XGR/USD", 169),  // Graphite
-        ("XCO/USD", 76),   // Cobalt
-        ("XLI/USD", 216),  // Lithium
-        ("XNI/USD", 261),  // Nickel
+        ("XCU/USD", 101), // Copper
+        ("XTI/USD", 486), // Titanium (NOT WTI crude)
+        ("XAL/USD", 1),   // Aluminum
+        ("XGR/USD", 169), // Graphite
+        ("XCO/USD", 76),  // Cobalt
+        ("XLI/USD", 216), // Lithium
+        ("XNI/USD", 261), // Nickel
     ] {
         let id = try_resolve_ticker_id(sym).unwrap_or_else(|| panic!("{sym} unresolvable"));
         assert_eq!((base_class(id), base_id(id)), (CM, cm_id), "{sym} base");
@@ -152,8 +152,8 @@ fn oracle_watch_commodities() {
 }
 
 #[test]
-fn oracle_watch_indices_merge_mt4() {
-    // Pyth Index.US500/US30/US100 map onto the SAME tickers the MT4 CFDs
+fn oracle_watch_indices_merge_broker_cfds() {
+    // Pyth Index.US500/US30/US100 map onto the SAME tickers the broker CFDs
     // already feed (aliases on the indices.csv rows).
     for (a, b) in [("US500", "SPX"), ("US30", "DJI"), ("NAS100", "US100")] {
         assert_eq!(

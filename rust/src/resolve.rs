@@ -8,10 +8,10 @@
 
 use mitch::common::{AssetClass, InstrumentType, MitchError};
 use mitch::constants::{
-    COMMODITIES_DATA, CRYPTO_ASSETS_DATA, EQUITIES_DATA,
-    FOREX_DATA, INDICES_DATA, SOVEREIGN_DEBT_DATA, DataEntry,
+    COMMODITIES_DATA, CRYPTO_ASSETS_DATA, DataEntry, EQUITIES_DATA, FOREX_DATA, INDICES_DATA,
+    SOVEREIGN_DEBT_DATA,
 };
-use mitch::ticker::{Asset, AssetMatch, Ticker, TickerMatch, TickerId, pack_asset};
+use mitch::ticker::{Asset, AssetMatch, Ticker, TickerId, TickerMatch, pack_asset};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -40,8 +40,15 @@ fn normalize_asset_name(input: &str) -> String {
 
     // Strip business suffixes
     for suffix in &[
-        " corporation", " company", " inc", " corp", " ltd", " llc",
-        " limited", " group", " cie",
+        " corporation",
+        " company",
+        " inc",
+        " corp",
+        " ltd",
+        " llc",
+        " limited",
+        " group",
+        " cie",
     ] {
         if s.ends_with(suffix) {
             s = s[..s.len() - suffix.len()].trim().to_string();
@@ -49,17 +56,28 @@ fn normalize_asset_name(input: &str) -> String {
         }
     }
 
-    s.chars().filter(|c| c.is_alphanumeric() || *c == '+' || *c == '-').collect()
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '+' || *c == '-')
+        .collect()
 }
 
 // ---- Jaro-Winkler similarity (internal) ----
 
 fn jaro_winkler_similarity(s1: &str, s2: &str) -> f64 {
-    if s1 == s2 { return 1.0; }
-    if s1.is_empty() || s2.is_empty() { return 0.0; }
+    if s1 == s2 {
+        return 1.0;
+    }
+    if s1.is_empty() || s2.is_empty() {
+        return 0.0;
+    }
 
     let jaro = jaro_similarity(s1, s2);
-    let prefix_len = s1.chars().zip(s2.chars()).take(4).take_while(|(a, b)| a == b).count() as f64;
+    let prefix_len = s1
+        .chars()
+        .zip(s2.chars())
+        .take(4)
+        .take_while(|(a, b)| a == b)
+        .count() as f64;
     jaro + 0.1 * prefix_len * (1.0 - jaro)
 }
 
@@ -68,10 +86,18 @@ fn jaro_similarity(s1: &str, s2: &str) -> f64 {
     let c2: Vec<char> = s2.chars().collect();
     let (l1, l2) = (c1.len(), c2.len());
 
-    if l1 == 0 && l2 == 0 { return 1.0; }
-    if l1 == 0 || l2 == 0 { return 0.0; }
+    if l1 == 0 && l2 == 0 {
+        return 1.0;
+    }
+    if l1 == 0 || l2 == 0 {
+        return 0.0;
+    }
 
-    let window = if l1.max(l2) <= 2 { 0 } else { l1.max(l2) / 2 - 1 };
+    let window = if l1.max(l2) <= 2 {
+        0
+    } else {
+        l1.max(l2) / 2 - 1
+    };
     let mut m1 = vec![false; l1];
     let mut m2 = vec![false; l2];
     let mut matches = 0usize;
@@ -80,21 +106,31 @@ fn jaro_similarity(s1: &str, s2: &str) -> f64 {
         let lo = i.saturating_sub(window);
         let hi = (i + window + 1).min(l2);
         for j in lo..hi {
-            if m2[j] || c1[i] != c2[j] { continue; }
+            if m2[j] || c1[i] != c2[j] {
+                continue;
+            }
             m1[i] = true;
             m2[j] = true;
             matches += 1;
             break;
         }
     }
-    if matches == 0 { return 0.0; }
+    if matches == 0 {
+        return 0.0;
+    }
 
     let mut transpositions = 0usize;
     let mut k = 0;
     for i in 0..l1 {
-        if !m1[i] { continue; }
-        while !m2[k] { k += 1; }
-        if c1[i] != c2[k] { transpositions += 1; }
+        if !m1[i] {
+            continue;
+        }
+        while !m2[k] {
+            k += 1;
+        }
+        if c1[i] != c2[k] {
+            transpositions += 1;
+        }
         k += 1;
     }
 
@@ -109,7 +145,10 @@ fn strip_ticker_suffixes(symbol: &str) -> String {
 
     // Strip leading sigil
     for p in &["^", ".", "$", "#", "_"] {
-        if s.starts_with(p) { s = s[1..].to_string(); break; }
+        if s.starts_with(p) {
+            s = s[1..].to_string();
+            break;
+        }
     }
 
     // Two-pass suffix stripping for compound suffixes
@@ -119,7 +158,10 @@ fn strip_ticker_suffixes(symbol: &str) -> String {
         // Delimiter-based single-char suffixes
         for d in &["-", "_", ".", "$", "^", "#"] {
             if let Some(pos) = s.rfind(d)
-                && matches!(&s[pos + 1..], "us" | "m" | "c" | "z" | "b" | "r" | "d" | "i")
+                && matches!(
+                    &s[pos + 1..],
+                    "us" | "m" | "c" | "z" | "b" | "r" | "d" | "i"
+                )
             {
                 s = s[..pos].to_string();
                 changed = true;
@@ -149,7 +191,9 @@ fn strip_ticker_suffixes(symbol: &str) -> String {
             }
         }
 
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
     s
 }
@@ -223,8 +267,12 @@ impl AssetResolver {
                              {:?}/{} ({}) and {:?}/{} ({}) — two CR assets share a \
                              normalized name/alias; fix crypto-assets.csv (RCA ROOT1c)",
                             norm,
-                            existing.class, existing.class_id, existing.name,
-                            asset.class, asset.class_id, asset.name,
+                            existing.class,
+                            existing.class_id,
+                            existing.name,
+                            asset.class,
+                            asset.class_id,
+                            asset.name,
                         );
                     } else {
                         tracing::warn!(
@@ -255,8 +303,15 @@ impl AssetResolver {
         self.by_class.insert(class, class_assets);
     }
 
-    fn find(&self, query: &str, min_confidence: f64, class_filter: Option<AssetClass>) -> Option<AssetMatch> {
-        if query.trim().is_empty() { return None; }
+    fn find(
+        &self,
+        query: &str,
+        min_confidence: f64,
+        class_filter: Option<AssetClass>,
+    ) -> Option<AssetMatch> {
+        if query.trim().is_empty() {
+            return None;
+        }
 
         let cleaned = strip_ticker_suffixes(query);
         let norm = normalize_asset_name(&cleaned);
@@ -265,7 +320,11 @@ impl AssetResolver {
         if let Some(asset) = self.by_normalized.get(&norm)
             && class_filter.is_none_or(|c| c == asset.class)
         {
-            return Some(AssetMatch { asset: asset.clone(), confidence: 1.0, matched_field: "exact".into() });
+            return Some(AssetMatch {
+                asset: asset.clone(),
+                confidence: 1.0,
+                matched_field: "exact".into(),
+            });
         }
 
         let candidates: Vec<&Asset> = match class_filter {
@@ -305,7 +364,11 @@ impl AssetResolver {
                         || (best_sim == cur.confidence && asset.name.len() <= cur.asset.name.len())
                 });
                 if is_better {
-                    best = Some(AssetMatch { asset: asset.clone(), confidence: best_sim, matched_field: field });
+                    best = Some(AssetMatch {
+                        asset: asset.clone(),
+                        confidence: best_sim,
+                        matched_field: field,
+                    });
                 }
             }
         }
@@ -377,7 +440,8 @@ fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
         if let Some(pos) = lower.rfind(d) {
             let base = lower[..pos].trim_matches(|c| c == '/' || c == '_' || c == '-');
             let quote = lower[pos + 1..].trim_matches(|c| c == '/' || c == '_' || c == '-');
-            if !base.is_empty() && !quote.is_empty()
+            if !base.is_empty()
+                && !quote.is_empty()
                 && let Some(q) = resolve_quote_token(quote)
             {
                 return Some((q, base.to_string(), "delim".into()));
@@ -427,7 +491,10 @@ fn detect_quote_currency(symbol: &str) -> Option<(Asset, String, String)> {
 // ---- Public API ----
 
 /// Resolve a ticker symbol across all asset classes.
-pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<TickerMatch, MitchError> {
+pub fn resolve_ticker(
+    symbol: &str,
+    instrument_type: InstrumentType,
+) -> Result<TickerMatch, MitchError> {
     let mut steps = Vec::new();
     let original = symbol.to_string();
 
@@ -439,16 +506,34 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
 
     // Step 2: detect quote currency
     if let Some((quote, remaining, pos)) = detect_quote_currency(&cleaned) {
-        steps.push(format!("Detected quote {} at {}: remaining '{}'", quote.name, pos, remaining));
+        steps.push(format!(
+            "Detected quote {} at {}: remaining '{}'",
+            quote.name, pos, remaining
+        ));
 
         if remaining.is_empty() {
             // Single currency - pair with USD
-            let usd = RESOLVER.find("usd", 0.95, Some(AssetClass::FX))
+            let usd = RESOLVER
+                .find("usd", 0.95, Some(AssetClass::FX))
                 .ok_or_else(|| MitchError::InvalidData("Could not resolve USD".into()))?;
-            let tid = TickerId::new(instrument_type, quote.class, quote.class_id, usd.asset.class, usd.asset.class_id, 0)?;
+            let tid = TickerId::new(
+                instrument_type,
+                quote.class,
+                quote.class_id,
+                usd.asset.class,
+                usd.asset.class_id,
+                0,
+            )?;
             steps.push("Used detected asset as base with USD quote".into());
             return Ok(TickerMatch {
-                ticker: Ticker { id: tid.raw, name: format!("{}/USD", quote.name), instrument_type, base: quote, quote: usd.asset, sub_type: 0 },
+                ticker: Ticker {
+                    id: tid.raw,
+                    name: format!("{}/USD", quote.name),
+                    instrument_type,
+                    base: quote,
+                    quote: usd.asset,
+                    sub_type: 0,
+                },
                 confidence: 0.9,
                 processing_steps: steps,
             });
@@ -500,11 +585,28 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
                     .and_then(|_| RESOLVER.find(&remaining, base_threshold, Some(AssetClass::FX)))
             });
         if let Some(base) = base_match {
-            let tid = TickerId::new(instrument_type, base.asset.class, base.asset.class_id, quote.class, quote.class_id, 0)?;
+            let tid = TickerId::new(
+                instrument_type,
+                base.asset.class,
+                base.asset.class_id,
+                quote.class,
+                quote.class_id,
+                0,
+            )?;
             let name = format!("{}/{}", base.asset.name, quote.name);
-            steps.push(format!("Resolved base asset: {} (confidence: {:.2})", base.asset.name, base.confidence));
+            steps.push(format!(
+                "Resolved base asset: {} (confidence: {:.2})",
+                base.asset.name, base.confidence
+            ));
             return Ok(TickerMatch {
-                ticker: Ticker { id: tid.raw, name, instrument_type, base: base.asset, quote, sub_type: 0 },
+                ticker: Ticker {
+                    id: tid.raw,
+                    name,
+                    instrument_type,
+                    base: base.asset,
+                    quote,
+                    sub_type: 0,
+                },
                 confidence: base.confidence,
                 processing_steps: steps,
             });
@@ -526,22 +628,47 @@ pub fn resolve_ticker(symbol: &str, instrument_type: InstrumentType) -> Result<T
     // Threshold 0.9 (same RCA as base lookup above): suppress weak fuzzy hits.
     // CAT-1 aliases resolve via CSV; CAT-2 stays distinct (see Step 2 note).
     if let Some(asset) = RESOLVER.find(&cleaned, 0.9, None) {
-        let usd = RESOLVER.find("usd", 0.95, Some(AssetClass::FX))
+        let usd = RESOLVER
+            .find("usd", 0.95, Some(AssetClass::FX))
             .ok_or_else(|| MitchError::InvalidData("Could not resolve USD".into()))?;
-        let tid = TickerId::new(instrument_type, asset.asset.class, asset.asset.class_id, usd.asset.class, usd.asset.class_id, 0)?;
-        steps.push(format!("Resolved as single asset with USD quote: {} (confidence: {:.2})", asset.asset.name, asset.confidence));
+        let tid = TickerId::new(
+            instrument_type,
+            asset.asset.class,
+            asset.asset.class_id,
+            usd.asset.class,
+            usd.asset.class_id,
+            0,
+        )?;
+        steps.push(format!(
+            "Resolved as single asset with USD quote: {} (confidence: {:.2})",
+            asset.asset.name, asset.confidence
+        ));
         return Ok(TickerMatch {
-            ticker: Ticker { id: tid.raw, name: format!("{}/USD", asset.asset.name), instrument_type, base: asset.asset, quote: usd.asset, sub_type: 0 },
+            ticker: Ticker {
+                id: tid.raw,
+                name: format!("{}/USD", asset.asset.name),
+                instrument_type,
+                base: asset.asset,
+                quote: usd.asset,
+                sub_type: 0,
+            },
             confidence: asset.confidence,
             processing_steps: steps,
         });
     }
 
-    Err(MitchError::InvalidData(format!("Unable to resolve ticker: {}", original)))
+    Err(MitchError::InvalidData(format!(
+        "Unable to resolve ticker: {}",
+        original
+    )))
 }
 
 /// Resolve asset within a specific asset class.
-pub fn resolve_asset_in_class(name: &str, min_confidence: f64, asset_class: AssetClass) -> Option<AssetMatch> {
+pub fn resolve_asset_in_class(
+    name: &str,
+    min_confidence: f64,
+    asset_class: AssetClass,
+) -> Option<AssetMatch> {
     RESOLVER.find(name, min_confidence, Some(asset_class))
 }
 
@@ -603,7 +730,11 @@ mod fx_surfacing_tests {
                 tid.quote_asset_class(),
                 m.ticker.quote.name
             );
-            assert_eq!(tid.base_asset_class(), AssetClass::CR, "{sym}: base class must be CR");
+            assert_eq!(
+                tid.base_asset_class(),
+                AssetClass::CR,
+                "{sym}: base class must be CR"
+            );
         }
     }
 }

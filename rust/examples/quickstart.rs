@@ -12,7 +12,8 @@ use nxr_sdk::client::{DataKind, HistoryData, HistoryOpts, NxrClient};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let base = env::var("NXR_BASE_URL").unwrap_or_else(|_| nxr_sdk::client::DEFAULT_BASE_URL.into());
+    let base =
+        env::var("NXR_BASE_URL").unwrap_or_else(|_| nxr_sdk::client::DEFAULT_BASE_URL.into());
     let c = NxrClient::new(base).with_timeout(Duration::from_secs(15));
 
     println!("== Health ==");
@@ -70,10 +71,13 @@ async fn main() -> anyhow::Result<()> {
         .limit(3)
         .fetch()
         .await?;
-    println!("got: {:?}", match data {
-        HistoryData::Bars { bars, .. } => format!("{} bars", bars.len()),
-        HistoryData::Idx(rs) => format!("{} idx", rs.len()),
-    });
+    println!(
+        "got: {:?}",
+        match data {
+            HistoryData::Bars { bars, .. } => format!("{} bars", bars.len()),
+            HistoryData::Idx(rs) => format!("{} idx", rs.len()),
+        }
+    );
 
     Ok(())
 }

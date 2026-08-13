@@ -24,14 +24,11 @@ use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::protocol::Message,
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
 use tracing::{debug, info, warn};
 
-pub use crate::ws_frame::{
-    FRAME_HEADER_BYTES, INDEX_RECORD_BYTES, INDEX_STRIDE, MSG_INDEX,
-};
+pub use crate::ws_frame::{FRAME_HEADER_BYTES, INDEX_RECORD_BYTES, INDEX_STRIDE, MSG_INDEX};
 
 /// Default WebSocket keepalive. The server has no idle timeout but NAT paths
 /// often do; ping every 30 s so a stateful firewall keeps the connection open.

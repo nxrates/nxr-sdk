@@ -70,10 +70,7 @@ impl ReplaySchedule {
     /// negligible wire cost. See `docs/redundancy.md`.
     #[allow(dead_code)]
     pub(crate) fn heartbeat() -> Self {
-        Self::at_offsets(vec![
-            Duration::from_millis(25),
-            Duration::from_millis(75),
-        ])
+        Self::at_offsets(vec![Duration::from_millis(25), Duration::from_millis(75)])
     }
 
     /// Configured offsets, in send order.
@@ -140,9 +137,7 @@ impl<S: FrameSink + 'static> Publisher<S> {
             match rx.recv().await {
                 Ok(frame) => {
                     let bytes = frame.as_frame_bytes();
-                    for (idx, (sink, err_ctr)) in
-                        self.sinks.iter().zip(errors.iter()).enumerate()
-                    {
+                    for (idx, (sink, err_ctr)) in self.sinks.iter().zip(errors.iter()).enumerate() {
                         if let Err(e) = sink.send(bytes).await {
                             let n = err_ctr.fetch_add(1, Ordering::Relaxed) + 1;
                             if last_sink_report[idx].elapsed() >= Duration::from_secs(1) {

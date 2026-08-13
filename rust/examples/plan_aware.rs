@@ -30,8 +30,8 @@ const SEP: &str = "=============================================================
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let base = env::var("NXR_BASE_URL")
-        .unwrap_or_else(|_| nxr_sdk::client::DEFAULT_BASE_URL.into());
+    let base =
+        env::var("NXR_BASE_URL").unwrap_or_else(|_| nxr_sdk::client::DEFAULT_BASE_URL.into());
     let key = env::var("NXR_API_KEY").ok();
     let c = NxrClient::new(base.clone()).with_timeout(Duration::from_secs(15));
 
@@ -44,20 +44,28 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Scenario 1: /v1/tickers (cheap, JSON, allowed everywhere) ──────────
     match c.tickers().await {
-        Ok(rows) => println!("\n[1] /v1/tickers          → {} mids (no plan limit hit)", rows.len()),
+        Ok(rows) => println!(
+            "\n[1] /v1/tickers          → {} mids (no plan limit hit)",
+            rows.len()
+        ),
         Err(e) => handle("tickers", e),
     }
 
     // ── Scenario 2: MITCH binary on Free → PLAN_ENCODING_FORBIDDEN ─────────
     println!("\n[2] /v1/idx/BTC-USDT (MITCH binary)");
-    let opts = RangeOpts { limit: Some(100), ..Default::default() };
+    let opts = RangeOpts {
+        limit: Some(100),
+        ..Default::default()
+    };
     match c.idx("BTC/USDT", &opts).await {
         Ok(recs) => println!("    ok · {} IndexRecords (binary path)", recs.len()),
         Err(e) => {
             if let Some(plan_err) = e.downcast_ref::<PlanLimitError>() {
                 report_plan_error(plan_err, "MITCH binary on Free");
                 if plan_err.code == PlanErrorCode::PlanEncodingForbidden {
-                    println!("    → falling back to kline bars (JSON path absent in Rust SDK; uses MITCH 96B)");
+                    println!(
+                        "    → falling back to kline bars (JSON path absent in Rust SDK; uses MITCH 96B)"
+                    );
                     let fb = c.bars("BTC/USDT", BarKindParam::Kline, &opts).await;
                     match fb {
                         Ok(bars) => println!("    ok · {} bars via fallback", bars.len()),
@@ -67,8 +75,8 @@ async fn main() -> anyhow::Result<()> {
             } else if e.to_string().contains("PLAN_LIMIT_EXCEEDED") {
                 // Server is already emitting the wire shape; SDK layer
                 // hasn't surfaced the typed downcast yet. Parse the string.
-                println!("    [server returned PLAN_LIMIT_EXCEEDED but SDK layer has not")
-                ; println!("     wired the downcast yet — parse the message manually]:");
+                println!("    [server returned PLAN_LIMIT_EXCEEDED but SDK layer has not");
+                println!("     wired the downcast yet — parse the message manually]:");
                 println!("    {}", e);
             } else {
                 println!("    non-plan error: {}", e);
@@ -80,7 +88,10 @@ async fn main() -> anyhow::Result<()> {
     // The Rust SDK does not expose tf=10 OHLC directly (the typed surface
     // covers MITCH bars + idx). We exercise the gate via the bars() path.
     println!("\n[3] /v1/bars/BTC-USDT/renko (Pro-tier brick density)");
-    let opts10 = RangeOpts { limit: Some(10), ..Default::default() };
+    let opts10 = RangeOpts {
+        limit: Some(10),
+        ..Default::default()
+    };
     match c.bars("BTC/USDT", BarKindParam::Renko, &opts10).await {
         Ok(bars) => println!("    ok · {} renko bricks", bars.len()),
         Err(e) => {

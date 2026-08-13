@@ -87,7 +87,11 @@ impl UdpMulticastSink {
         raw.bind(&SocketAddr::from(([0, 0, 0, 0], 0)).into())?;
         let socket = UdpSocket::from_std(raw.into())?;
         info!(%dest, label, send_buf = UDP_SEND_BUFFER_BYTES, "UDP multicast sink ready");
-        Ok(Self { socket, dest, label })
+        Ok(Self {
+            socket,
+            dest,
+            label,
+        })
     }
 }
 
@@ -156,7 +160,12 @@ fn build_rx_socket(bind_addr: SocketAddr, label: &str) -> Result<Socket> {
              less than intended; raise net.core.rmem_max (persisted, not sysctl -w) to at \
              least {UDP_RECV_BUFFER_BYTES}"
         ),
-        Ok(got) => info!(granted = got, requested = UDP_RECV_BUFFER_BYTES, label, "SO_RCVBUF granted"),
+        Ok(got) => info!(
+            granted = got,
+            requested = UDP_RECV_BUFFER_BYTES,
+            label,
+            "SO_RCVBUF granted"
+        ),
         Err(e) => warn!(%e, label, "SO_RCVBUF read-back failed; grant unverified"),
     }
     raw.bind(&bind_addr.into())?;
@@ -241,7 +250,11 @@ impl FrameSource for UdpMulticastSource {
 /// Lifted from `core::bars_{s10,renko}` 2026-06-01 to kill the dup.
 pub fn parse_v4_addr(s: &str) -> Option<[u8; 4]> {
     let parts: Vec<u8> = s.split('.').filter_map(|p| p.parse().ok()).collect();
-    if parts.len() == 4 { Some([parts[0], parts[1], parts[2], parts[3]]) } else { None }
+    if parts.len() == 4 {
+        Some([parts[0], parts[1], parts[2], parts[3]])
+    } else {
+        None
+    }
 }
 
 /// Bar-feed flavor for multicast resolution. Replaces the per-file
@@ -279,11 +292,17 @@ impl BarKind {
         });
         match self {
             BarKind::S10 => (
-                bars.s10_addr.as_deref().and_then(parse_v4_addr).unwrap_or([239, 0, 42, 3]),
+                bars.s10_addr
+                    .as_deref()
+                    .and_then(parse_v4_addr)
+                    .unwrap_or([239, 0, 42, 3]),
                 bars.s10_port.unwrap_or(40008),
             ),
             BarKind::Renko => (
-                bars.renko_addr.as_deref().and_then(parse_v4_addr).unwrap_or([239, 0, 42, 4]),
+                bars.renko_addr
+                    .as_deref()
+                    .and_then(parse_v4_addr)
+                    .unwrap_or([239, 0, 42, 4]),
                 bars.renko_port.unwrap_or(40009),
             ),
         }

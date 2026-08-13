@@ -41,8 +41,7 @@ use bytemuck::Pod;
 pub fn write_atomic<T: Pod>(path: impl AsRef<Path>, records: &[T]) -> Result<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create_dir_all {:?}", parent))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
     }
     let tmp = {
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -53,15 +52,13 @@ pub fn write_atomic<T: Pod>(path: impl AsRef<Path>, records: &[T]) -> Result<()>
         }
     };
     {
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("create {:?}", tmp))?;
+        let mut f = std::fs::File::create(&tmp).with_context(|| format!("create {:?}", tmp))?;
         f.write_all(bytemuck::cast_slice(records))
             .with_context(|| format!("write {:?}", tmp))?;
         // Best-effort durability before rename; non-fatal on filesystems that
         // don't support it (tmpfs, etc.).
         let _ = f.sync_data();
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {:?} -> {:?}", tmp, path))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("rename {:?} -> {:?}", tmp, path))?;
     Ok(())
 }

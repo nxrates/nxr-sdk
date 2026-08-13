@@ -166,9 +166,13 @@ impl NxrConfig {
             server_host: env_or("NXR_SERVER_HOST", "0.0.0.0"),
             server_port: env_or("NXR_SERVER_PORT", "40004").parse().unwrap_or(40004),
             multicast_addr_a: env_or("NXR_MULTICAST_ADDR_A", "239.0.42.1"),
-            multicast_port_a: env_or("NXR_MULTICAST_PORT_A", "40006").parse().unwrap_or(40006),
+            multicast_port_a: env_or("NXR_MULTICAST_PORT_A", "40006")
+                .parse()
+                .unwrap_or(40006),
             multicast_addr_b: env_or("NXR_MULTICAST_ADDR_B", "239.0.42.2"),
-            multicast_port_b: env_or("NXR_MULTICAST_PORT_B", "40007").parse().unwrap_or(40007),
+            multicast_port_b: env_or("NXR_MULTICAST_PORT_B", "40007")
+                .parse()
+                .unwrap_or(40007),
             ticks_dir,
             bars_dir,
             indexes_dir,
@@ -235,9 +239,7 @@ impl NxrConfig {
             reject_band_pct: env_or("NXR_REJECT_BAND_PCT", "0.20")
                 .parse()
                 .unwrap_or(0.20),
-            reject_min_providers: env_or("NXR_REJECT_MIN_PROVIDERS", "2")
-                .parse()
-                .unwrap_or(2),
+            reject_min_providers: env_or("NXR_REJECT_MIN_PROVIDERS", "2").parse().unwrap_or(2),
         }
     }
 

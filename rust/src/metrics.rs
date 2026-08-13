@@ -47,10 +47,17 @@ pub async fn serve(port: u16) -> Result<()> {
 
 async fn render_metrics(
     State(handle): State<PrometheusHandle>,
-) -> (axum::http::StatusCode, [(axum::http::HeaderName, &'static str); 1], String) {
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         handle.render(),
     )
 }

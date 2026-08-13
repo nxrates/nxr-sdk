@@ -91,7 +91,6 @@ pub struct SynthPath {
     pub legs: Vec<SynthLeg>,
 }
 
-
 /// Disk shard window from `/v1/tickers/detail`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ShardWindow {
@@ -365,7 +364,8 @@ impl NxrClient {
 
     /// `GET /v1/synth/tick/{sym}` — instantaneous synth tick.
     pub async fn synth_tick(&self, sym: &str) -> Result<SynthTickJson> {
-        self.json_get(&format!("/v1/synth/tick/{}", url_sym(sym))).await
+        self.json_get(&format!("/v1/synth/tick/{}", url_sym(sym)))
+            .await
     }
 
     /// `GET /v1/integrity/{sym}` — shard-integrity diagnostics. Returns the
@@ -495,10 +495,7 @@ impl NxrClient {
         if let Some(k) = &self.api_key {
             req = req.header("X-NXR-Key", k);
         }
-        let r = req
-            .send()
-            .await
-            .with_context(|| format!("GET {}", url))?;
+        let r = req.send().await.with_context(|| format!("GET {}", url))?;
         let status = r.status();
         if !status.is_success() {
             let body = r.text().await.unwrap_or_default();
@@ -511,7 +508,9 @@ impl NxrClient {
                 }
             );
         }
-        r.json::<T>().await.with_context(|| format!("decode {}", path))
+        r.json::<T>()
+            .await
+            .with_context(|| format!("decode {}", path))
     }
 
     async fn bytes_get(&self, path: &str) -> Result<bytes::Bytes> {
@@ -523,10 +522,7 @@ impl NxrClient {
         if let Some(k) = &self.api_key {
             req = req.header("X-NXR-Key", k);
         }
-        let r = req
-            .send()
-            .await
-            .with_context(|| format!("GET {}", url))?;
+        let r = req.send().await.with_context(|| format!("GET {}", url))?;
         let status = r.status();
         if !status.is_success() {
             let body = r.text().await.unwrap_or_default();
@@ -774,8 +770,14 @@ fn decode_pod_slice<T: Pod + Copy>(bytes: &[u8]) -> Result<Vec<T>> {
     }
     let n = bytes.len() / stride;
     let aligned = &bytes[..n * stride];
-    let slice: &[T] = bytemuck::try_cast_slice(aligned)
-        .map_err(|e| anyhow!("bytemuck cast: {} (stride={}, len={})", e, stride, aligned.len()))?;
+    let slice: &[T] = bytemuck::try_cast_slice(aligned).map_err(|e| {
+        anyhow!(
+            "bytemuck cast: {} (stride={}, len={})",
+            e,
+            stride,
+            aligned.len()
+        )
+    })?;
     Ok(slice.to_vec())
 }
 

@@ -6,8 +6,8 @@
 //! - URL building (dash-form symbol; range query params) matches the server spec.
 
 use bytemuck::bytes_of;
-use nxr_sdk::client::{BarKindParam, DataKind, HistoryData, HistoryOpts, NxrClient, RangeOpts};
 use nxr_sdk::IndexRecord;
+use nxr_sdk::client::{BarKindParam, DataKind, HistoryData, HistoryOpts, NxrClient, RangeOpts};
 use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -183,7 +183,10 @@ async fn bars_kline_endpoint_format() {
         .mount(&server)
         .await;
     let c = NxrClient::new(server.uri());
-    let bars = c.bars("ETH/USDC", BarKindParam::Kline, &RangeOpts::default()).await.unwrap();
+    let bars = c
+        .bars("ETH/USDC", BarKindParam::Kline, &RangeOpts::default())
+        .await
+        .unwrap();
     assert!(bars.is_empty());
 }
 
@@ -199,5 +202,8 @@ async fn http_error_surfaces_body_excerpt() {
     let err = c.tickers().await.unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("500"), "expected 500 in {msg}");
-    assert!(msg.contains("boom internal"), "expected body excerpt in {msg}");
+    assert!(
+        msg.contains("boom internal"),
+        "expected body excerpt in {msg}"
+    );
 }

@@ -5,4 +5,6 @@
 
 pub mod descriptive;
 
-pub use descriptive::{mad, mean, median, median_and_mad, round_to_sig_digits, std_dev};
+pub use descriptive::{
+    mad, mean, median, median_and_mad, median_by, percentile, round_to_sig_digits, std_dev,
+};

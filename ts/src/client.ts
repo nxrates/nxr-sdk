@@ -36,6 +36,7 @@ import {
   WS_MSG_TICK,
   decodeBarBatch,
   decodeIdxBatch,
+  decodePackedIds,
   type WsIndex,
   type WsTick,
 } from './decode.js';
@@ -250,7 +251,10 @@ export class NxrClient {
     if (!opts.refresh && this.detailCache) return this.detailCache;
     type RawRow = Omit<TickerDetail, 'ticker_id'> & { ticker_id: number | string };
     type Raw = Omit<TickersDetailResponse, 'tickers'> & { tickers: RawRow[] };
-    const raw = await this.json<Raw>('/v1/tickers/detail');
+    // `?native=1`: the registered subset that carries `kinds` + shard status.
+    // The default body is the FULL derived universe (~157k rows) — for that,
+    // read the packed id array (`Accept: application/vnd.nxr.u64`).
+    const raw = await this.json<Raw>('/v1/tickers/detail?native=1');
     const tickers: TickerDetail[] = raw.tickers.map((r) => ({
       ...r,
       ticker_id: BigInt(r.ticker_id),
@@ -267,6 +271,30 @@ export class NxrClient {
       if (t.ticker_id !== 0n) this.symbolToId.set(t.ticker, t.ticker_id);
     }
     return resolved;
+  }
+
+  /**
+   * The rich row for ONE ticker from `/v1/tickers/detail/{ident}`.
+   *
+   * `ident` is a decimal (or `0x` hex) MITCH id, a symbol in slash or dash form
+   * (`BTC/USD`, `BTC-USD`), or a class-pinned symbol (`CR:BTC/FX:USD`). A pin
+   * FORCES that asset class: a leg absent from it is a 404, never a silent hit
+   * in another class. Not cached: the universe is 156k pairs, which is exactly
+   * why per-ticker richness lives behind a lookup.
+   */
+  async tickerDetail(ident: Sym): Promise<TickerDetail> {
+    type RawRow = Omit<TickerDetail, 'ticker_id'> & { ticker_id: number | string };
+    const raw = await this.json<RawRow>(`/v1/tickers/detail/${urlSym(ident)}`);
+    return { ...raw, ticker_id: BigInt(raw.ticker_id) };
+  }
+
+  /**
+   * The FULL servable universe as MITCH ticker ids from
+   * `/v1/tickers/detail?packed=1`: 1.25 MB against the 32 MB the JSON body
+   * costs. Pair with `tickerDetail()` for the rows a caller actually wants.
+   */
+  async tickersPacked(): Promise<bigint[]> {
+    return decodePackedIds(await this.bytes('/v1/tickers/detail?packed=1'));
   }
 
   // ── REST: market data ───────────────────────────────────────────────────

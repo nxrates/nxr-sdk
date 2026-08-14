@@ -106,7 +106,7 @@ describe('NxrClient REST', () => {
     let calls = 0;
     const fetchMock = makeFetch(async (url) => {
       calls++;
-      expect(url).toBe('http://nxr/v1/tickers/detail');
+      expect(url).toBe('http://nxr/v1/tickers/detail?native=1');
       return new Response(JSON.stringify(sample), { status: 200 });
     });
     const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
@@ -124,6 +124,58 @@ describe('NxrClient REST', () => {
     // refresh forces re-fetch.
     await client.tickersDetail({ refresh: true });
     expect(calls).toBe(2);
+  });
+
+  // The three identifier forms are one server-side resolver; the client's job
+  // is to spell each of them into a path segment without mangling it.
+  it.each([
+    ['435315556536549376', '435315556536549376'],
+    ['BTC/USD', 'BTC-USD'],
+    ['BTC-USD', 'BTC-USD'],
+    ['CR:BTC/FX:USD', 'CR%3ABTC-FX%3AUSD'],
+  ])('tickerDetail(%s) requests %s', async (ident, segment) => {
+    const row = {
+      ticker_id: '435315556536549376',
+      ticker: 'BTC/USD',
+      base: 'BTC',
+      quote: 'USD',
+      base_class: 'CR',
+      quote_class: 'FX',
+      instrument_type: 'SPOT',
+      native: false,
+      synth_legs: [{ sym: 'BTC/USDT', exp: 1 }],
+    };
+    const fetchMock = makeFetch(async (url) => {
+      expect(url).toBe(`http://nxr/v1/tickers/detail/${segment}`);
+      return new Response(JSON.stringify(row), { status: 200 });
+    });
+    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
+    const r = await client.tickerDetail(ident);
+    expect(r.ticker_id).toBe(435315556536549376n);
+    // A derived row carries no `kinds`: it owns no shards.
+    expect(r.kinds).toBeUndefined();
+    expect(r.synth_legs).toEqual([{ sym: 'BTC/USDT', exp: 1 }]);
+  });
+
+  it('tickerDetail surfaces the class-pin-mismatch 404 as an error', async () => {
+    const fetchMock = makeFetch(
+      async () => new Response('', { status: 404 }),
+    );
+    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
+    await expect(client.tickerDetail('FX:BTC/FX:USD')).rejects.toThrow('HTTP 404');
+  });
+
+  it('tickersPacked decodes the LE u64 catalogue', async () => {
+    const ids = [435315551398526976n, 1n, 2n ** 64n - 1n];
+    const buf = new Uint8Array(ids.length * 8);
+    const dv = new DataView(buf.buffer);
+    ids.forEach((id, i) => dv.setBigUint64(i * 8, id, true));
+    const fetchMock = makeFetch(async (url) => {
+      expect(url).toBe('http://nxr/v1/tickers/detail?packed=1');
+      return new Response(buf, { status: 200 });
+    });
+    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
+    expect(await client.tickersPacked()).toEqual(ids);
   });
 
   it('price() resolves null when ticker is unknown', async () => {

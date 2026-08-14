@@ -71,6 +71,8 @@ cargo run --release --example quickstart
 | `c.providers()`                       | `GET /v1/providers`            | JSON             |
 | `c.tickers()`                         | `GET /v1/tickers`              | JSON             |
 | `c.tickers_detail()`                  | `GET /v1/tickers/detail`       | JSON, cached     |
+| `c.tickers_packed()`                  | `GET /v1/tickers/detail?packed=1` | LE `u64` array |
+| `c.ticker_detail(ident)`              | `GET /v1/tickers/detail/{ident}` | JSON           |
 | `c.price(sym, max_age_ms?)`           | `GET /v1/price/{ticker}`       | JSON             |
 | `c.last(&[syms], max_age_ms?)`        | `GET /v1/last?symbols=...`     | JSON             |
 | `c.freshness(sym)`                    | `GET /v1/freshness/{ticker}`   | JSON             |

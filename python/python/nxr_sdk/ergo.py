@@ -258,7 +258,9 @@ class NxrClient:
         Set ``refresh=True`` to force a re-fetch (default = use cache).
         """
         if refresh or self._detail_cache is None:
-            raw = _fetch_detail(self._base_url)
+            # ``?native=1``: the registered subset carrying ``kinds`` + shard
+            # status. The default body is the FULL derived universe (~157k rows).
+            raw = _fetch_json(self._base_url, "/v1/tickers/detail?native=1", self._api_key)
             self._detail_cache = TickersDetailResponse.from_dict(raw)
             # Populate the symbol→id cache so resolve() short-circuits.
             self._symbol_to_id.clear()
@@ -266,6 +268,32 @@ class NxrClient:
                 if t.ticker_id != 0:
                     self._symbol_to_id[t.ticker] = t.ticker_id
         return self._detail_cache
+
+    def ticker_detail(self, ident: str) -> TickerDetail:
+        """Fetch the rich row for ONE ticker from ``/v1/tickers/detail/{ident}``.
+
+        ``ident`` is a decimal (or ``0x`` hex) MITCH id, a symbol in slash or
+        dash form (``BTC/USD``, ``BTC-USD``), or a class-pinned symbol
+        (``CR:BTC/FX:USD``). A pin FORCES that asset class: a leg absent from it
+        is a 404, never a silent hit in another class. Not cached -- the universe
+        is 156k pairs, which is why per-ticker richness lives behind a lookup.
+        """
+        path = f"/v1/tickers/detail/{_url_ident(ident)}"
+        return TickerDetail.from_dict(_fetch_json(self._base_url, path, self._api_key))
+
+    def tickers_packed(self) -> List[int]:
+        """The FULL servable universe as MITCH ticker ids, packed.
+
+        ``/v1/tickers/detail?packed=1``: 1.25 MB against the 32 MB the JSON body
+        costs. Pair with :meth:`ticker_detail` for the rows actually wanted.
+        """
+        buf = _get(
+            self._base_url,
+            "/v1/tickers/detail?packed=1",
+            "application/vnd.nxr.u64",
+            self._api_key,
+        )
+        return decode_packed_ids(buf)
 
     def resolve_ticker_id(self, ticker: str) -> Optional[int]:
         """Resolve a ticker string ("BTC/USDT") to its MITCH ticker_id.
@@ -409,16 +437,44 @@ def _resolve_bq(
     return base.upper(), (quote or DEFAULT_QUOTE).upper()
 
 
-def _fetch_detail(base_url: str) -> dict[str, Any]:
-    """One-shot ``/v1/tickers/detail`` JSON fetcher (urllib, no extra deps)."""
+def _get(base_url: str, path: str, accept: str, api_key: str | None = None) -> bytes:
+    """One-shot GET (urllib, no extra deps). The only HTTP call site in ergo."""
     import urllib.request
 
-    req = urllib.request.Request(
-        f"{base_url.rstrip('/')}/v1/tickers/detail",
-        headers={"Accept": "application/json"},
-    )
+    headers = {"Accept": accept}
+    if api_key:
+        headers["X-NXR-Key"] = api_key
+    req = urllib.request.Request(f"{base_url.rstrip('/')}{path}", headers=headers)
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return resp.read()
+
+
+def _fetch_json(base_url: str, path: str, api_key: str | None = None) -> dict[str, Any]:
+    return json.loads(_get(base_url, path, "application/json", api_key).decode("utf-8"))
+
+
+def _url_ident(ident: str) -> str:
+    """Spell an identifier into one path segment.
+
+    The server accepts the dash form natively, so ``BTC/USD`` and the
+    class-pinned ``CR:BTC/FX:USD`` both travel without a raw ``/``.
+    """
+    from urllib.parse import quote
+
+    return quote(ident.replace("/", "-"), safe="")
+
+
+def decode_packed_ids(buf: bytes) -> List[int]:
+    """Decode the packed ``/v1/tickers/detail`` catalogue.
+
+    Bare little-endian ``u64`` MITCH ticker ids, 8 B a row, no header;
+    ``len(buf) // 8`` is the row count. A ticker id encodes instrument type and
+    both asset class/id pairs, so this 1.25 MB body replaces the 32 MB JSON one
+    for a caller holding the asset registry.
+    """
+    if len(buf) % 8:
+        raise ValueError(f"packed catalogue: {len(buf)} bytes is not a multiple of 8")
+    return list(struct.unpack(f"<{len(buf) // 8}Q", buf))
 
 
 # ── Chainable builder ───────────────────────────────────────────────────

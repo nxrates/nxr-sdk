@@ -63,6 +63,8 @@ sub.close();
 | `client.providers()`                        | `GET /v1/providers`               | JSON             |
 | `client.tickers()`                          | `GET /v1/tickers`                 | JSON             |
 | `client.tickersDetail({ refresh? })`        | `GET /v1/tickers/detail`          | JSON, cached     |
+| `client.tickersPacked()`                    | `GET /v1/tickers/detail?packed=1` | LE `u64` array   |
+| `client.tickerDetail(ident)`                | `GET /v1/tickers/detail/{ident}`  | JSON             |
 | `client.price(tickerId)`                    | `GET /v1/price/{ticker_id}`       | JSON             |
 | `client.last([tickerId, ...])`              | `GET /v1/last?symbols=...`        | JSON             |
 | `client.freshness(sym)`                     | `GET /v1/freshness/{ticker}`      | JSON             |

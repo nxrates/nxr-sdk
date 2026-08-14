@@ -132,6 +132,24 @@ export function decodeBarBatch(buf: Uint8Array): Bar[] {
 }
 
 /**
+ * Decode the packed `/v1/tickers/detail` catalogue: bare little-endian `u64`
+ * MITCH ticker ids, 8 B a row, no header. `byteLength / 8` is the row count.
+ *
+ * A ticker id encodes instrument type and both asset class/id pairs, so the
+ * 1.25 MB packed body replaces the 32 MB JSON one for callers that hold the
+ * asset registry; fetch the rows they want from `/v1/tickers/detail/{ident}`.
+ */
+export function decodePackedIds(buf: Uint8Array): bigint[] {
+  if (buf.byteLength % 8 !== 0) {
+    throw new Error(`packed catalogue: ${buf.byteLength} bytes is not a multiple of 8`);
+  }
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const out = new Array<bigint>(buf.byteLength / 8);
+  for (let i = 0; i < out.length; i++) out[i] = dv.getBigUint64(i * 8, true);
+  return out;
+}
+
+/**
  * Decode a header + body MITCH frame (e.g. raw publisher frame).
  * Returns the (decoded header, body offset, body length).
  *

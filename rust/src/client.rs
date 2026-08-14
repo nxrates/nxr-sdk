@@ -356,6 +356,28 @@ impl NxrClient {
         self.tickers_detail().await
     }
 
+    /// `GET /v1/tickers/detail/{ident}`: the rich row for ONE ticker.
+    ///
+    /// `ident` is a decimal (or `0x` hex) MITCH id, a symbol in slash or dash
+    /// form (`BTC/USD`, `BTC-USD`), or a class-pinned symbol (`CR:BTC/FX:USD`).
+    /// A pin FORCES that asset class: a leg absent from it is a 404, never a
+    /// silent hit in another class. Not cached: the full universe is 156k pairs,
+    /// which is exactly why per-ticker richness lives behind a lookup.
+    pub async fn ticker_detail(&self, ident: &str) -> Result<TickerDetail> {
+        self.json_get(&format!("/v1/tickers/detail/{}", url_sym(ident)))
+            .await
+    }
+
+    /// `GET /v1/tickers/detail?packed=1`: the FULL servable universe as MITCH
+    /// ticker ids, 1.25 MB rather than the 32 MB the JSON body costs. A ticker
+    /// id already encodes instrument type and both asset class/id pairs, so a
+    /// caller holding the asset registry decodes a row from the id alone; use
+    /// [`Self::ticker_detail`] for the rows it actually wants.
+    pub async fn tickers_packed(&self) -> Result<Vec<u64>> {
+        let bytes = self.bytes_get("/v1/tickers/detail?packed=1").await?;
+        decode_packed_ids(&bytes)
+    }
+
     /// `GET /v1/price/{ticker}` — accepts a numeric MITCH id (decimal or `0x`
     /// hex) or a human symbol (`BTC-USDT`, `BTC/USDT`, `EURUSD`); crosses are
     /// composed on read. `max_age_ms` opts into a hard freshness contract
@@ -795,6 +817,23 @@ fn urlencoding(s: &str) -> String {
     s.replace(',', "%2C")
 }
 
+/// Decode the packed `/v1/tickers/detail` catalogue: bare little-endian `u64`
+/// ticker ids, 8 B a row, no header. Explicit LE reads rather than a `Pod` cast:
+/// the body arrives at whatever alignment the HTTP buffer had, and the wire byte
+/// order is fixed regardless of the host's.
+pub fn decode_packed_ids(bytes: &[u8]) -> Result<Vec<u64>> {
+    if !bytes.len().is_multiple_of(8) {
+        bail!(
+            "packed catalogue: {} bytes is not a multiple of 8",
+            bytes.len()
+        );
+    }
+    Ok(bytes
+        .chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes")))
+        .collect())
+}
+
 /// Reinterpret a contiguous bytes slice as `&[T]` and copy into a `Vec<T>`.
 /// `T` is constrained to `bytemuck::Pod` (e.g. `IndexRecord`, `Bar`).
 fn decode_pod_slice<T: Pod + Copy>(bytes: &[u8]) -> Result<Vec<T>> {
@@ -877,6 +916,23 @@ mod tests {
     fn url_sym_normalisation() {
         assert_eq!(url_sym("BTC/USDT"), "BTC-USDT");
         assert_eq!(url_sym("BTC-USDT"), "BTC-USDT");
+        // Class-pinned form survives the same normalisation: the server accepts
+        // the dash spelling of a pin, so no path segment ever holds a raw `/`.
+        assert_eq!(url_sym("CR:BTC/FX:USD"), "CR:BTC-FX:USD");
+    }
+
+    #[test]
+    fn packed_ids_decode_little_endian() {
+        let ids = [435315551398526976u64, 1, u64::MAX];
+        let mut bytes = Vec::new();
+        for id in ids {
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        assert_eq!(decode_packed_ids(&bytes).unwrap(), ids);
+        assert_eq!(decode_packed_ids(&[]).unwrap(), Vec::<u64>::new());
+        // A truncated body must fail loudly: a silently dropped tail is a
+        // catalogue that quietly under-reports the universe.
+        assert!(decode_packed_ids(&bytes[..bytes.len() - 1]).is_err());
     }
 
     #[test]

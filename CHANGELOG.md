@@ -4,6 +4,30 @@ All notable changes per language live below. Wire format (MITCH 56 B / 96 B)
 is stable across minor releases; new record fields are appended only at the
 end of fixed-width structs. REST surface follows the same additive rule.
 
+## Unreleased
+
+Single-ticker lookup, in every binding. `/v1/tickers/detail` now enumerates the
+FULL derived universe (156k+ pairs), so its JSON body is ~32 MB and the cheap
+bulk path is the packed `u64` id array (1.25 MB). Per-ticker richness moved to
+`GET /v1/tickers/detail/{ident}`, which serves one row for a decimal MITCH id, a
+symbol (`BTC/USD` or `BTC-USD`), or a class-pinned symbol (`CR:BTC/FX:USD`). A
+class pin FORCES that asset class and 404s rather than falling back, which is
+the ambiguity it exists to remove. Additive: `tickers_detail()` is unchanged and
+stays pinned to `?native=1`.
+
+- **Rust**: `NxrClient::ticker_detail(ident)`, `NxrClient::tickers_packed()`,
+  and `client::decode_packed_ids(&[u8]) -> Vec<u64>`.
+- **TypeScript**: `client.tickerDetail(ident)`, `client.tickersPacked()`, and
+  the exported `decodePackedIds(Uint8Array) -> bigint[]`. `TickerDetail.kinds`
+  is now optional: a derived pair owns no shards, so the server omits the field
+  rather than fabricating a shard window.
+- **Python**: `NxrClient.ticker_detail(ident)`, `NxrClient.tickers_packed()`,
+  and the exported `decode_packed_ids(bytes) -> list[int]`. The ergo HTTP path
+  now forwards `X-NXR-Key` where it previously dropped it.
+- **FFI / Java**: unchanged. Neither exposes an HTTP client (`sdk/ffi` is a
+  codec/resolver shim by design, Java calls the REST surface with its stdlib),
+  so there is no client surface to extend.
+
 ## 2026-08-14
 
 Release tag: `sdk-v2026.08.14`

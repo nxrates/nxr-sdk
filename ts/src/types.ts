@@ -227,8 +227,12 @@ export interface TickerDetail {
    * index pair (`BTC/USDC`). Same `ticker_id` and shards as the alias target.
    */
   alias_of?: string;
-  /** Per-kind schema + shard window. Keys: `idx`, `kline`, `renko`. */
-  kinds: Record<string, KindSchema>;
+  /**
+   * Per-kind schema + shard window. Keys: `idx`, `kline`, `renko`. Absent on a
+   * DERIVED pair: it owns no shards, so the server omits the field rather than
+   * fabricating a window.
+   */
+  kinds?: Record<string, KindSchema>;
 }
 
 /** `/v1/tickers/detail` response wrapper. */

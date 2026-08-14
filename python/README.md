@@ -61,6 +61,8 @@ asyncio.run(consume())
 | Method                              | Purpose                                                       |
 | ----------------------------------- | ------------------------------------------------------------- |
 | `nxr.tickers_detail(refresh=False)` | `/v1/tickers/detail` → `TickersDetailResponse` dataclass      |
+| `nxr.tickers_packed()`             | `/v1/tickers/detail?packed=1` → `list[int]` of MITCH ids     |
+| `nxr.ticker_detail(ident)`         | `/v1/tickers/detail/{ident}` → one `TickerDetail`            |
 | `nxr.resolve_ticker_id(sym)`        | "BTC/USDT" → MITCH ticker_id (cached)                         |
 | `nxr.history(...)` / `nxr.get()...` | Unified historical fetch (idx / kline / renko)                |
 | `nxr.subscribe([syms])`             | Async WebSocket subscriber over `/v1/stream`                  |

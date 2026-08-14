@@ -136,6 +136,8 @@ async fn main() -> anyhow::Result<()> {
 | `GET /v1/providers`                   | `providers()`        | JSON             | provider_id → name                   |
 | `GET /v1/tickers`                     | `tickers()`          | JSON             | live snapshot for every ticker       |
 | `GET /v1/tickers/detail`              | `tickersDetail()`    | JSON, **cached** | universal integrator inventory       |
+| `GET /v1/tickers/detail?packed=1`     | `tickersPacked()`    | LE `u64` array   | full universe, 1.25 MB not 32 MB     |
+| `GET /v1/tickers/detail/{ident}`      | `tickerDetail(id)`   | JSON             | one rich row: id, symbol, or `CR:BTC/FX:USD` |
 | `GET /v1/price/{ticker_id}`           | `price(id)`          | JSON             | single live snapshot                 |
 | `GET /v1/last?symbols=...`            | `last([ids])`        | JSON             | multi-ticker snapshot                |
 | `GET /v1/idx/{sym}`                   | `idx(sym, opts)`     | **MITCH 56B**    | raw IndexRecord stream               |

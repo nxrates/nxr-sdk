@@ -128,6 +128,62 @@ def test_tickers_detail_parses_into_dataclass(monkeypatch):
     assert detail.raw == sample
 
 
+# ── Single-ticker lookup + packed catalogue ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "ident,segment",
+    [
+        ("435315556536549376", "435315556536549376"),
+        ("BTC/USD", "BTC-USD"),
+        ("BTC-USD", "BTC-USD"),
+        ("CR:BTC/FX:USD", "CR%3ABTC-FX%3AUSD"),
+    ],
+)
+def test_ticker_detail_spells_every_identifier_form(monkeypatch, ident, segment):
+    """All three identifier forms must reach the server intact: a mangled path
+    segment would silently look up a different pair (or 404)."""
+    row = {
+        "ticker_id": 435315556536549376,
+        "ticker": "BTC/USD",
+        "base": "BTC",
+        "quote": "USD",
+        "base_class": "CR",
+        "quote_class": "FX",
+        "instrument_type": "SPOT",
+        "native": False,
+        "synth_legs": [{"sym": "BTC/USDT", "exp": 1}],
+    }
+    seen: dict[str, Any] = {}
+
+    def _factory(req, *_args, **_kwargs):
+        seen["url"] = req.full_url
+        return _mock_urlopen_json(row)()
+
+    monkeypatch.setattr("urllib.request.urlopen", _factory)
+    with mock.patch("nxr_sdk._native.Client") as mock_client:
+        mock_client.return_value = mock.MagicMock()
+        t = ergo.NxrClient("http://nxr").ticker_detail(ident)
+
+    assert seen["url"] == f"http://nxr/v1/tickers/detail/{segment}"
+    assert t.ticker_id == 435315556536549376
+    assert t.native is False
+    # A derived row owns no shards, so the server omits `kinds` entirely.
+    assert t.kinds == {}
+    assert t.synth_legs is not None and t.synth_legs[0].sym == "BTC/USDT"
+
+
+def test_decode_packed_ids_round_trip():
+    ids = [435315551398526976, 1, 2**64 - 1]
+    buf = b"".join(struct.pack("<Q", i) for i in ids)
+    assert ergo.decode_packed_ids(buf) == ids
+    assert ergo.decode_packed_ids(b"") == []
+    # A truncated body must fail loudly: a silently dropped tail is a catalogue
+    # that quietly under-reports the universe.
+    with pytest.raises(ValueError):
+        ergo.decode_packed_ids(buf[:-1])
+
+
 def test_tickers_detail_caches(monkeypatch):
     sample = {"idx_aggregation_ms": 50, "count": 0, "tickers": []}
     call_count = {"n": 0}

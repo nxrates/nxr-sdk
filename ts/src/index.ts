@@ -85,6 +85,7 @@ export {
   decodeIdxBatch,
   decodeBar,
   decodeBarBatch,
+  decodePackedIds,
   decodeTick,
   decodeFrame,
   // legacy WS batch decoders

@@ -1042,6 +1042,31 @@ pub struct PivotYml {
     /// Minimum dwell between volume-driven pivot switches.
     #[serde(default)]
     pub main_leg_min_dwell_secs: Option<u64>,
+    /// PUBLISHED denomination for every CR asset, distinct from the pivot. The
+    /// pivot is the internal aggregation basis and moves with liquidity; this
+    /// decides the ticker_id, and therefore the `.idx`/`.s10` directory name,
+    /// so it is fixed. Aggregate in pivot basis, convert ONCE into this.
+    /// Absent = `USD`. Was declared in `config.yml` but read by nothing, so the
+    /// YAML asserted a policy the code never applied.
+    pub storage_quote: Option<String>,
+    /// Per-asset exceptions, keyed by base asset symbol. Keep EMPTY: it exists
+    /// for an asset with no credible route to the storage quote, not as a
+    /// tuning surface. An unreachable storage quote must fail loudly at boot
+    /// rather than publish in pivot basis, which would put two denominations in
+    /// one series.
+    #[serde(default)]
+    pub storage_quote_overrides: std::collections::BTreeMap<String, String>,
+}
+
+impl PivotYml {
+    /// Storage quote for `asset`: its override, else the global, else `USD`.
+    pub fn storage_quote_for(&self, asset: &str) -> String {
+        self.storage_quote_overrides
+            .get(&asset.to_ascii_uppercase())
+            .or(self.storage_quote.as_ref())
+            .cloned()
+            .unwrap_or_else(|| "USD".to_string())
+    }
 }
 
 /// `cexs.scraper:` block — endpoints + selectors for CEX volume scraping.
@@ -1246,6 +1271,30 @@ impl Default for BackfillDiskYml {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The deployed `config.yml` must actually reach `PivotYml`. These two keys
+    /// sat in the YAML with no field behind them, so serde dropped them and the
+    /// file asserted a storage policy the code never applied. Parse the REAL
+    /// file, not a fixture: a fixture would have passed the whole time.
+    #[test]
+    fn repo_config_storage_quote_is_load_bearing() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.yml");
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return; // submodule checked out standalone: nothing to pin
+        };
+        let y: PipelineYml = serde_yml::from_str(&raw).expect("config.yml parses");
+        let pivot = y.cexs.pivot;
+        assert_eq!(
+            pivot.storage_quote.as_deref(),
+            Some("USD"),
+            "config.yml declares storage_quote but PivotYml did not read it"
+        );
+        assert!(
+            pivot.storage_quote_overrides.is_empty(),
+            "overrides must stay empty: they are for an asset with no USD route, not tuning"
+        );
+        assert_eq!(pivot.storage_quote_for("BTC"), "USD");
+    }
 
     fn cal() -> CalibrationYml {
         CalibrationYml {

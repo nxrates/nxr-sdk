@@ -338,4 +338,70 @@ describe('NxrClient.subscribe', () => {
     handle.close(); // second call should be a no-op
     expect(closeCount).toBe(1);
   });
+
+  it('subscribes on open and honours the ack', () => {
+    const sent: string[] = [];
+    let sock: FakeSock | null = null;
+    class FakeSock {
+      binaryType = 'arraybuffer';
+      onopen: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onmessage: ((e: MessageEvent) => void) | null = null;
+      constructor(public url: string) {
+        sock = this;
+      }
+      send(d: string): void {
+        sent.push(d);
+      }
+      close(): void {}
+    }
+    const client = new NxrClient({
+      baseUrl: 'http://nxr',
+      WebSocket: FakeSock as unknown as typeof WebSocket,
+    });
+    const rejected: { id: string; error: string }[] = [];
+    client.subscribe(['BTC/ETH', 'ZZZ/QQQ'], () => {}, (r) => rejected.push(...r));
+    sock!.onopen!();
+    expect(JSON.parse(sent[0]!)).toEqual({
+      type: 'sub',
+      kind: 'idx',
+      ids: ['BTC/ETH', 'ZZZ/QQQ'],
+    });
+    sock!.onmessage!({
+      data: JSON.stringify({
+        ok: true,
+        subscribed: ['BTC/ETH'],
+        rejected: [{ id: 'ZZZ/QQQ', error: 'unroutable' }],
+      }),
+    } as MessageEvent);
+    expect(rejected).toEqual([{ id: 'ZZZ/QQQ', error: 'unroutable' }]);
+  });
+
+  it('sends no envelope without ids (broadcast stays the default)', () => {
+    const sent: string[] = [];
+    let sock: FakeQuiet | null = null;
+    class FakeQuiet {
+      binaryType = 'arraybuffer';
+      onopen: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onmessage: ((e: MessageEvent) => void) | null = null;
+      constructor(public url: string) {
+        sock = this;
+      }
+      send(d: string): void {
+        sent.push(d);
+      }
+      close(): void {}
+    }
+    const client = new NxrClient({
+      baseUrl: 'http://nxr',
+      WebSocket: FakeQuiet as unknown as typeof WebSocket,
+    });
+    client.subscribe([], () => {});
+    sock!.onopen!();
+    expect(sent).toHaveLength(0);
+  });
 });
+

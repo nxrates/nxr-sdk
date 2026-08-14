@@ -17,6 +17,11 @@
 //! hands back typed [`WsIndex`] batches. It is a thin wrapper so clients can
 //! drop in an alternate transport (mock, replay) without touching decode
 //! logic.
+//!
+//! [`WsClient::subscribe`] narrows the connection to a chosen set of symbols,
+//! crosses included: the server composes a subscribed cross itself, so a client
+//! never triangulates. Without it the connection keeps receiving the whole
+//! native map, unchanged.
 
 use std::time::Duration;
 
@@ -116,6 +121,10 @@ pub struct WsClient {
     inner: WebSocketStream<MaybeTlsStream<TcpStream>>,
     keepalive: Duration,
     last_ping: tokio::time::Instant,
+    /// Binary frames received while awaiting a subscription ack. Drained by
+    /// [`WsClient::next_batch`] before the socket is read again, so subscribing
+    /// mid-stream never drops a tick.
+    pending: std::collections::VecDeque<Vec<u8>>,
 }
 
 impl WsClient {
@@ -129,7 +138,64 @@ impl WsClient {
             inner: ws,
             keepalive: DEFAULT_KEEPALIVE,
             last_ping: tokio::time::Instant::now(),
+            pending: std::collections::VecDeque::new(),
         })
+    }
+
+    /// Ask for exactly `ids` (crosses included) instead of the whole native
+    /// map, and return the ids the server accepted.
+    ///
+    /// A cross arrives ALREADY COMPOSED, identical to `GET /v1/price` for the
+    /// same instant: never triangulate a stream client-side. An id the server
+    /// cannot route is reported in the ack and is NOT subscribed, so a typo
+    /// fails loudly instead of never delivering. Subscribing nothing (or
+    /// unsubscribing everything) leaves the connection on the full broadcast.
+    pub async fn subscribe(&mut self, ids: &[&str]) -> Result<Vec<String>> {
+        self.send_sub("sub", ids).await
+    }
+
+    /// Drop `ids` from this connection's set. Emptying it returns the
+    /// connection to the all-ticker broadcast.
+    pub async fn unsubscribe(&mut self, ids: &[&str]) -> Result<Vec<String>> {
+        self.send_sub("unsub", ids).await
+    }
+
+    async fn send_sub(&mut self, op: &str, ids: &[&str]) -> Result<Vec<String>> {
+        let env = serde_json::json!({ "type": op, "kind": "idx", "ids": ids }).to_string();
+        self.inner
+            .send(Message::Text(env.into()))
+            .await
+            .context("WS send sub")?;
+        // Read to the ack, stashing any binary frame that overtakes it.
+        loop {
+            match self.inner.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let ack: serde_json::Value =
+                        serde_json::from_str(&t).context("WS sub ack parse")?;
+                    if let Some(e) = ack.get("error").and_then(|v| v.as_str()) {
+                        bail!("WS sub rejected: {e}");
+                    }
+                    for r in ack["rejected"].as_array().unwrap_or(&Vec::new()) {
+                        warn!(id = %r["id"], err = %r["error"], "WS: id not subscribed");
+                    }
+                    return Ok(ack["subscribed"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default());
+                }
+                Some(Ok(Message::Binary(data))) => self.pending.push_back(data.into()),
+                Some(Ok(Message::Ping(p))) => {
+                    self.inner.send(Message::Pong(p)).await.ok();
+                }
+                Some(Ok(Message::Close(_))) | None => bail!("WS closed awaiting sub ack"),
+                Some(Err(e)) => return Err(e).context("WS recv"),
+                _ => {}
+            }
+        }
     }
 
     /// Override the ping cadence used to keep NAT sessions open. Default is
@@ -144,6 +210,16 @@ impl WsClient {
     /// one bad message never tears down a long-lived subscription.
     pub async fn next_batch(&mut self) -> Result<Option<Vec<WsIndex>>> {
         loop {
+            if let Some(data) = self.pending.pop_front() {
+                let mut batch = Vec::new();
+                match decode_index_frame(&data, &mut batch) {
+                    Ok(_) => return Ok(Some(batch)),
+                    Err(e) => {
+                        warn!(err = %e, len = data.len(), "WS: dropping malformed frame");
+                        continue;
+                    }
+                }
+            }
             if self.last_ping.elapsed() >= self.keepalive {
                 self.inner.send(Message::Ping(Vec::new().into())).await.ok();
                 self.last_ping = tokio::time::Instant::now();

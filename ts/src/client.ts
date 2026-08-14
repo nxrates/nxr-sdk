@@ -433,10 +433,14 @@ export class NxrClient {
   /**
    * Subscribe to the live index stream from `/v1/stream`.
    *
-   * The server broadcasts all tickers regardless of subscription state, so the
-   * `tickers` argument is used only to filter records client-side (pass `[]`
-   * or `undefined` to receive every record). Returns a {@link SubscriberHandle}
-   * with an idempotent `close()`.
+   * `tickers` is sent to the server as a subscription: the connection then
+   * carries ONLY those symbols, and a cross among them arrives ALREADY
+   * COMPOSED, numerically identical to `GET /v1/price` for the same instant.
+   * Never triangulate a stream client-side. Pass `[]` or `undefined` to keep
+   * the full native broadcast. An unroutable symbol is reported by the server
+   * and surfaced through `onReject`; it is not delivered.
+   *
+   * Returns a {@link SubscriberHandle} with an idempotent `close()`.
    *
    * Frame format (matches `core::server::ws`):
    * ```
@@ -449,6 +453,7 @@ export class NxrClient {
   subscribe(
     tickers: string[] | undefined,
     cb: (rec: StreamIndexRecord) => void,
+    onReject?: (rejected: { id: string; error: string }[]) => void,
   ): SubscriberHandle {
     const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/v1/stream`;
     if (!this._WS) throw new Error('No global WebSocket; pass opts.WebSocket (e.g. `ws` on Node)');
@@ -456,15 +461,15 @@ export class NxrClient {
       ? new this._WS(wsUrl, { headers: { 'X-NXR-Key': this.apiKey } } as unknown as string)
       : new this._WS(wsUrl);
     (ws as { binaryType?: BinaryType }).binaryType = 'arraybuffer';
-    const tickerSet = tickers && tickers.length > 0 ? new Set(tickers) : null;
+    const ids = tickers && tickers.length > 0 ? tickers : null;
+    // Client-side id filter, used ONLY until the server acks the subscription
+    // (and as the fallback for a server that predates it). Best-effort resolve
+    // from the detail cache; an empty cache means deliver everything.
     let resolvedIds: Set<number> | null = null;
-    if (tickerSet) {
-      // Best-effort resolve ticker→id from the detail cache. If the cache is
-      // empty, the subscriber falls back to delivering every record (server
-      // already broadcasts all tickers).
+    if (ids) {
       resolvedIds = new Set<number>();
       for (const [sym, id] of this.symbolToId) {
-        if (tickerSet.has(sym)) resolvedIds.add(Number(id));
+        if (ids.includes(sym)) resolvedIds.add(Number(id));
       }
       if (resolvedIds.size === 0) resolvedIds = null;
     }
@@ -475,11 +480,26 @@ export class NxrClient {
       this._wsState = s;
       for (const cb of this.stateCbs) cb(s);
     };
-    ws.onopen = () => setLocalState('connected');
+    ws.onopen = () => {
+      setLocalState('connected');
+      if (ids) ws.send(JSON.stringify({ type: 'sub', kind: 'idx', ids }));
+    };
     ws.onerror = () => setLocalState('error');
     ws.onclose = () => setLocalState('disconnected');
-    ws.onmessage = (e: MessageEvent<ArrayBuffer | Blob>) => {
+    ws.onmessage = (e: MessageEvent<ArrayBuffer | Blob | string>) => {
       const data = e.data;
+      if (typeof data === 'string') {
+        // Subscription ack: once the server filters, drop the local filter —
+        // a cross has no row in the detail cache and would be filtered out.
+        const ack = JSON.parse(data) as {
+          ok?: boolean;
+          subscribed?: string[];
+          rejected?: { id: string; error: string }[];
+        };
+        if (ack.ok) resolvedIds = null;
+        if (ack.rejected?.length) onReject?.(ack.rejected);
+        return;
+      }
       if (!(data instanceof ArrayBuffer)) return; // Bun delivers ArrayBuffer when binaryType=='arraybuffer'
       if (data.byteLength < WS_HEADER_BYTES) return;
       const type = new Uint8Array(data)[0]!;

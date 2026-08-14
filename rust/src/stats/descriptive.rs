@@ -1,6 +1,4 @@
-//! Statistical primitives: mean, dispersion, and robust centre. Single
-//! canonical home for the stats used by aggregation (TDWAP CI), series
-//! calibration, and live monitoring.
+//! Centre, dispersion, and rounding.
 //!
 //! Variance convention: `std_dev` uses the sample (Bessel-corrected, n-1)
 //! estimator. For population variance, divide sum-of-squared-deviations by n
@@ -122,5 +120,4 @@ mod tests {
         assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), 2.5);
         assert_eq!(median(&[]), 0.0);
     }
-
 }

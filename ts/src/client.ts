@@ -482,7 +482,9 @@ export class NxrClient {
     };
     ws.onopen = () => {
       setLocalState('connected');
-      if (ids) ws.send(JSON.stringify({ type: 'sub', kind: 'idx', ids }));
+      // `filter: true` is the opt-in into the filtered lane; a `sub` without it
+      // is accounting-only and leaves the connection on the full broadcast.
+      if (ids) ws.send(JSON.stringify({ type: 'sub', kind: 'idx', ids, filter: true }));
     };
     ws.onerror = () => setLocalState('error');
     ws.onclose = () => setLocalState('disconnected');

@@ -367,6 +367,7 @@ describe('NxrClient.subscribe', () => {
       type: 'sub',
       kind: 'idx',
       ids: ['BTC/ETH', 'ZZZ/QQQ'],
+      filter: true,
     });
     sock!.onmessage!({
       data: JSON.stringify({

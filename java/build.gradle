@@ -1,0 +1,48 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'com.nxrates'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// FFM is stable from 22. No toolchain block: the build uses whatever JDK runs
+// Gradle, which must therefore be 22 or newer.
+tasks.withType(JavaCompile).configureEach {
+    options.release = 22
+    options.compilerArgs << '-Xlint:all'
+}
+
+def ffiDir = file("${projectDir}/../ffi")
+def nativeLib = new File(ffiDir, "target/release/${System.mapLibraryName('nxr_sdk_ffi')}")
+
+tasks.register('cargoBuild', Exec) {
+    group = 'build'
+    description = 'Build the Rust cdylib that the FFM bindings bind to.'
+    workingDir = ffiDir
+    commandLine 'cargo', 'build', '--release'
+    inputs.dir new File(ffiDir, 'src')
+    inputs.file new File(ffiDir, 'Cargo.toml')
+    outputs.file nativeLib
+}
+
+tasks.named('test') {
+    dependsOn 'cargoBuild'
+    useJUnitPlatform()
+    // Point the binding at the cdylib just built, never a stale copy elsewhere.
+    systemProperty 'nxr.sdk.lib', nativeLib.absolutePath
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        exceptionFormat = 'full'
+    }
+}

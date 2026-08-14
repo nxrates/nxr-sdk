@@ -1,0 +1,6 @@
+# Gradle wrapper is not committed: the jar is a build artifact. Use a system
+# `gradle` (see README). The parent sdk/.gitignore already covers .gradle/,
+# build/, target/, *.jar, *.class, and the built cdylib.
+gradle/wrapper/
+gradlew
+gradlew.bat

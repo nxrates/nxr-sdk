@@ -1,0 +1,29 @@
+[package]
+name = "nxr-sdk-ffi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "C ABI surface over the NX Rates SDK, consumed by the Java FFM bindings in sdk/java"
+repository = "https://github.com/nxrates/nxr-sdk"
+
+# Own workspace root: the parent workspace lists members explicitly, and a
+# nested package that is neither member nor `exclude`d makes every cargo
+# command run from this directory fail. `series-factory` solves this with an
+# `exclude` entry upstream; declaring the table here keeps the fix inside this
+# crate so the parent manifest needs no edit.
+[workspace]
+
+[lib]
+name = "nxr_sdk_ffi"
+# cdylib is what the JVM dlopen's; rlib keeps `cargo test` able to reach the
+# internals directly.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nxr-sdk = { path = "../rust", default-features = false }
+mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 16

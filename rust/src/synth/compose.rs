@@ -117,6 +117,8 @@ pub fn compose_cross_s10(legs: &[Leg], bars: &[Bar]) -> Option<Bar> {
         vask,
         tick_count,
     );
+    // `stats::ci::rss` at n legs, accumulated in the fold above rather than
+    // over a collected leg vector (no per-bar allocation).
     bar.avg_ci_ubp = encode_ci_ubp(ci_sq.sqrt());
     bar.avg_spread_bps = spread;
     bar.reject_rate = reject_rate;

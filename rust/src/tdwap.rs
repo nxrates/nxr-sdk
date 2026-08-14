@@ -680,6 +680,7 @@ where
 
     let sigma_disagree_sq = m2 / w_sum;
     let sigma_stale_sq = w_stale_sq_sum / w_sum;
+    // NOT `stats::ci::rss`: both terms are already variances, not sigmas.
     let raw_ci = (sigma_disagree_sq + sigma_stale_sq).sqrt();
     let half_spread_agg = (tdwap_ask - tdwap_bid).abs() * 0.5;
     let conf_interval = raw_ci.max(half_spread_agg);

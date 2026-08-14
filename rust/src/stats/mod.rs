@@ -3,9 +3,11 @@
 //!
 //! Flat re-export: callers use `stats::median`, never `stats::descriptive::median`.
 
+pub mod ci;
 pub mod concentration;
 pub mod descriptive;
 
+pub use ci::rss;
 pub use concentration::{hhi, n_eff, n_eff_from_sums};
 pub use descriptive::{
     mad, mean, median, median_and_mad, median_by, percentile, round_to_sig_digits, std_dev,

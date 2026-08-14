@@ -117,7 +117,7 @@ pub fn compute_synth_index(
     // CI propagation.
     let ci_b_ubp = decode_ci_ubp(base.ci);
     let ci_q_ubp = decode_ci_ubp(quote.ci);
-    let rel_ci_ubp = (ci_b_ubp.powi(2) + ci_q_ubp.powi(2)).sqrt();
+    let rel_ci_ubp = crate::stats::rss(&[ci_b_ubp, ci_q_ubp]);
 
     // Min-leg aggregation.
     let vbid = base.vbid.min(quote.vbid);

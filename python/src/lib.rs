@@ -53,6 +53,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // ── Ticker resolve ────────────────────────────────────────────
     m.add_function(wrap_pyfunction!(resolve::resolve_ticker_id, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve::try_resolve_ticker_id, m)?)?;
     m.add_function(wrap_pyfunction!(resolve::resolve_ticker, m)?)?;
     m.add_function(wrap_pyfunction!(resolve::get_market_provider, m)?)?;
 

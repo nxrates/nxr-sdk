@@ -10,7 +10,9 @@ extension. The native module provides:
   numpy holds the bytes buffer as the array's base).
 - :func:`encode_idx_record`, :func:`encode_bar` -- inverse encoders.
 - :func:`resolve_ticker_id` / :func:`resolve_ticker` -- MITCH 64-bit ticker
-  encode/decode.
+  encode/decode. :func:`resolve_ticker_id` is lenient (an unresolvable symbol
+  gets an FNV phantom id); :func:`try_resolve_ticker_id` returns ``None``
+  instead.
 - :class:`MulticastSubscriber` -- UDP multicast subscriber with synchronous
   iterator and ``recv``/``recv_raw`` helpers.
 - :class:`Client` -- blocking REST client wrapping ``/v1/idx``,
@@ -91,12 +93,13 @@ from nxr_sdk._native import (  # type: ignore[attr-defined]
     bar_dtype,
     tick_dtype,
     resolve_ticker_id,
+    try_resolve_ticker_id,
     resolve_ticker,
     get_market_provider,
     compute_synth_tick,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "__version__",
@@ -155,6 +158,7 @@ __all__ = [
     "bar_dtype",
     "tick_dtype",
     "resolve_ticker_id",
+    "try_resolve_ticker_id",
     "resolve_ticker",
     "get_market_provider",
     "compute_synth_tick",

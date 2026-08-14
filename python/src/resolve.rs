@@ -4,8 +4,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 /// Resolve a canonical NXR symbol string ("BTC/USDT", "EURUSD") to its 64-bit
-/// MITCH ticker id. Falls back to FNV1a-64 if the resolver cannot match — same
-/// behaviour as `nxr-sdk::resolve_ticker_id`.
+/// MITCH ticker id.
+///
+/// WARNING: lenient. An unresolvable symbol yields an FNV1a-64 *phantom* id
+/// rather than an error: unique, but not a bit-packed TickerId, so
+/// `resolve_ticker` reverses it to a hex base with an empty quote and any
+/// class / instrument-type bits read as hash noise. Use
+/// `try_resolve_ticker_id` when you need to tell a real id from a phantom.
 ///
 /// `instrument_type` is currently unused (the resolver always emits SPOT) but
 /// accepted for API parity with the Rust side.
@@ -13,6 +18,14 @@ use pyo3::types::PyDict;
 #[pyo3(signature = (symbol, _instrument_type=None))]
 pub fn resolve_ticker_id(symbol: &str, _instrument_type: Option<&str>) -> u64 {
     nxr_sdk::resolve_ticker_id(symbol)
+}
+
+/// Strict resolution: returns the 64-bit MITCH ticker id, or None when the
+/// symbol has no MITCH id. No FNV phantom fallback.
+#[pyfunction]
+#[pyo3(signature = (symbol, _instrument_type=None))]
+pub fn try_resolve_ticker_id(symbol: &str, _instrument_type: Option<&str>) -> Option<u64> {
+    nxr_sdk::try_resolve_ticker_id(symbol)
 }
 
 /// Reverse a 64-bit MITCH ticker id back into (base, quote, instrument_type).

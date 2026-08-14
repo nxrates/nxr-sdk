@@ -191,6 +191,20 @@ def test_resolve_ticker_id_roundtrip_crypto():
     assert it == "SPOT"
 
 
+def test_try_resolve_ticker_id_strict_vs_lenient():
+    assert nxr_sdk.try_resolve_ticker_id("BTC/USDT") == nxr_sdk.resolve_ticker_id("BTC/USDT")
+    assert nxr_sdk.try_resolve_ticker_id("ZZZQQQ/NOPE") is None
+    # lenient path still hands back an FNV phantom that reverses to hex/empty
+    base, quote, _ = nxr_sdk.resolve_ticker(nxr_sdk.resolve_ticker_id("ZZZQQQ/NOPE"))
+    assert base.startswith("0x") and quote == ""
+
+
+def test_exact_ticker_beats_fuzzy():
+    base, quote, _ = nxr_sdk.resolve_ticker(nxr_sdk.try_resolve_ticker_id("BRK-B/USD"))
+    assert "BERKSHIRE" in base
+    assert "DOLLAR" in quote
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Synth tick composition
 # ──────────────────────────────────────────────────────────────────────

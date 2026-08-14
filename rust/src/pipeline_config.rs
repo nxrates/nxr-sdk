@@ -311,12 +311,13 @@ pub struct SignedPeerYml {
     pub signer: String,
 }
 
-/// One signed-quote feed: on-chain `feedIds[]` index → NXR symbol.
+/// One signed-quote feed: an NXR symbol this deployment may sign, plus its
+/// signing policy. Carries NO on-chain ordinal: the record is keyed by the
+/// MITCH ticker id the symbol resolves to, and the ordinal→feed mapping is
+/// BTR's business concern, held on the BTR side only.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedFeedYml {
-    /// Position in the on-chain `feedIds[]` array.
-    pub idx: u16,
     /// NXR symbol whose mark/σ/CI back the feed (e.g. `BTC-USDC`).
     pub symbol: String,
     /// Required maximum deviation, in basis points, between a proposed mark
@@ -349,12 +350,6 @@ pub struct SignedFeedYml {
     /// convention. See that validator for the safety argument.
     #[serde(default)]
     pub single_source: bool,
-    /// When true, the signed mark is `1 / mid(symbol)` (σ/CI unchanged: relative
-    /// bps vol is invert-invariant to first order). Used for Pyth Lazer FX that
-    /// lands as `USD/X` while on-chain token marks need `X/USD` (QCAD←CAD/USD).
-    /// Mutually exclusive with `quote_via` (compose then invert is not defined).
-    #[serde(default)]
-    pub invert: bool,
     /// When true, a failed `own_view` omits this feed from the signed blob instead
     /// of 503ing the whole quote. Required (non-optional) feeds still fail closed.
     /// Cosign accepts an ordered subsequence that includes every required feed.
@@ -1429,7 +1424,7 @@ mod tests {
              chain_id: 56\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 3\n\
              min_composite_freshness_bps: 9000\nquorum: 2\npeers:\n\
                - { url: 'http://signer.internal:8080', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { idx: 0, symbol: 'BTC-USDC', cosign_tolerance_bps: 2.0 }\n",
+             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 2.0 }\n",
         )
         .expect("parse hardened signed_quotes schema");
         assert_eq!(current.min_interval_ms, 5);
@@ -1441,7 +1436,7 @@ mod tests {
              chain_id: 56\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 3\n\
              min_composite_freshness_bps: 9000\nquorum: 2\npeers:\n\
                - { url: 'http://signer.internal:8080', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { idx: 0, symbol: 'BTC-USDC' }\n";
+             feeds:\n  - { symbol: 'BTC-USDC' }\n";
         assert!(
             serde_yml::from_str::<SignedQuotesYml>(missing_feed_tolerance).is_err(),
             "every feed must explicitly set cosign_tolerance_bps"
@@ -1451,7 +1446,7 @@ mod tests {
                       chain_id: 56\nmark_max_age_s: 120\nmin_accepted_providers: 3\n\
                       min_composite_freshness_bps: 9000\nquorum: 2\n\
                       peers: ['http://signer.internal:8080']\ncosign_tolerance_bps: 25\n\
-                      feeds:\n  - { idx: 0, symbol: 'BTC-USDC' }\n";
+                      feeds:\n  - { symbol: 'BTC-USDC' }\n";
         assert!(
             serde_yml::from_str::<SignedQuotesYml>(legacy).is_err(),
             "legacy seconds/unpinned-peer config must fail closed"
@@ -1483,7 +1478,7 @@ mod tests {
              chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
              min_composite_freshness_bps: 500\nquorum: 1\npeers: []\n\
              feeds:\n\
-               - { idx: 0, symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+               - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse");
         // Default legs are 6 h / 2 d / 1 w ⇒ longest = 7 d ⇒ 7 + edge day.
@@ -1520,9 +1515,9 @@ mod tests {
              min_composite_freshness_bps: 500\nquorum: 2\npeers:\n\
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
              feeds:\n\
-               - { idx: 1, symbol: 'USDT-USD', cosign_tolerance_bps: 2.0 }\n\
-               - { idx: 3, symbol: 'usds-usdt', quote_via: 'USDT-USDC', cosign_tolerance_bps: 2.0 }\n\
-               - { idx: 17, symbol: 'ETH-USDC', cosign_tolerance_bps: 5.0 }\n",
+               - { symbol: 'USDT-USD', cosign_tolerance_bps: 2.0 }\n\
+               - { symbol: 'usds-usdt', quote_via: 'USDT-USDC', cosign_tolerance_bps: 2.0 }\n\
+               - { symbol: 'ETH-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse sign_only-absent schema");
         // Opt-in: absent ⇒ false, so full-replica behavior is untouched by default.
@@ -1547,7 +1542,7 @@ mod tests {
              chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 2\n\
              min_composite_freshness_bps: 9000\nquorum: 2\nsign_only: true\npeers:\n\
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { idx: 0, symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse explicit sign_only:true");
         assert!(on.sign_only);

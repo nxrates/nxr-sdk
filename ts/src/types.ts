@@ -55,6 +55,12 @@ export interface IndexRecord {
   tick_count: number;
   /** Per-stream sequence (u16) for gap detection. */
   sequence: number;
+  /**
+   * `mitch::Index.flags`. Selects the `confidence` encoding above and carries
+   * the carry-forward / backfill / healed / no-book markers: without it a
+   * carried-forward row is indistinguishable from a real observation.
+   */
+  flags: number;
 }
 
 /** Decoded Bar — flat shape with timestamps hoisted to ms. */
@@ -86,6 +92,11 @@ export interface Bar {
   reject_rate: number;
   /** 0=kline 1=renko 2=dib 3=tib. */
   kind: number;
+  /**
+   * `mitch::Bar.flags`. Bit 7 = composed from legs (not observed), bit 6 =
+   * flat quiet-bucket fill, bit 2 = renko synthetic brick.
+   */
+  flags: number;
 }
 
 /** Tick (raw bid/ask quote, NOT aggregated). */
@@ -102,8 +113,8 @@ export interface Tick {
  * Matches `nxr_sdk::ohlc::Ohlc` (see `sdk/rust/src/ohlc.rs`).
  */
 export interface Ohlc {
-  /** Bucket-start epoch ms (UTC aligned). */
-  ts_ms: number;
+  /** Bucket-start epoch ms (UTC aligned). Server key is `ts`, not `ts_ms`. */
+  ts: number;
   open: number;
   high: number;
   low: number;
@@ -115,23 +126,12 @@ export interface Ohlc {
   avg_ci_ubp: number;
 }
 
-/** REST `/v1/tickers` element. */
-export interface TickerSnapshot {
-  symbol: Sym;
-  ticker: bigint;
-  ts_ms: number;
-  bid: number;
-  ask: number;
-  mid: number;
-  ci_ubp: number;
-  confidence: number;
-  accepted: number;
-  rejected: number;
-}
+/** Live-price freshness classification. Thresholds: 30 s stale, 300 s dead. */
+export type AgeStatus = 'fresh' | 'stale' | 'dead' | 'no-data';
 
 /**
- * `/v1/price/{ticker_id}` / `/v1/last` snapshot — minimal live view.
- * Mirrors the server `SnapshotResponse` DTO.
+ * `/v1/price/{ticker}` / `/v1/last` / `/v1/tickers` snapshot — minimal live
+ * view. Mirrors the server `SnapshotResponse` DTO.
  */
 export interface SnapshotResponse {
   /** MITCH ticker_id (u64; bigint at the boundary). */
@@ -141,18 +141,34 @@ export interface SnapshotResponse {
   ask: number;
   /** Confidence interval in micro basis points (relative to mid). */
   ci: number;
-  /** Active provider count. */
+  /** Raw liveness byte. Undecodable without `flags` (see `IndexRecord`). */
   confidence: number;
+  /** `mitch::Index.flags`. Selects the `confidence` encoding. */
+  flags: number;
+  /**
+   * Age of the last real PROVIDER observation, `null` = never observed.
+   * Deliberately NOT emit age: idle tickers heartbeat at 1 Hz, so emit age
+   * reads "fresh" for a feed whose venues all died.
+   */
+  age_ms: number | null;
+  status: AgeStatus;
 }
 
-/** Synth-tick result from `/v1/synth/tick/{sym}`. */
-export interface SynthTick {
-  sym: string;
-  bid: number;
-  ask: number;
-  mid: number;
-  /** Min-provider confidence across the legs. */
-  conf: number;
+/**
+ * `/v1/freshness/{ticker}` — the "is this feed alive" read.
+ *
+ * `lag_ms` is emit age and stays low on quiet pairs (heartbeats re-emit);
+ * `provider_lag_ms` grows unbounded once the upstream forwarder dies. That
+ * divergence, not `status`, is the outage signal.
+ */
+export interface FreshnessResponse {
+  ticker: bigint;
+  last_ms: number | null;
+  lag_ms: number | null;
+  status: AgeStatus;
+  provider_last_ms: number | null;
+  provider_lag_ms: number | null;
+  provider_status: AgeStatus;
 }
 
 /** Bar kind for `/v1/bars` query. */
@@ -161,16 +177,10 @@ export type BarKind = 'kline' | 'renko';
 /** Data kind for the unified `history()` builder. `idx` = raw IndexRecord. */
 export type DataKind = 'idx' | BarKind;
 
-/** Synth-path leg ({ sym, exp: +1 | -1 }) returned by `/v1/synth/paths`. */
+/** Composition leg ({ sym, exp: +1 | -1 }) of a `TickerDetail.synth_legs`. */
 export interface SynthLeg {
   sym: string;
   exp: number;
-}
-
-/** Synth-path entry returned by `/v1/synth/paths`. */
-export interface SynthPath {
-  sym: string;
-  legs: SynthLeg[];
 }
 
 /** Disk shard window: first/last `YYYY-MM-DD` filename for the kind. */
@@ -178,6 +188,8 @@ export interface ShardWindow {
   first_date: string | null;
   last_date: string | null;
   count: number;
+  /** Verdict over `count` + `last_date`. Stale after 3 days. */
+  status: 'absent' | 'stale' | 'live';
 }
 
 /** Per-data-kind schema + on-disk presence for a single ticker. */
@@ -210,6 +222,11 @@ export interface TickerDetail {
   native: boolean;
   /** If `native == false`, the synth legs that compose this ticker. */
   synth_legs?: SynthLeg[];
+  /**
+   * When this row is a 1:1 wrapper alias (e.g. `CBBTC/USDC`), the canonical
+   * index pair (`BTC/USDC`). Same `ticker_id` and shards as the alias target.
+   */
+  alias_of?: string;
   /** Per-kind schema + shard window. Keys: `idx`, `kline`, `renko`. */
   kinds: Record<string, KindSchema>;
 }

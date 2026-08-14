@@ -1,6 +1,6 @@
 {
   "name": "@nxrates/sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Official NX Rates (NXR) TypeScript SDK - MITCH binary decoders, REST/WS/multicast clients. Browser + Node.",
   "main": "./dist/index.js",

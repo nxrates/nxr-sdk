@@ -23,7 +23,7 @@ if (tickers.length) {
 
 // 2. Raw ticks (binary octet-stream, MITCH zero-copy decode)
 const t0b = performance.now();
-const ticks = await client.idxBinary('BTC/USDT', { limit: 10_000 });
+const ticks = await client.idx('BTC/USDT', { limit: 10_000 });
 const dtB = performance.now() - t0b;
 console.log(`\n[2] /v1/idx/BTC/USDT     → ${ticks.length} IndexRecords in ${dtB.toFixed(1)}ms (${(ticks.length/(dtB/1000)).toFixed(0)} rec/s)`);
 if (ticks.length) {
@@ -45,11 +45,12 @@ for (const tf of [60, 300, 3600, 86400]) {
   }
 }
 
-// 4. Synth tick (triangulated)
+// 4. A composed cross reads off the generic price route, same as a native pair
 const t0d = performance.now();
-const synth = await client.synthTick('ETH/BTC');
-console.log(`\n[4] /v1/synth/tick/ETH/BTC in ${(performance.now()-t0d).toFixed(1)}ms`);
-console.log(`    bid=${synth.bid.toFixed(6)}  ask=${synth.ask.toFixed(6)}  mid=${synth.mid.toFixed(6)}  conf=${synth.conf}`);
+const id = await client.resolve('ETH/BTC');
+const synth = id ? await client.price(id) : null;
+console.log(`\n[4] /v1/price ETH/BTC in ${(performance.now()-t0d).toFixed(1)}ms`);
+if (synth) console.log(`    bid=${synth.bid.toFixed(6)}  ask=${synth.ask.toFixed(6)}  mid=${synth.mid.toFixed(6)}  conf=${synth.confidence}  age=${synth.age_ms}ms  ${synth.status}`);
 
 // 5. Pure-TS DataView decode benchmark
 const sampleBytes = await fetch(`${BASE_URL}/v1/idx/BTC-USDT?limit=10000`, {

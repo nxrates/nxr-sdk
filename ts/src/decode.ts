@@ -72,6 +72,7 @@ export function decodeIdxRecord(buf: Uint8Array, offset = 0): IndexRecord {
     vask: idx.vask,
     tick_count: idx.tickCount,
     sequence: hdr.sequence,
+    flags: idx.flags,
   };
 }
 
@@ -118,6 +119,7 @@ export function decodeBar(buf: Uint8Array, offset = 0): Bar {
     avg_ci_ubp: b.avgCiUbp,
     reject_rate: b.rejectRate,
     kind: b.kind,
+    flags: b.flags,
   };
 }
 

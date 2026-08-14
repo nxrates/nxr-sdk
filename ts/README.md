@@ -6,9 +6,9 @@ Official TypeScript SDK for **NX Rates** (NXR). MITCH binary decoders, REST + We
 
 - Zero-dep MITCH binary decoders for the canonical wire types: **56 B `IndexRecord`** (header + body), **96 B `Bar`**, **32 B `Tick`**, plus `Index`/`MitchHeader` primitives.
 - **`NxrClient`** REST client covering 100% of the live `/v1` surface:
-  - Metadata: `/health`, `/metrics`, `/v1/providers`, `/v1/tickers`, `/v1/tickers/detail`, `/v1/synth/paths`.
-  - Live snapshots: `/v1/price/{ticker_id}`, `/v1/last`.
-  - History: `/v1/idx/{sym}`, `/v1/bars/{sym}/{kind}`, `/v1/ohlc/{sym}`, `/v1/synth/ohlc/{sym}`, `/v1/synth/tick/{sym}`.
+  - Metadata: `/health`, `/metrics`, `/v1/providers`, `/v1/tickers`, `/v1/tickers/detail`.
+  - Live snapshots: `/v1/price/{ticker}`, `/v1/last`, `/v1/freshness/{ticker}`.
+  - History: `/v1/idx/{sym}`, `/v1/bars/{sym}/{kind}`, `/v1/ohlc/{sym}`.
   - Diagnostics: `/v1/integrity/{sym}`.
 - Two equivalent call styles per fetch — **object form** (single call) and **chainable builder** — w/ smart defaults (quote=USDT, kind=renko, instrument=spot).
 - **MITCH binary is the wire default** on idx/bars (`Accept: application/octet-stream`); JSON only on metadata.
@@ -65,12 +65,10 @@ sub.close();
 | `client.tickersDetail({ refresh? })`        | `GET /v1/tickers/detail`          | JSON, cached     |
 | `client.price(tickerId)`                    | `GET /v1/price/{ticker_id}`       | JSON             |
 | `client.last([tickerId, ...])`              | `GET /v1/last?symbols=...`        | JSON             |
+| `client.freshness(sym)`                     | `GET /v1/freshness/{ticker}`      | JSON             |
 | `client.idx(sym, opts)`                     | `GET /v1/idx/{sym}`               | MITCH binary 56B |
 | `client.bars(sym, kind, opts)`              | `GET /v1/bars/{sym}/{kind}`       | MITCH binary 96B |
 | `client.ohlc(sym, tf_s, opts)`              | `GET /v1/ohlc/{sym}?tf=`          | JSON (legacy)    |
-| `client.synthPaths()`                       | `GET /v1/synth/paths`             | JSON             |
-| `client.synthTick(sym)`                     | `GET /v1/synth/tick/{sym}`        | JSON             |
-| `client.synthOhlc(sym, tf_s, opts)`         | `GET /v1/synth/ohlc/{sym}?tf=`    | JSON             |
 | `client.integrity(sym, { kind? })`          | `GET /v1/integrity/{sym}`         | JSON             |
 | `client.history(opts)`                      | unified routing                   | typed envelope   |
 | `client.get().history()....fetch()`         | unified routing                   | typed envelope   |

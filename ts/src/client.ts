@@ -43,15 +43,12 @@ import type {
   Bar,
   BarKind,
   DataKind,
+  FreshnessResponse,
   IndexRecord,
   Ohlc,
-  ShardWindow,
   SnapshotResponse,
   Sym,
-  SynthPath,
-  SynthTick,
   TickerDetail,
-  TickerSnapshot,
   TickersDetailResponse,
 } from './types.js';
 
@@ -274,9 +271,25 @@ export class NxrClient {
 
   // ── REST: market data ───────────────────────────────────────────────────
 
-  /** All active ticker snapshots from `/v1/tickers`. */
-  async tickers(): Promise<TickerSnapshot[]> {
-    return this.json<TickerSnapshot[]>('/v1/tickers');
+  /**
+   * All live ticker snapshots from `/v1/tickers`. Composed rows are
+   * indistinguishable in shape; `flags` carries the provenance.
+   */
+  async tickers(): Promise<SnapshotResponse[]> {
+    type Raw = Array<Omit<SnapshotResponse, 'ticker'> & { ticker: number | string }>;
+    const data = await this.json<Raw>('/v1/tickers');
+    return data.map((d) => ({ ...d, ticker: BigInt(d.ticker) }));
+  }
+
+  /**
+   * Feed liveness from `/v1/freshness/{ticker}`. Compare `provider_lag_ms`
+   * against `lag_ms`: the latter keeps heartbeating through an upstream outage.
+   */
+  async freshness(sym: Sym | bigint | number): Promise<FreshnessResponse> {
+    const path = typeof sym === 'string' ? urlSym(sym) : sym.toString();
+    type Raw = Omit<FreshnessResponse, 'ticker'> & { ticker: number | string };
+    const data = await this.json<Raw>(`/v1/freshness/${path}`);
+    return { ...data, ticker: BigInt(data.ticker) };
   }
 
   /**
@@ -304,8 +317,8 @@ export class NxrClient {
 
   /**
    * IndexRecord rows from `/v1/idx/{sym}`.
-   * Defaults to `Accept: application/octet-stream` (MITCH binary, 10x faster decode).
-   * Set `opts.json = true` to request JSON instead.
+   * Always requests `Accept: application/octet-stream` (MITCH binary, 10x
+   * faster decode).
    */
   async idx(sym: Sym, opts: RangeOpts = {}): Promise<IndexRecord[]> {
     const buf = await this.bytes(`/v1/idx/${urlSym(sym)}${this.range(opts)}`);
@@ -327,21 +340,10 @@ export class NxrClient {
     return decodeBarBatch(buf);
   }
 
-  /** Synthetic tick (triangulation result) from `/v1/synth/tick/{sym}`. */
-  async synthTick(sym: Sym): Promise<SynthTick> {
-    return this.json<SynthTick>(`/v1/synth/tick/${urlSym(sym)}`);
-  }
-
-  /** Static registry of synth paths from `/v1/synth/paths`. */
-  async synthPaths(): Promise<SynthPath[]> {
-    return this.json<SynthPath[]>('/v1/synth/paths');
-  }
-
-  /** Synthetic OHLC from `/v1/synth/ohlc/{sym}?tf=<tf_seconds>`. */
-  async synthOhlc(sym: Sym, tf_s: number, opts: RangeOpts = {}): Promise<Ohlc[]> {
-    const q = this.range({ ...opts, tf: tf_s } as RangeOpts & { tf: number });
-    return this.json<Ohlc[]>(`/v1/synth/ohlc/${urlSym(sym)}${q}`);
-  }
+  // No synth-prefixed methods: the server retired that namespace so a consumer
+  // cannot tell from a URL whether a pair is primary or composed. Every generic
+  // endpoint composes on read. Old call sites map to `price()`, `idx()`, and
+  // the `synth_legs` field on `tickersDetail()`.
 
   /**
    * Integrity diagnostics from `/v1/integrity/{sym}`. Returns the parsed

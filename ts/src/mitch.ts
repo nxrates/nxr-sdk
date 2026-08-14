@@ -226,6 +226,7 @@ export interface Bar {
   avgCiUbp: number; // u16
   rejectRate: number; // u16
   kind: number; // u8 (0=kline, 1=renko, 2=dib, 3=tib)
+  flags: number; // u8 (bit 7 composed, bit 6 flat fill, bit 2 renko synthetic)
 }
 
 /** Decode 96B Bar at offset. */
@@ -254,6 +255,7 @@ export function readBar(dv: DataView, off: number): Bar {
     avgCiUbp: dv.getUint16(off + 88, true),
     rejectRate: dv.getUint16(off + 90, true),
     kind: dv.getUint8(off + 92),
+    flags: dv.getUint8(off + 93),
   };
 }
 

@@ -38,16 +38,15 @@ describe('NxrClient REST', () => {
   it('fetches and parses /v1/tickers', async () => {
     const sample = [
       {
-        symbol: 'BTC/USDT',
         ticker: '12345',
-        ts_ms: 1_700_000_000_000,
+        mid: 50000.5,
         bid: 50000,
         ask: 50001,
-        mid: 50000.5,
-        ci_ubp: 4,
+        ci: 4,
         confidence: 3,
-        accepted: 5,
-        rejected: 0,
+        flags: 0x40,
+        age_ms: 120,
+        status: 'fresh',
       },
     ];
     const fetchMock = makeFetch(async (url) => {
@@ -60,8 +59,9 @@ describe('NxrClient REST', () => {
     const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
     const tickers = await client.tickers();
     expect(tickers).toHaveLength(1);
-    expect(tickers[0]!.symbol).toBe('BTC/USDT');
+    expect(tickers[0]!.ticker).toBe(12345n);
     expect(tickers[0]!.bid).toBe(50000);
+    expect(tickers[0]!.status).toBe('fresh');
   });
 
   it('tickersDetail parses + caches', async () => {
@@ -254,21 +254,25 @@ describe('NxrClient REST', () => {
     }
   });
 
-  it('synthPaths() returns the registry', async () => {
-    const sample = [{ sym: 'ETH-BTC', legs: [{ sym: 'ETH/USDT', exp: 1 }] }];
-    const fetchMock = makeFetch(async () => new Response(JSON.stringify(sample), { status: 200 }));
-    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
-    expect(await client.synthPaths()).toEqual(sample);
-  });
-
-  it('synthTick() returns mid/bid/ask/conf', async () => {
-    const sample = { sym: 'ETH-BTC', bid: 0.05, ask: 0.051, mid: 0.0505, conf: 3 };
+  it('freshness() BigInt-converts the ticker and keeps both lag axes', async () => {
+    const sample = {
+      ticker: 435315775907037184,
+      last_ms: 1_744_372_800_000,
+      lag_ms: 900,
+      status: 'fresh',
+      provider_last_ms: 1_744_372_000_000,
+      provider_lag_ms: 800_900,
+      provider_status: 'dead',
+    };
     const fetchMock = makeFetch(async (url) => {
-      expect(url).toBe('http://nxr/v1/synth/tick/ETH-BTC');
+      expect(url).toBe('http://nxr/v1/freshness/ETH-BTC');
       return new Response(JSON.stringify(sample), { status: 200 });
     });
     const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
-    expect(await client.synthTick('ETH-BTC')).toEqual(sample);
+    const r = await client.freshness('ETH-BTC');
+    expect(r.ticker).toBe(435315775907037184n);
+    expect(r.status).toBe('fresh');
+    expect(r.provider_status).toBe('dead');
   });
 
   it('isHealthy returns false on network error', async () => {

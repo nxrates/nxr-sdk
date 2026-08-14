@@ -345,6 +345,56 @@ impl CrossGraph {
         self.adj.len()
     }
 
+    /// Every ordered `(base, quote)` asset pair [`Self::route`] can resolve.
+    ///
+    /// The servable universe is a property of the topology, not of any single
+    /// query, so it is derived with ONE hop-bounded BFS per peg-canonical node
+    /// (a few hundred) instead of a Dijkstra per pair (N², six figures). Both
+    /// walk the same `adj` under the same [`MAX_HOPS`] budget and the same
+    /// `peg_asset` identification, so a pair listed here routes and a pair that
+    /// routes is listed.
+    pub fn servable_pairs(&self) -> Vec<(AssetId, AssetId)> {
+        let nodes: Vec<AssetId> = self.adj.keys().copied().collect();
+        let mut reach: HashMap<AssetId, std::collections::HashSet<AssetId>> = HashMap::new();
+        for &n in &nodes {
+            let start = crate::series_alias::peg_asset(n);
+            if reach.contains_key(&start) {
+                continue;
+            }
+            // Distance-limited BFS: first visit of a node is its shortest
+            // distance, so one global `seen` set is exact for "within k hops".
+            let mut seen = std::collections::HashSet::from([start]);
+            let mut frontier = vec![start];
+            for _ in 0..MAX_HOPS {
+                let mut next = Vec::new();
+                for a in frontier.drain(..) {
+                    for e in self.adj.get(&a).map(Vec::as_slice).unwrap_or(&[]) {
+                        if seen.insert(e.peer) {
+                            next.push(e.peer);
+                        }
+                    }
+                }
+                if next.is_empty() {
+                    break;
+                }
+                frontier = next;
+            }
+            reach.insert(start, seen);
+        }
+        let mut out = Vec::new();
+        for &b in &nodes {
+            let pb = crate::series_alias::peg_asset(b);
+            let Some(seen) = reach.get(&pb) else { continue };
+            for &q in &nodes {
+                let pq = crate::series_alias::peg_asset(q);
+                if pb != pq && seen.contains(&pq) {
+                    out.push((b, q));
+                }
+            }
+        }
+        out
+    }
+
     /// Resolve `base/quote` (packed asset ids) to a route. `vol` is a leg's 24 h
     /// depth in USD (`0.0` when unknown). `None` = the pair is not composable
     /// from the current primaries, which is the honest answer, not an error.

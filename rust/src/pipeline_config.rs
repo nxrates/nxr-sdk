@@ -770,6 +770,14 @@ pub struct ExchangeYml {
     /// `heartbeat_interval_ms`, or the watchdog will thrash.
     #[serde(default)]
     pub stale_timeout_s: Option<u64>,
+    /// Hard ceiling on how many markets this venue may be subscribed to at once.
+    /// Bounds the weights-driven subscription set (`crypto/src/markets.rs`),
+    /// which grows with whatever `nxr-weights` last observed and is therefore
+    /// not bounded by anything in this repo. WS gateways cap subscriptions per
+    /// connection, so an unbounded set is a silent venue, not a rich one.
+    /// `None` ⇒ `nxr_crypto::exchange::DEFAULT_MAX_SUBSCRIPTIONS`.
+    #[serde(default)]
+    pub max_subscriptions: Option<usize>,
 }
 
 /// Per-exchange historical-archive URL prefixes. Each field is the URL stem

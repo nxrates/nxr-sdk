@@ -331,7 +331,9 @@ impl NxrClient {
         if let Some(d) = self.detail_cache.lock().ok().and_then(|g| g.clone()) {
             return Ok(d);
         }
-        let d: TickersDetailResponse = self.json_get("/v1/tickers/detail").await?;
+        // `?native=1`: the registered subset that carries `kinds` + shard status.
+        // The default body is the FULL derived universe (~157k rows).
+        let d: TickersDetailResponse = self.json_get("/v1/tickers/detail?native=1").await?;
         if let Ok(mut g) = self.detail_cache.lock() {
             *g = Some(d.clone());
         }

@@ -2,7 +2,6 @@
 
 use crate::pipeline_config::{PipelineYml, SynthPairYml};
 use crate::synth::cross_expand::{all_crypto_crosses, expand_cross_pairs};
-use crate::synth::pairs::DEFAULT_INITIAL_SYNTH_PAIRS;
 
 /// Synth cross catalog for offline backfill/calibrate (and cross enumeration).
 ///
@@ -17,16 +16,4 @@ pub fn synth_pipeline_pairs(yml: &PipelineYml) -> Vec<SynthPairYml> {
     }
     let crosses = all_crypto_crosses(&yml.cexs.assets);
     expand_cross_pairs(&crosses, &yml.series.pipeline.pairs)
-}
-
-/// Fallback when YAML is unavailable (tests / minimal boot).
-pub fn default_synth_pipeline_pairs() -> Vec<SynthPairYml> {
-    DEFAULT_INITIAL_SYNTH_PAIRS
-        .iter()
-        .map(|p| SynthPairYml {
-            synth_sym: p.synth_sym.to_string(),
-            base_sym: p.base_sym.to_string(),
-            quote_sym: p.quote_sym.to_string(),
-        })
-        .collect()
 }

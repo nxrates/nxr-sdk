@@ -75,6 +75,10 @@ pub struct WeightsFile {
     /// cmc_slug -> { mitch_id, name, weight }
     #[serde(default)]
     pub exchanges: BTreeMap<String, ExchangeMeta>,
+    /// Per-CR-asset market ranking derived from `pair_volumes`. FACTS only: the
+    /// pivot decision belongs to core, which has liveness and hysteresis.
+    #[serde(default)]
+    pub asset_markets: BTreeMap<String, Vec<AssetMarket>>,
     /// Calibrated Renko `multiplier` per ticker (output of `nxr-calibrate`).
     /// Key = ticker_id as a decimal string (JSON object keys must be strings).
     /// Consumed by the aggregator's renko bar emitter at hot-reload time.
@@ -165,6 +169,19 @@ pub struct CalibrateRun {
     /// comparable across runs at equal window.
     #[serde(default)]
     pub window_days: Option<u32>,
+}
+
+/// One market an asset trades in, ranked by 24h USD volume.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AssetMarket {
+    /// cmc_slug: joins the `exchanges` map to a mitch_id.
+    pub exchange: String,
+    pub pair: String,
+    /// The OTHER asset of `pair`.
+    pub counter: String,
+    /// True when the asset is the QUOTE side of `pair`.
+    pub inverted: bool,
+    pub volume_usd: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

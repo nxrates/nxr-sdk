@@ -1019,6 +1019,34 @@ pub struct CexsYml {
     /// Volume scraper config — URLs + intervals. Was: `weights::scraper::CMC_PAIRS_URL`.
     #[serde(default)]
     pub scraper: ScraperYml,
+    /// Pivot inference knobs (`docs/internal/pivot-inference.md`).
+    #[serde(default)]
+    pub pivot: PivotYml,
+}
+
+/// `cexs.pivot:` block: per-asset market ranking + weight cap knobs.
+/// Genuinely YAML-sourced: no env indirection, no Rust literal that outranks
+/// the file (the mistake `max_weight_per_source` and friends still carry).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PivotYml {
+    /// Markets aggregated per asset (top-N by volume).
+    #[serde(default)]
+    pub max_markets_per_asset: Option<usize>,
+    /// Trust floor per market, either side.
+    #[serde(default)]
+    pub min_market_volume_usd: Option<f64>,
+    /// Weight cap at `n == min_providers_for_cap`.
+    #[serde(default)]
+    pub max_weight_at_min_markets: Option<f64>,
+    /// Weight cap at `n >= max_markets_per_asset`.
+    #[serde(default)]
+    pub max_weight_at_max_markets: Option<f64>,
+    /// A challenger pivot must beat the incumbent by this ratio.
+    #[serde(default)]
+    pub main_leg_switch_ratio: Option<f64>,
+    /// Minimum dwell between volume-driven pivot switches.
+    #[serde(default)]
+    pub main_leg_min_dwell_secs: Option<u64>,
 }
 
 /// `cexs.scraper:` block — endpoints + selectors for CEX volume scraping.

@@ -7,7 +7,9 @@
 
 use bytemuck::bytes_of;
 use nxr_sdk::IndexRecord;
-use nxr_sdk::client::{BarKindParam, DataKind, HistoryData, HistoryOpts, NxrClient, RangeOpts};
+use nxr_sdk::client::{
+    BarKindParam, DataKind, HistoryData, HistoryOpts, NxrClient, RangeOpts, ShardStatus,
+};
 use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -42,7 +44,7 @@ async fn tickers_detail_typed_parse_and_cache() {
                     "idx": {
                         "fields": ["ts", "ticker"],
                         "stride_bytes": 56,
-                        "shards": { "first_date": "2025-01-01", "last_date": "2025-01-31", "count": 31 }
+                        "shards": { "first_date": "2025-01-01", "last_date": "2025-01-31", "count": 31, "status": "live" }
                     }
                 }
             },
@@ -55,6 +57,7 @@ async fn tickers_detail_typed_parse_and_cache() {
                 "quote_class": "",
                 "instrument_type": "SPOT",
                 "native": false,
+                "alias_of": "ETH/BTC",
                 "synth_legs": [
                     { "sym": "ETH/USDT", "exp": 1 },
                     { "sym": "BTC/USDT", "exp": -1 }
@@ -80,7 +83,9 @@ async fn tickers_detail_typed_parse_and_cache() {
     assert_eq!(d1.tickers[0].ticker, "BTC/USDT");
     assert_eq!(d1.tickers[0].ticker_id, 435315551398526976);
     assert_eq!(d1.tickers[0].kinds["idx"].stride_bytes, 56);
+    assert_eq!(d1.tickers[0].kinds["idx"].shards.status, ShardStatus::Live);
     assert_eq!(d1.tickers[1].native, false);
+    assert_eq!(d1.tickers[1].alias_of.as_deref(), Some("ETH/BTC"));
     let legs = d1.tickers[1].synth_legs.as_ref().unwrap();
     assert_eq!(legs.len(), 2);
     assert_eq!(legs[1].exp, -1);
@@ -206,4 +211,72 @@ async fn http_error_surfaces_body_excerpt() {
         msg.contains("boom internal"),
         "expected body excerpt in {msg}"
     );
+}
+
+#[tokio::test]
+async fn snapshot_carries_flags_age_and_status() {
+    let server = MockServer::start().await;
+    let row = json!({
+        "ticker": 42u64, "mid": 10.5, "bid": 10.0, "ask": 11.0,
+        "ci": 7, "confidence": 131, "flags": 4, "age_ms": 1200, "status": "fresh"
+    });
+    Mock::given(method("GET"))
+        .and(path("/v1/price/BTC-USDT"))
+        .and(query_param("max_age_ms", "5000"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(row.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/tickers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([row])))
+        .mount(&server)
+        .await;
+
+    let c = NxrClient::new(server.uri());
+    let p = c.price("BTC/USDT", Some(5000)).await.unwrap();
+    assert_eq!(
+        (p.flags, p.age_ms, p.status.as_str()),
+        (4, Some(1200), "fresh")
+    );
+    assert_eq!(c.tickers().await.unwrap()[0].ticker, 42);
+}
+
+#[tokio::test]
+async fn last_accepts_symbols_and_max_age() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/last"))
+        .and(query_param("symbols", "BTC-USDT,EURUSD"))
+        .and(query_param("max_age_ms", "30000"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = NxrClient::new(server.uri());
+    assert!(
+        c.last(&["BTC/USDT", "EURUSD"], Some(30_000))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn freshness_splits_emit_from_provider_lag() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/freshness/BTC-USDT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ticker": 42u64, "last_ms": 1000, "lag_ms": 900, "status": "fresh",
+            "provider_last_ms": null, "provider_lag_ms": null, "provider_status": "no-data"
+        })))
+        .mount(&server)
+        .await;
+    let f = NxrClient::new(server.uri())
+        .freshness("BTC/USDT")
+        .await
+        .unwrap();
+    assert_eq!(f.lag_ms, Some(900));
+    assert_eq!(f.provider_lag_ms, None);
+    assert_eq!(f.provider_status, "no-data");
 }

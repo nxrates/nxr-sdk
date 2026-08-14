@@ -26,6 +26,25 @@ written under the old id will not be found under the new one.
   `asset_markets: BTreeMap<String, Vec<AssetMarket>>` and `pipeline_config.rs`
   gained `CexsYml.pivot: PivotYml` (internal pipeline config, NOT client
   surface, deliberately not ported to the other bindings).
+  `client.rs` re-derived against the server DTOs, same closure as TS below:
+  `SnapshotResponse` gained `flags`, `age_ms` and `status` (`age_ms` is
+  PROVIDER observation age, not emit age), `ShardWindow` gained `status` with a
+  new `ShardStatus` enum, `TickerDetail` gained `alias_of`, and new
+  `freshness()` + `FreshnessResponse` cover `/v1/freshness/{ticker}`, the only
+  route that separates a quiet feed from a dead one.
+  Breaking: `price(ticker_id: u64)` is now `price(sym: &str, max_age_ms:
+  Option<i64>)` returning `SnapshotResponse` rather than an `Option` that could
+  never be `None` (no price is a 404, never a 200 with a null body); the server
+  accepts ids and symbols alike and composes crosses on read. `last()` takes
+  the same symbol forms plus `max_age_ms`; both opt into a 503 past the
+  ceiling. `tickers()` returns `Vec<SnapshotResponse>` (what `/v1/tickers` has
+  always served) and `TickerSnapshotJson` is gone: its `symbol` / `ts_ms` /
+  `ci_ubp` / `accepted` / `rejected` fields described a shape no route emits.
+  `synth_paths()` and `synth_tick()` removed with the client-side `SynthPath`
+  and `SynthTickJson` types (`synth::SynthPath`, the composition engine's type,
+  is untouched): the server retired the `synth`-prefixed namespace so a URL
+  cannot reveal whether a pair is primary or composed. Migrate to `price()`,
+  `idx()`, and the `synth_legs` field on `tickers_detail()`.
 
 - **TS 0.4.0**: `resolve()` falls back to `GET /v1/price/{sym}` when a symbol
   is absent from `/v1/tickers/detail`, so any routable cross resolves instead

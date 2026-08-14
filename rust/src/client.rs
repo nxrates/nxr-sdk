@@ -65,7 +65,8 @@ pub const DEFAULT_KIND: DataKind = DataKind::Renko;
 
 // ── Public DTOs (subset that matters at the SDK boundary) ────────────────
 
-/// `/v1/price/{ticker_id}` + `/v1/last` snapshot row.
+/// Snapshot row served identically by `/v1/price/{ticker}`, `/v1/last` and
+/// `/v1/tickers`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SnapshotResponse {
     pub ticker: u64,
@@ -74,7 +75,35 @@ pub struct SnapshotResponse {
     pub ask: f64,
     /// Confidence interval in micro basis points (relative to mid).
     pub ci: u16,
+    /// Flag-selected meaning: with `FLAG_CONF_ACTIVE` set in `flags` it packs
+    /// the ticking-leg count (bits 0..6) + fresh-weight verdict (bit 7),
+    /// otherwise it is the legacy `byte/255` fraction.
     pub confidence: u8,
+    /// `mitch::Index.flags`. Selects the `confidence` encoding above and
+    /// carries the carry-forward / backfill / healed / no-book markers.
+    pub flags: u8,
+    /// Age of the last real PROVIDER observation, not of the last emit.
+    /// `None` = never observed.
+    pub age_ms: Option<i64>,
+    /// `fresh` / `stale` / `dead` / `no-data` over `age_ms` (30 s / 300 s).
+    pub status: String,
+}
+
+/// `/v1/freshness/{ticker}` liveness probe.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FreshnessResponse {
+    pub ticker: u64,
+    /// Wall-clock ms of the last composite emit (full or heartbeat).
+    pub last_ms: Option<i64>,
+    /// Age of that emit. Stays low on quiet pairs (heartbeat re-emits).
+    pub lag_ms: Option<i64>,
+    pub status: String,
+    /// Wall-clock ms of the last provider Index received.
+    pub provider_last_ms: Option<i64>,
+    /// Age of the last provider tick. Grows unbounded on a dead upstream while
+    /// `lag_ms` keeps heartbeating: the true "feed alive" signal.
+    pub provider_lag_ms: Option<i64>,
+    pub provider_status: String,
 }
 
 /// Synth-leg `{ sym, exp }`. `exp ∈ {+1, -1}`.
@@ -84,11 +113,17 @@ pub struct SynthLeg {
     pub exp: i8,
 }
 
-/// Synth-path entry. `synth = Π leg_i^{e_i}`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SynthPath {
-    pub sym: String,
-    pub legs: Vec<SynthLeg>,
+/// Whether a kind has usable data on disk right now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShardStatus {
+    /// No shard file. The schema is still published; a range read will 404.
+    #[default]
+    Absent,
+    /// Shards exist but the newest lags by more than 3 days.
+    Stale,
+    /// Newest shard is current.
+    Live,
 }
 
 /// Disk shard window from `/v1/tickers/detail`.
@@ -97,6 +132,7 @@ pub struct ShardWindow {
     pub first_date: Option<String>,
     pub last_date: Option<String>,
     pub count: u32,
+    pub status: ShardStatus,
 }
 
 /// Per-kind schema from `/v1/tickers/detail`.
@@ -120,6 +156,10 @@ pub struct TickerDetail {
     pub native: bool,
     #[serde(default)]
     pub synth_legs: Option<Vec<SynthLeg>>,
+    /// Canonical index pair when this row is a 1:1 wrapper alias (e.g.
+    /// `CBBTC/USDC` → `BTC/USDC`). Same `ticker_id` and shards as the target.
+    #[serde(default)]
+    pub alias_of: Option<String>,
     #[serde(default)]
     pub kinds: HashMap<String, KindSchema>,
 }
@@ -137,31 +177,6 @@ impl TickersDetailResponse {
     pub fn by_ticker(&self, ticker: &str) -> Option<&TickerDetail> {
         self.tickers.iter().find(|t| t.ticker == ticker)
     }
-}
-
-/// Live ticker snapshot from `/v1/tickers`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TickerSnapshotJson {
-    pub symbol: String,
-    pub ticker: u64,
-    pub ts_ms: i64,
-    pub bid: f64,
-    pub ask: f64,
-    pub mid: f64,
-    pub ci_ubp: u32,
-    pub confidence: u8,
-    pub accepted: u8,
-    pub rejected: u8,
-}
-
-/// `/v1/synth/tick/{sym}` response.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SynthTickJson {
-    pub sym: String,
-    pub bid: f64,
-    pub ask: f64,
-    pub mid: f64,
-    pub conf: u16,
 }
 
 // ── Range / history options ──────────────────────────────────────────────
@@ -305,8 +320,9 @@ impl NxrClient {
         Ok(out)
     }
 
-    /// `GET /v1/tickers` — live snapshot for every ticker.
-    pub async fn tickers(&self) -> Result<Vec<TickerSnapshotJson>> {
+    /// `GET /v1/tickers` — live snapshot for every ticker, observed or
+    /// composed alike. Rows are the same shape `/v1/price` serves.
+    pub async fn tickers(&self) -> Result<Vec<SnapshotResponse>> {
         self.json_get("/v1/tickers").await
     }
 
@@ -338,33 +354,41 @@ impl NxrClient {
         self.tickers_detail().await
     }
 
-    /// `GET /v1/price/{ticker_id}`.
-    pub async fn price(&self, ticker_id: u64) -> Result<Option<SnapshotResponse>> {
-        self.json_get(&format!("/v1/price/{ticker_id}")).await
-    }
-
-    /// `GET /v1/last?symbols=<id>,<id>,...`.
-    pub async fn last(&self, ticker_ids: &[u64]) -> Result<Vec<SnapshotResponse>> {
-        if ticker_ids.is_empty() {
-            return Ok(vec![]);
-        }
-        let csv = ticker_ids
-            .iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let path = format!("/v1/last?symbols={}", urlencoding(&csv));
+    /// `GET /v1/price/{ticker}` — accepts a numeric MITCH id (decimal or `0x`
+    /// hex) or a human symbol (`BTC-USDT`, `BTC/USDT`, `EURUSD`); crosses are
+    /// composed on read. `max_age_ms` opts into a hard freshness contract
+    /// (HTTP 503 past the ceiling). No price ⇒ 404 ⇒ `Err`, never `Ok(null)`.
+    pub async fn price(&self, sym: &str, max_age_ms: Option<i64>) -> Result<SnapshotResponse> {
+        let path = format!("/v1/price/{}{}", url_sym(sym), max_age(max_age_ms, true));
         self.json_get(&path).await
     }
 
-    /// `GET /v1/synth/paths` — static synth registry.
-    pub async fn synth_paths(&self) -> Result<Vec<SynthPath>> {
-        self.json_get("/v1/synth/paths").await
+    /// `GET /v1/last?symbols=a,b,...` — same accepted forms as [`Self::price`].
+    pub async fn last(
+        &self,
+        syms: &[&str],
+        max_age_ms: Option<i64>,
+    ) -> Result<Vec<SnapshotResponse>> {
+        if syms.is_empty() {
+            return Ok(vec![]);
+        }
+        let csv = syms
+            .iter()
+            .map(|s| url_sym(s))
+            .collect::<Vec<_>>()
+            .join(",");
+        let path = format!(
+            "/v1/last?symbols={}{}",
+            urlencoding(&csv),
+            max_age(max_age_ms, false)
+        );
+        self.json_get(&path).await
     }
 
-    /// `GET /v1/synth/tick/{sym}` — instantaneous synth tick.
-    pub async fn synth_tick(&self, sym: &str) -> Result<SynthTickJson> {
-        self.json_get(&format!("/v1/synth/tick/{}", url_sym(sym)))
+    /// `GET /v1/freshness/{ticker}` — per-ticker liveness. `provider_lag_ms`
+    /// is the honest "is the feed alive" axis; `lag_ms` heartbeats.
+    pub async fn freshness(&self, sym: &str) -> Result<FreshnessResponse> {
+        self.json_get(&format!("/v1/freshness/{}", url_sym(sym)))
             .await
     }
 
@@ -753,6 +777,14 @@ fn ws_from_http(http: &str) -> String {
         format!("ws://{}", rest)
     } else {
         http.to_string()
+    }
+}
+
+/// `?`/`&`-prefixed `max_age_ms` fragment. `first` = no other query param yet.
+fn max_age(ms: Option<i64>, first: bool) -> String {
+    match ms {
+        Some(v) => format!("{}max_age_ms={}", if first { '?' } else { '&' }, v),
+        None => String::new(),
     }
 }
 

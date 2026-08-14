@@ -71,11 +71,11 @@ cargo run --release --example quickstart
 | `c.providers()`                       | `GET /v1/providers`            | JSON             |
 | `c.tickers()`                         | `GET /v1/tickers`              | JSON             |
 | `c.tickers_detail()`                  | `GET /v1/tickers/detail`       | JSON, cached     |
-| `c.price(ticker_id)`                  | `GET /v1/price/{id}`           | JSON             |
-| `c.last(&[ids])`                      | `GET /v1/last?symbols=...`     | JSON             |
+| `c.price(sym, max_age_ms?)`           | `GET /v1/price/{ticker}`       | JSON             |
+| `c.last(&[syms], max_age_ms?)`        | `GET /v1/last?symbols=...`     | JSON             |
+| `c.freshness(sym)`                    | `GET /v1/freshness/{ticker}`   | JSON             |
 | `c.idx(sym, opts)`                    | `GET /v1/idx/{sym}`            | MITCH 56B        |
 | `c.bars(sym, kind, opts)`             | `GET /v1/bars/{sym}/{kind}`    | MITCH 96B        |
-| `c.synth_paths()` / `c.synth_tick(s)` | `/v1/synth/*`                  | JSON             |
 | `c.integrity(sym, kind?)`             | `GET /v1/integrity/{sym}`      | JSON             |
 | `c.history(opts)` / chainable         | unified routing                | `HistoryData`    |
 | `c.subscribe(&[syms])`                | `WS  /v1/stream`               | `WsStream`       |

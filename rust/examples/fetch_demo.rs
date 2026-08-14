@@ -125,21 +125,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 4. Synth tick
-    let t0 = Instant::now();
-    let synth: SynthTick = agent
-        .get(&format!("{}/v1/synth/tick/ETH-BTC", BASE_URL))
-        .call()?
-        .into_json()?;
-    println!(
-        "\n[4] /v1/synth/tick/ETH/BTC in {:.1}ms",
-        t0.elapsed().as_secs_f64() * 1000.0
-    );
-    println!(
-        "    bid={:.6}  ask={:.6}  mid={:.6}  conf={}",
-        synth.bid, synth.ask, synth.mid, synth.conf
-    );
-
     // 5. Cast benchmark — bytemuck zero-copy MITCH decode
     const N_ITER: usize = 1000;
     let t0 = Instant::now();
@@ -160,7 +145,10 @@ fn main() -> anyhow::Result<()> {
         dt,
         total as f64 / (dt / 1000.0)
     );
-    println!("    sum_mid={:.6} (sanity check, prevents dead code elim)", sum_mid);
+    println!(
+        "    sum_mid={:.6} (sanity check, prevents dead code elim)",
+        sum_mid
+    );
 
     // 6. Symbol resolution (offline)
     let tid = nxr_sdk::resolve_ticker_id("BTC/USDT");

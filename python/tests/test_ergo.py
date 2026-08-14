@@ -349,3 +349,146 @@ def test_top_level_re_exports():
     assert hasattr(nxr_sdk, "ShardWindow")
     assert hasattr(nxr_sdk, "SynthLeg")
     assert nxr_sdk.__version__ == "0.2.0"
+
+
+# ── Asset-centric surface ────────────────────────────────────────────────
+
+
+def _mock_urlopen_recording(payload, seen: list[str]):
+    """urlopen stub that records the requested URL and replies with `payload`."""
+    body = json.dumps(payload).encode("utf-8")
+
+    class _Resp:
+        def __enter__(self_inner):
+            return self_inner
+
+        def __exit__(self_inner, *exc):
+            return False
+
+        def read(self_inner):
+            return body
+
+    def _factory(req, *_args, **_kwargs):
+        seen.append(req.full_url)
+        return _Resp()
+
+    return _factory
+
+
+def test_counts_hits_the_cheap_endpoint(monkeypatch):
+    seen: list[str] = []
+    payload = {
+        "assets": 409,
+        "tickers": 156656,
+        "registered_tickers": 3445,
+        "venues": 12,
+        "markets": 83,
+        "aggregation_interval_ms": 50,
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen", _mock_urlopen_recording(payload, seen)
+    )
+    c = ergo.NxrClient(base_url="http://nxr")
+    got = c.counts()
+    assert seen == ["http://nxr/v1/counts"]
+    assert (got.assets, got.tickers, got.registered_tickers) == (409, 156656, 3445)
+    assert got.aggregation_interval_ms == 50
+
+
+def test_assets_list_is_small_rows_and_detail_keeps_the_class_pin(monkeypatch):
+    seen: list[str] = []
+    row = {
+        "asset": "BTC",
+        "class": "CR",
+        "class_id": 2001,
+        "asset_id": 133969,
+        "storage_quote": "USD",
+        "market_count": 3,
+        "venue_count": 2,
+        "native_ticker": "BTC/USDT",
+    }
+    monkeypatch.setattr("urllib.request.urlopen", _mock_urlopen_recording([row], seen))
+    c = ergo.NxrClient(base_url="http://nxr")
+    assets = c.assets()
+    assert seen == ["http://nxr/v1/assets"]
+    assert len(assets) == 1
+    a = assets[0]
+    # `class` is a Python keyword, so the field is spelled `cls_`.
+    assert (a.asset, a.cls_, a.storage_quote) == ("BTC", "CR", "USD")
+    # The list endpoint carries no markets: that is what keeps it small.
+    assert a.markets == [] and a.ticker_count == 0
+
+    seen.clear()
+    detail = {
+        **row,
+        "markets": [
+            {
+                "venue": "Binance",
+                "pair": "BTC/USDT",
+                "volume_usd": 1.5e9,
+                "inverted": False,
+            }
+        ],
+        "tickers": ["BTC/USDT"],
+        "ticker_count": 412,
+    }
+    monkeypatch.setattr("urllib.request.urlopen", _mock_urlopen_recording(detail, seen))
+    d = c.asset("CR:BTC")
+    assert seen == ["http://nxr/v1/assets/CR%3ABTC"]
+    assert d.ticker_count == 412
+    assert d.markets[0].venue == "Binance" and d.markets[0].inverted is False
+
+
+def test_assets_last_passes_the_quote_override(monkeypatch):
+    seen: list[str] = []
+    rows = [{"asset": "BTC", "quote": "USDC", "mid": 60006.0, "status": "fresh"}]
+    monkeypatch.setattr("urllib.request.urlopen", _mock_urlopen_recording(rows, seen))
+    c = ergo.NxrClient(base_url="http://nxr")
+    assert c.assets_last("USDC")[0]["quote"] == "USDC"
+    c.assets_last()
+    assert seen == [
+        "http://nxr/v1/assets/last?quote=USDC",
+        "http://nxr/v1/assets/last",
+    ]
+
+
+def test_tickers_detail_for_sends_an_explicit_list(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _mock_urlopen_recording(
+            {"idx_aggregation_ms": 50, "count": 0, "tickers": []}, seen
+        ),
+    )
+    c = ergo.NxrClient(base_url="http://nxr")
+    c.tickers_detail_for(["BTC/USDT", "ETH/USDT"])
+    assert seen == ["http://nxr/v1/tickers/detail?symbols=BTC-USDT%2CETH-USDT"]
+    # An empty list is answered locally: no request, no 400.
+    seen.clear()
+    assert c.tickers_detail_for([]).count == 0
+    assert seen == []
+
+
+def test_tickers_ids_reads_the_packed_alias(monkeypatch):
+    seen: list[str] = []
+    ids = [435315551398526976, 1, 2**64 - 1]
+    body = b"".join(i.to_bytes(8, "little") for i in ids)
+
+    class _Resp:
+        def __enter__(self_inner):
+            return self_inner
+
+        def __exit__(self_inner, *exc):
+            return False
+
+        def read(self_inner):
+            return body
+
+    def _factory(req, *_a, **_k):
+        seen.append(req.full_url)
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _factory)
+    c = ergo.NxrClient(base_url="http://nxr")
+    assert c.tickers_ids() == ids
+    assert seen == ["http://nxr/v1/tickers/ids"]

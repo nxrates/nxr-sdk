@@ -62,8 +62,13 @@ sub.close();
 | `client.metrics()`                          | `GET /metrics`                    | Prometheus text  |
 | `client.providers()`                        | `GET /v1/providers`               | JSON             |
 | `client.tickers()`                          | `GET /v1/tickers`                 | JSON             |
+| `client.counts()`                           | `GET /v1/counts`                  | JSON, cached     |
+| `client.assets()`                           | `GET /v1/assets`                  | JSON, cached     |
+| `client.asset(ident)`                       | `GET /v1/assets/{ident}`          | JSON             |
+| `client.assetsLast(quote?)`                 | `GET /v1/assets/last?quote=`      | JSON             |
 | `client.tickersDetail({ refresh? })`        | `GET /v1/tickers/detail`          | JSON, cached     |
-| `client.tickersPacked()`                    | `GET /v1/tickers/detail?packed=1` | LE `u64` array   |
+| `client.tickersDetailFor([syms])`           | `GET /v1/tickers/detail?symbols=` | JSON, max 1000   |
+| `client.tickersIds()`                       | `GET /v1/tickers/ids`             | LE `u64` array   |
 | `client.tickerDetail(ident)`                | `GET /v1/tickers/detail/{ident}`  | JSON             |
 | `client.price(tickerId)`                    | `GET /v1/price/{ticker_id}`       | JSON             |
 | `client.last([tickerId, ...])`              | `GET /v1/last?symbols=...`        | JSON             |

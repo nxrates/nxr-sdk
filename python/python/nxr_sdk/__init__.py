@@ -44,6 +44,9 @@ from nxr_sdk.ergo import (
     StreamIndexRecord,
     TickersDetailResponse,
     TickerDetail,
+    Counts,
+    Asset,
+    AssetMarket,
     KindSchema,
     ShardWindow,
     SynthLeg,
@@ -53,6 +56,7 @@ from nxr_sdk.ergo import (
     DEFAULT_KIND,
     DEFAULT_INSTRUMENT_TYPE,
     VALID_KINDS,
+    DETAIL_MAX_IDENTS,
 )
 from nxr_sdk.errors import (
     PlanLimitError,
@@ -110,6 +114,9 @@ __all__ = [
     "StreamIndexRecord",
     "TickersDetailResponse",
     "TickerDetail",
+    "Counts",
+    "Asset",
+    "AssetMarket",
     "KindSchema",
     "ShardWindow",
     "SynthLeg",
@@ -119,6 +126,7 @@ __all__ = [
     "DEFAULT_KIND",
     "DEFAULT_INSTRUMENT_TYPE",
     "VALID_KINDS",
+    "DETAIL_MAX_IDENTS",
     # plan-tier errors
     "PlanLimitError",
     "parse_plan_limit_error",

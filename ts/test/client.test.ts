@@ -165,17 +165,110 @@ describe('NxrClient REST', () => {
     await expect(client.tickerDetail('FX:BTC/FX:USD')).rejects.toThrow('HTTP 404');
   });
 
-  it('tickersPacked decodes the LE u64 catalogue', async () => {
+  it('tickersIds decodes the LE u64 catalogue', async () => {
     const ids = [435315551398526976n, 1n, 2n ** 64n - 1n];
     const buf = new Uint8Array(ids.length * 8);
     const dv = new DataView(buf.buffer);
     ids.forEach((id, i) => dv.setBigUint64(i * 8, id, true));
     const fetchMock = makeFetch(async (url) => {
-      expect(url).toBe('http://nxr/v1/tickers/detail?packed=1');
+      expect(url).toBe('http://nxr/v1/tickers/ids');
       return new Response(buf, { status: 200 });
     });
     const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
-    expect(await client.tickersPacked()).toEqual(ids);
+    expect(await client.tickersIds()).toEqual(ids);
+  });
+
+  it('counts() hits the cheap endpoint, not a ticker list', async () => {
+    const sample = {
+      assets: 409,
+      tickers: 156656,
+      registered_tickers: 3445,
+      venues: 12,
+      markets: 83,
+      aggregation_interval_ms: 50,
+    };
+    const fetchMock = makeFetch(async (url) => {
+      expect(url).toBe('http://nxr/v1/counts');
+      return new Response(JSON.stringify(sample), { status: 200 });
+    });
+    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
+    expect(await client.counts()).toEqual(sample);
+  });
+
+  it('assets() and asset() use the asset routes and keep the class pin', async () => {
+    const row = {
+      asset: 'BTC',
+      class: 'CR',
+      class_id: 2001,
+      asset_id: 133969,
+      storage_quote: 'USD',
+      market_count: 3,
+      venue_count: 2,
+      native_ticker: 'BTC/USDT',
+    };
+    let seen: string[] = [];
+    const fetchMock = makeFetch(async (url) => {
+      seen.push(url);
+      return new Response(
+        JSON.stringify(
+          url.endsWith('/v1/assets')
+            ? [row]
+            : { ...row, markets: [], tickers: ['BTC/USDT'], ticker_count: 412 },
+        ),
+        { status: 200 },
+      );
+    });
+    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
+    expect(await client.assets()).toEqual([row]);
+    const d = await client.asset('CR:BTC');
+    expect(d.ticker_count).toBe(412);
+    expect(seen).toEqual(['http://nxr/v1/assets', 'http://nxr/v1/assets/CR%3ABTC']);
+  });
+
+  it('assetsLast() passes the quote override through', async () => {
+    const seen: string[] = [];
+    const fetchMock = makeFetch(async (url) => {
+      seen.push(url);
+      return new Response(
+        JSON.stringify([
+          {
+            asset: 'BTC',
+            quote: 'USDC',
+            ticker: '435315551398526976',
+            mid: 60006,
+            bid: 60000,
+            ask: 60012,
+            ci: 42,
+            confidence: 4,
+            flags: 1,
+            age_ms: 25,
+            status: 'fresh',
+          },
+        ]),
+        { status: 200 },
+      );
+    });
+    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
+    const rows = await client.assetsLast('USDC');
+    expect(rows[0]!.ticker).toBe(435315551398526976n);
+    expect(rows[0]!.quote).toBe('USDC');
+    await client.assetsLast();
+    expect(seen).toEqual(['http://nxr/v1/assets/last?quote=USDC', 'http://nxr/v1/assets/last']);
+  });
+
+  it('tickersDetailFor() sends an explicit list and stays off the bulk body', async () => {
+    const fetchMock = makeFetch(async (url) => {
+      expect(url).toBe('http://nxr/v1/tickers/detail?symbols=BTC-USDT%2CETH-USDT');
+      return new Response(
+        JSON.stringify({ idx_aggregation_ms: 50, count: 0, tickers: [] }),
+        { status: 200 },
+      );
+    });
+    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
+    await client.tickersDetailFor(['BTC/USDT', 'ETH/USDT']);
+    // An empty list is answered locally: no request, no 400.
+    const none = await client.tickersDetailFor([]);
+    expect(none.count).toBe(0);
   });
 
   it('price() resolves null when ticker is unknown', async () => {

@@ -54,7 +54,7 @@ from __future__ import annotations
 import json
 import struct
 from dataclasses import dataclass, field
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional, Sequence
 
 
 # Default endpoint for the public API.
@@ -68,6 +68,10 @@ DEFAULT_INSTRUMENT_TYPE = "spot"
 # Valid data kinds. `kline` = s10 OHLC, `renko` = volatility-calibrated brick,
 # `idx` = raw IndexRecord stream (the highest-fidelity tick aggregate we ship).
 VALID_KINDS = ("idx", "kline", "renko")
+
+#: Server-side ceiling on ``/v1/tickers/detail?ids=|symbols=``. Over it the
+#: server returns 400; it never truncates.
+DETAIL_MAX_IDENTS = 1000
 
 
 # ── Typed view of /v1/tickers/detail ────────────────────────────────────
@@ -178,6 +182,86 @@ class TickersDetailResponse:
         return None
 
 
+@dataclass
+class Counts:
+    """``/v1/counts`` -- structural cardinalities. Cheap enough to poll."""
+
+    assets: int = 0
+    #: Derived universe size: every ordered pair the resolver can serve.
+    tickers: int = 0
+    #: The registered subset that owns shards on disk.
+    registered_tickers: int = 0
+    venues: int = 0
+    markets: int = 0
+    aggregation_interval_ms: int = 0
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Counts":
+        return cls(**{f: int(d.get(f, 0)) for f in cls.__dataclass_fields__})
+
+
+@dataclass
+class AssetMarket:
+    """One scraped market of an asset, from ``/v1/assets/{ident}``."""
+
+    venue: str = ""
+    pair: str = ""
+    volume_usd: float = 0.0
+    #: True when the asset is the QUOTE side of ``pair``.
+    inverted: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "AssetMarket":
+        return cls(
+            venue=str(d.get("venue", "")),
+            pair=str(d.get("pair", "")),
+            volume_usd=float(d.get("volume_usd", 0.0)),
+            inverted=bool(d.get("inverted", False)),
+        )
+
+
+@dataclass
+class Asset:
+    """One row of ``/v1/assets``; ``/v1/assets/{ident}`` fills the rest.
+
+    ``markets`` / ``tickers`` are empty on the list endpoint by design: that is
+    what keeps it small. ``ticker_count`` is the UNTRUNCATED total behind the
+    capped ``tickers`` sample.
+    """
+
+    asset: str = ""
+    #: Two-letter MITCH class alias ("CR" | "FX" | "EQ" | "IP" | ..).
+    cls_: str = ""
+    class_id: int = 0
+    #: Packed 32-bit asset id (4-bit class + 16-bit class_id).
+    asset_id: int = 0
+    #: PUBLISHED denomination, fixed per asset. Never the (hourly) pivot.
+    storage_quote: str = ""
+    market_count: int = 0
+    venue_count: int = 0
+    native_ticker: Optional[str] = None
+    markets: List[AssetMarket] = field(default_factory=list)
+    tickers: List[str] = field(default_factory=list)
+    ticker_count: int = 0
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Asset":
+        return cls(
+            asset=str(d.get("asset", "")),
+            # `class` is a Python keyword, so the field carries a trailing _.
+            cls_=str(d.get("class", "")),
+            class_id=int(d.get("class_id", 0)),
+            asset_id=int(d.get("asset_id", 0)),
+            storage_quote=str(d.get("storage_quote", "")),
+            market_count=int(d.get("market_count", 0)),
+            venue_count=int(d.get("venue_count", 0)),
+            native_ticker=d.get("native_ticker"),
+            markets=[AssetMarket.from_dict(m) for m in d.get("markets", []) or []],
+            tickers=[str(t) for t in d.get("tickers", []) or []],
+            ticker_count=int(d.get("ticker_count", 0)),
+        )
+
+
 def _norm_pair(base: str, quote: str) -> str:
     """Normalize (base, quote) into the canonical "BASE/QUOTE" form."""
     return f"{base.upper()}/{quote.upper()}"
@@ -259,7 +343,8 @@ class NxrClient:
         """
         if refresh or self._detail_cache is None:
             # ``?native=1``: the registered subset carrying ``kinds`` + shard
-            # status. The default body is the FULL derived universe (~157k rows).
+            # status. It is also the unparameterised body; the derived universe
+            # has no JSON shape at all (see ``tickers_ids``).
             raw = _fetch_json(self._base_url, "/v1/tickers/detail?native=1", self._api_key)
             self._detail_cache = TickersDetailResponse.from_dict(raw)
             # Populate the symbol→id cache so resolve() short-circuits.
@@ -281,19 +366,68 @@ class NxrClient:
         path = f"/v1/tickers/detail/{_url_ident(ident)}"
         return TickerDetail.from_dict(_fetch_json(self._base_url, path, self._api_key))
 
-    def tickers_packed(self) -> List[int]:
+    def tickers_detail_for(self, syms: Sequence[str]) -> TickersDetailResponse:
+        """Rich rows for an EXPLICIT list, ``/v1/tickers/detail?symbols=``.
+
+        Capped at :data:`DETAIL_MAX_IDENTS` server-side: over it the server
+        returns 400 rather than truncating, so this raises instead of quietly
+        returning a short body. Unresolvable entries are omitted from the reply.
+        """
+        if not syms:
+            return TickersDetailResponse(idx_aggregation_ms=0, count=0)
+        from urllib.parse import quote as _q
+
+        csv = _q(",".join(s.replace("/", "-") for s in syms), safe="")
+        path = f"/v1/tickers/detail?symbols={csv}"
+        return TickersDetailResponse.from_dict(_fetch_json(self._base_url, path, self._api_key))
+
+    def tickers_ids(self) -> List[int]:
         """The FULL servable universe as MITCH ticker ids, packed.
 
-        ``/v1/tickers/detail?packed=1``: 1.25 MB against the 32 MB the JSON body
-        costs. Pair with :meth:`ticker_detail` for the rows actually wanted.
+        ``/v1/tickers/ids``: 1.25 MB against the ~32 MB a JSON body would cost.
+        Pair with :meth:`ticker_detail` for the rows actually wanted.
         """
         buf = _get(
             self._base_url,
-            "/v1/tickers/detail?packed=1",
+            "/v1/tickers/ids",
             "application/vnd.nxr.u64",
             self._api_key,
         )
         return decode_packed_ids(buf)
+
+    def counts(self) -> Counts:
+        """``/v1/counts`` -- assets, tickers, venues, markets. The cheap poll."""
+        return Counts.from_dict(_fetch_json(self._base_url, "/v1/counts", self._api_key))
+
+    def assets(self) -> List[Asset]:
+        """``/v1/assets`` -- the ~400 assets, one small row each."""
+        raw = _fetch_json(self._base_url, "/v1/assets", self._api_key)
+        return [Asset.from_dict(a) for a in raw or []]
+
+    def asset(self, ident: str) -> Asset:
+        """``/v1/assets/{ident}`` -- one asset, its markets, the tickers it bases.
+
+        ``ident`` is a bare symbol (``BTC``) or class-pinned (``CR:BTC``). A pin
+        FORCES that asset class: a mismatch is a 404, never a silent hit in
+        another class.
+        """
+        from urllib.parse import quote as _q
+
+        path = f"/v1/assets/{_q(ident, safe='')}"
+        return Asset.from_dict(_fetch_json(self._base_url, path, self._api_key))
+
+    def assets_last(self, quote: Optional[str] = None) -> List[dict[str, Any]]:
+        """``/v1/assets/last`` -- last price per asset.
+
+        Each row is denominated in its own ``storage_quote`` unless ``quote``
+        re-denominates them all. Composed on read; nothing is persisted in the
+        override basis. Rows carry the snapshot shape (mid/bid/ask/age_ms/
+        status/flags) plus ``asset`` and ``quote``.
+        """
+        from urllib.parse import quote as _q
+
+        path = "/v1/assets/last" + (f"?quote={_q(quote, safe='')}" if quote else "")
+        return list(_fetch_json(self._base_url, path, self._api_key) or [])
 
     def resolve_ticker_id(self, ticker: str) -> Optional[int]:
         """Resolve a ticker string ("BTC/USDT") to its MITCH ticker_id.
@@ -449,7 +583,7 @@ def _get(base_url: str, path: str, accept: str, api_key: str | None = None) -> b
         return resp.read()
 
 
-def _fetch_json(base_url: str, path: str, api_key: str | None = None) -> dict[str, Any]:
+def _fetch_json(base_url: str, path: str, api_key: str | None = None) -> Any:
     return json.loads(_get(base_url, path, "application/json", api_key).decode("utf-8"))
 
 
@@ -469,7 +603,7 @@ def decode_packed_ids(buf: bytes) -> List[int]:
 
     Bare little-endian ``u64`` MITCH ticker ids, 8 B a row, no header;
     ``len(buf) // 8`` is the row count. A ticker id encodes instrument type and
-    both asset class/id pairs, so this 1.25 MB body replaces the 32 MB JSON one
+    both asset class/id pairs, so this 1.25 MB body replaces the ~32 MB JSON one
     for a caller holding the asset registry.
     """
     if len(buf) % 8:

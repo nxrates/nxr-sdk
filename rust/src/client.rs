@@ -63,6 +63,10 @@ pub const DEFAULT_QUOTE: &str = "USDT";
 /// Smart-default data kind when none is provided.
 pub const DEFAULT_KIND: DataKind = DataKind::Renko;
 
+/// Server-side ceiling on `/v1/tickers/detail?ids=|symbols=`. Over it the
+/// server returns 400; it never truncates.
+pub const DETAIL_MAX_IDENTS: usize = 1000;
+
 // ── Public DTOs (subset that matters at the SDK boundary) ────────────────
 
 /// Snapshot row served identically by `/v1/price/{ticker}`, `/v1/last` and
@@ -177,6 +181,70 @@ impl TickersDetailResponse {
     pub fn by_ticker(&self, ticker: &str) -> Option<&TickerDetail> {
         self.tickers.iter().find(|t| t.ticker == ticker)
     }
+}
+
+/// `/v1/counts` — structural cardinalities. Cheap enough to poll.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Counts {
+    pub assets: usize,
+    /// Derived universe size: every ordered pair the resolver can serve.
+    pub tickers: usize,
+    /// The registered subset that owns shards on disk.
+    pub registered_tickers: usize,
+    pub venues: usize,
+    pub markets: usize,
+    pub aggregation_interval_ms: u64,
+}
+
+/// One row of `/v1/assets`. ~400 of these against 156k tickers.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AssetRow {
+    pub asset: String,
+    /// Two-letter MITCH class alias (`CR`, `FX`, `EQ`, `IP`, ...).
+    pub class: String,
+    pub class_id: u16,
+    /// Packed 32-bit asset id (4-bit class + 16-bit class_id).
+    pub asset_id: u32,
+    /// PUBLISHED denomination, fixed per asset. Not the pivot (an internal
+    /// aggregation basis that may move hourly).
+    pub storage_quote: String,
+    pub market_count: usize,
+    pub venue_count: usize,
+    #[serde(default)]
+    pub native_ticker: Option<String>,
+}
+
+/// One scraped market of an asset, from `/v1/assets/{ident}`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AssetMarket {
+    pub venue: String,
+    pub pair: String,
+    pub volume_usd: f64,
+    /// `true` when the asset is the QUOTE side of `pair`.
+    pub inverted: bool,
+}
+
+/// `/v1/assets/{ident}` — an [`AssetRow`] plus its markets and a capped sample
+/// of the tickers it bases. `ticker_count` is the untruncated total.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AssetDetail {
+    #[serde(flatten)]
+    pub row: AssetRow,
+    #[serde(default)]
+    pub markets: Vec<AssetMarket>,
+    #[serde(default)]
+    pub tickers: Vec<String>,
+    pub ticker_count: usize,
+}
+
+/// One row of `/v1/assets/last`: a [`SnapshotResponse`] tagged with the asset
+/// and the denomination it was composed in.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AssetLast {
+    pub asset: String,
+    pub quote: String,
+    #[serde(flatten)]
+    pub px: SnapshotResponse,
 }
 
 // ── Range / history options ──────────────────────────────────────────────
@@ -326,13 +394,45 @@ impl NxrClient {
         self.json_get("/v1/tickers").await
     }
 
-    /// `GET /v1/tickers/detail` — universal integrator inventory (cached).
+    /// `GET /v1/counts` — assets, tickers, venues, markets. The cheap poll.
+    pub async fn counts(&self) -> Result<Counts> {
+        self.json_get("/v1/counts").await
+    }
+
+    /// `GET /v1/assets` — one row per asset (~400), no market lists.
+    pub async fn assets(&self) -> Result<Vec<AssetRow>> {
+        self.json_get("/v1/assets").await
+    }
+
+    /// `GET /v1/assets/{ident}` — one asset with its markets and a capped
+    /// sample of the tickers it bases. `ident` is a bare symbol (`BTC`) or
+    /// class-pinned (`CR:BTC`); a pin FORCES that class, so a mismatch is a 404
+    /// rather than a silent hit in another class.
+    pub async fn asset(&self, ident: &str) -> Result<AssetDetail> {
+        self.json_get(&format!("/v1/assets/{}", urlencoding(ident)))
+            .await
+    }
+
+    /// `GET /v1/assets/last` — last price per asset in its own storage quote,
+    /// or all in `quote` when given. Composed on read.
+    pub async fn assets_last(&self, quote: Option<&str>) -> Result<Vec<AssetLast>> {
+        let path = match quote {
+            Some(q) => format!("/v1/assets/last?quote={}", urlencoding(q)),
+            None => "/v1/assets/last".to_string(),
+        };
+        self.json_get(&path).await
+    }
+
+    /// `GET /v1/tickers/detail` — the REGISTERED inventory (cached).
+    ///
+    /// Unparameterised, so it serves the registered subset that carries `kinds`
+    /// + shard status. There is no whole-universe JSON body: use
+    /// [`Self::tickers_ids`] for the id universe and
+    /// [`Self::tickers_detail_for`] for rich rows on specific tickers.
     pub async fn tickers_detail(&self) -> Result<TickersDetailResponse> {
         if let Some(d) = self.detail_cache.lock().ok().and_then(|g| g.clone()) {
             return Ok(d);
         }
-        // `?native=1`: the registered subset that carries `kinds` + shard status.
-        // The default body is the FULL derived universe (~157k rows).
         let d: TickersDetailResponse = self.json_get("/v1/tickers/detail?native=1").await?;
         if let Ok(mut g) = self.detail_cache.lock() {
             *g = Some(d.clone());
@@ -368,13 +468,33 @@ impl NxrClient {
             .await
     }
 
-    /// `GET /v1/tickers/detail?packed=1`: the FULL servable universe as MITCH
-    /// ticker ids, 1.25 MB rather than the 32 MB the JSON body costs. A ticker
-    /// id already encodes instrument type and both asset class/id pairs, so a
+    /// `GET /v1/tickers/detail?symbols=…` — rich rows for an EXPLICIT list, up
+    /// to [`DETAIL_MAX_IDENTS`] entries. Over the cap the server refuses with a
+    /// 400 rather than truncating, so this errors instead of quietly returning
+    /// a short body; split the request. Unresolvable entries are omitted.
+    pub async fn tickers_detail_for(&self, syms: &[&str]) -> Result<TickersDetailResponse> {
+        if syms.is_empty() {
+            return Ok(TickersDetailResponse {
+                idx_aggregation_ms: 0,
+                count: 0,
+                tickers: vec![],
+            });
+        }
+        let csv = syms.iter().map(|s| url_sym(s)).collect::<Vec<_>>().join(",");
+        self.json_get(&format!(
+            "/v1/tickers/detail?symbols={}",
+            urlencoding(&csv)
+        ))
+        .await
+    }
+
+    /// `GET /v1/tickers/ids`: the FULL servable universe as MITCH ticker ids,
+    /// 1.25 MB rather than the ~32 MB a JSON body would cost. A ticker id
+    /// already encodes instrument type and both asset class/id pairs, so a
     /// caller holding the asset registry decodes a row from the id alone; use
     /// [`Self::ticker_detail`] for the rows it actually wants.
-    pub async fn tickers_packed(&self) -> Result<Vec<u64>> {
-        let bytes = self.bytes_get("/v1/tickers/detail?packed=1").await?;
+    pub async fn tickers_ids(&self) -> Result<Vec<u64>> {
+        let bytes = self.bytes_get("/v1/tickers/ids").await?;
         decode_packed_ids(&bytes)
     }
 

@@ -41,8 +41,12 @@ import {
   type WsTick,
 } from './decode.js';
 import type {
+  AssetDetail,
+  AssetLast,
+  AssetRow,
   Bar,
   BarKind,
+  Counts,
   DataKind,
   FreshnessResponse,
   IndexRecord,
@@ -61,6 +65,12 @@ export const DEFAULT_BASE_URL = 'https://api.nxrates.com';
 export const DEFAULT_QUOTE = 'USDT';
 export const DEFAULT_KIND: DataKind = 'renko';
 export const DEFAULT_INSTRUMENT_TYPE = 'spot';
+
+/**
+ * Server-side ceiling on `/v1/tickers/detail?ids=|symbols=`. Over it the server
+ * returns 400; it never truncates.
+ */
+export const DETAIL_MAX_IDENTS = 1000;
 
 // ── WebSocket state ────────────────────────────────────────────────────────
 
@@ -243,34 +253,84 @@ export class NxrClient {
     return new Map(Object.entries(data).map(([id, name]) => [Number(id), name]));
   }
 
+  /** Structural cardinalities from `/v1/counts`. The cheap dashboard poll. */
+  async counts(): Promise<Counts> {
+    return this.json<Counts>('/v1/counts');
+  }
+
+  /** The ~400 assets from `/v1/assets`, one small row each, no market lists. */
+  async assets(): Promise<AssetRow[]> {
+    return this.json<AssetRow[]>('/v1/assets');
+  }
+
   /**
-   * Universal integrator inventory from `/v1/tickers/detail`.
-   * Cached on the instance after first call. Pass `refresh: true` to force re-fetch.
+   * One asset from `/v1/assets/{ident}`: its row, its markets, and a capped
+   * sample of the tickers it bases. `ident` is a bare symbol (`BTC`) or
+   * class-pinned (`CR:BTC`); a pin FORCES that class, so a mismatch is a 404
+   * rather than a silent hit in another class.
+   */
+  async asset(ident: string): Promise<AssetDetail> {
+    return this.json<AssetDetail>(`/v1/assets/${encodeURIComponent(ident)}`);
+  }
+
+  /**
+   * Last price per asset from `/v1/assets/last`, each in its own storage quote
+   * unless `quote` re-denominates them all. Composed on read.
+   */
+  async assetsLast(quote?: string): Promise<AssetLast[]> {
+    type Raw = Array<Omit<AssetLast, 'ticker'> & { ticker: number | string }>;
+    const q = quote ? `?quote=${encodeURIComponent(quote)}` : '';
+    const data = await this.json<Raw>(`/v1/assets/last${q}`);
+    return data.map((d) => ({ ...d, ticker: BigInt(d.ticker) }));
+  }
+
+  private toDetail(raw: {
+    idx_aggregation_ms: number;
+    count: number;
+    tickers: Array<Omit<TickerDetail, 'ticker_id'> & { ticker_id: number | string }>;
+  }): TickersDetailResponse {
+    return {
+      idx_aggregation_ms: raw.idx_aggregation_ms,
+      count: raw.count,
+      tickers: raw.tickers.map((r) => ({ ...r, ticker_id: BigInt(r.ticker_id) })),
+    };
+  }
+
+  /**
+   * The REGISTERED inventory from `/v1/tickers/detail`, cached on the instance
+   * after the first call. Pass `refresh: true` to force a re-fetch.
+   *
+   * There is no whole-universe JSON body: take the id universe from
+   * `tickersIds()` and rich rows for specific tickers from `tickersDetailFor()`.
    */
   async tickersDetail(opts: { refresh?: boolean } = {}): Promise<TickersDetailResponse> {
     if (!opts.refresh && this.detailCache) return this.detailCache;
     type RawRow = Omit<TickerDetail, 'ticker_id'> & { ticker_id: number | string };
     type Raw = Omit<TickersDetailResponse, 'tickers'> & { tickers: RawRow[] };
-    // `?native=1`: the registered subset that carries `kinds` + shard status.
-    // The default body is the FULL derived universe (~157k rows) — for that,
-    // read the packed id array (`Accept: application/vnd.nxr.u64`).
-    const raw = await this.json<Raw>('/v1/tickers/detail?native=1');
-    const tickers: TickerDetail[] = raw.tickers.map((r) => ({
-      ...r,
-      ticker_id: BigInt(r.ticker_id),
-    }));
-    const resolved: TickersDetailResponse = {
-      idx_aggregation_ms: raw.idx_aggregation_ms,
-      count: raw.count,
-      tickers,
-    };
+    const resolved = this.toDetail(await this.json<Raw>('/v1/tickers/detail?native=1'));
     this.detailCache = resolved;
     // Populate the symbol→id cache so resolve() short-circuits.
     this.symbolToId.clear();
-    for (const t of tickers) {
+    for (const t of resolved.tickers) {
       if (t.ticker_id !== 0n) this.symbolToId.set(t.ticker, t.ticker_id);
     }
     return resolved;
+  }
+
+  /**
+   * Rich rows for an EXPLICIT list from `/v1/tickers/detail?symbols=`, up to
+   * `DETAIL_MAX_IDENTS`. Over the cap the server returns 400 rather than
+   * truncating, so this throws instead of quietly returning a short body.
+   * Unresolvable entries are omitted from the reply.
+   */
+  async tickersDetailFor(syms: Sym[]): Promise<TickersDetailResponse> {
+    if (syms.length === 0) return { idx_aggregation_ms: 0, count: 0, tickers: [] };
+    type RawRow = Omit<TickerDetail, 'ticker_id'> & { ticker_id: number | string };
+    type Raw = Omit<TickersDetailResponse, 'tickers'> & { tickers: RawRow[] };
+    const csv = syms.map((s) => urlSym(s)).join(',');
+    return this.toDetail(
+      await this.json<Raw>(`/v1/tickers/detail?symbols=${encodeURIComponent(csv)}`),
+    );
   }
 
   /**
@@ -289,12 +349,12 @@ export class NxrClient {
   }
 
   /**
-   * The FULL servable universe as MITCH ticker ids from
-   * `/v1/tickers/detail?packed=1`: 1.25 MB against the 32 MB the JSON body
-   * costs. Pair with `tickerDetail()` for the rows a caller actually wants.
+   * The FULL servable universe as MITCH ticker ids from `/v1/tickers/ids`:
+   * 1.25 MB against the ~32 MB a JSON body would cost. Pair with
+   * `tickerDetail()` / `tickersDetailFor()` for the rows a caller wants.
    */
-  async tickersPacked(): Promise<bigint[]> {
-    return decodePackedIds(await this.bytes('/v1/tickers/detail?packed=1'));
+  async tickersIds(): Promise<bigint[]> {
+    return decodePackedIds(await this.bytes('/v1/tickers/ids'));
   }
 
   // ── REST: market data ───────────────────────────────────────────────────

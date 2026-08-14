@@ -60,8 +60,13 @@ asyncio.run(consume())
 
 | Method                              | Purpose                                                       |
 | ----------------------------------- | ------------------------------------------------------------- |
+| `nxr.counts()`                      | `/v1/counts` → `Counts` dataclass (~110 B)                    |
+| `nxr.assets()`                      | `/v1/assets` → `list[Asset]`, the ~400 assets                 |
+| `nxr.asset(ident)`                  | `/v1/assets/{ident}` → one `Asset` + markets + tickers        |
+| `nxr.assets_last(quote=None)`       | `/v1/assets/last?quote=` → last price per asset               |
 | `nxr.tickers_detail(refresh=False)` | `/v1/tickers/detail` → `TickersDetailResponse` dataclass      |
-| `nxr.tickers_packed()`             | `/v1/tickers/detail?packed=1` → `list[int]` of MITCH ids     |
+| `nxr.tickers_detail_for([syms])`    | `/v1/tickers/detail?symbols=` → rich rows, max 1000           |
+| `nxr.tickers_ids()`                 | `/v1/tickers/ids` → `list[int]` of MITCH ids                  |
 | `nxr.ticker_detail(ident)`         | `/v1/tickers/detail/{ident}` → one `TickerDetail`            |
 | `nxr.resolve_ticker_id(sym)`        | "BTC/USDT" → MITCH ticker_id (cached)                         |
 | `nxr.history(...)` / `nxr.get()...` | Unified historical fetch (idx / kline / renko)                |

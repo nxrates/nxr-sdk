@@ -6,27 +6,78 @@ end of fixed-width structs. REST surface follows the same additive rule.
 
 ## Unreleased
 
-Single-ticker lookup, in every binding. `/v1/tickers/detail` now enumerates the
-FULL derived universe (156k+ pairs), so its JSON body is ~32 MB and the cheap
-bulk path is the packed `u64` id array (1.25 MB). Per-ticker richness moved to
-`GET /v1/tickers/detail/{ident}`, which serves one row for a decimal MITCH id, a
-symbol (`BTC/USD` or `BTC-USD`), or a class-pinned symbol (`CR:BTC/FX:USD`). A
-class pin FORCES that asset class and 404s rather than falling back, which is
-the ambiguity it exists to remove. Additive: `tickers_detail()` is unchanged and
-stays pinned to `?native=1`.
+⚠ **BREAKING: `/v1/tickers/detail` no longer serves the whole universe.** The
+unparameterised JSON body used to be the full DERIVED universe (156,656 rows,
+~32 MB). That shape is REMOVED, not moved behind a flag: 32 MB per call should
+never happen. The endpoint is now input-limited.
 
-- **Rust**: `NxrClient::ticker_detail(ident)`, `NxrClient::tickers_packed()`,
-  and `client::decode_packed_ids(&[u8]) -> Vec<u64>`.
-- **TypeScript**: `client.tickerDetail(ident)`, `client.tickersPacked()`, and
-  the exported `decodePackedIds(Uint8Array) -> bigint[]`. `TickerDetail.kinds`
-  is now optional: a derived pair owns no shards, so the server omits the field
-  rather than fabricating a shard window.
-- **Python**: `NxrClient.ticker_detail(ident)`, `NxrClient.tickers_packed()`,
-  and the exported `decode_packed_ids(bytes) -> list[int]`. The ergo HTTP path
-  now forwards `X-NXR-Key` where it previously dropped it.
+- `?ids=` (comma-separated decimal / `0x` hex MITCH ids) and/or `?symbols=`
+  (comma-separated identifiers in any form the single lookup accepts, class pins
+  included) return rich rows for exactly those, capped at **1000** entries. Over
+  the cap the server answers `400` naming the cap and the count received. It
+  never truncates: a short body that looks complete is the failure mode the cap
+  exists to prevent.
+- No arguments (and `?native=1`) serve the REGISTERED subset, ~4 MB, unchanged.
+  Every SDK binding already pinned `?native=1` on its bulk inventory call, so no
+  SDK caller changes behaviour.
+- The bulk shape is `GET /v1/tickers/ids`: bare LE `u64` ids, 8 B a row, 1.25 MB
+  for the whole universe. `?packed=1` on `/v1/tickers/detail` serves the same
+  cached body. No CSV variant: 8 bytes an id beats ~20+ ASCII characters an id
+  and needs no parsing, so CSV would be a larger body that costs a tokenizer.
+
+**New asset-centric surface.** There are ~400 assets against 156k tickers, so
+the human-scale unit gets its own endpoints. All read-only RAM, all composed on
+read; nothing here is persisted.
+
+- `GET /v1/counts`: assets, tickers, registered tickers, venues, markets,
+  `aggregation_interval_ms`. ~110 B. What a dashboard polls instead of
+  downloading a ticker list to measure its length.
+- `GET /v1/assets`: the ~400 assets, one small row each (~60 KB): `asset`,
+  `class`, `class_id`, `asset_id`, `storage_quote`, `market_count`,
+  `venue_count`, `native_ticker`. Market lists are omitted here by design.
+- `GET /v1/assets/{ident}`: one asset plus its markets and the tickers it bases
+  (capped at 100, `ticker_count` carries the untruncated total). Accepts a bare
+  symbol (`BTC`) or a class pin (`CR:BTC`), with the same FORCED class
+  resolution as `/v1/tickers/detail/{ident}`: a mismatched pin is a 404.
+- `GET /v1/assets/last?quote=`: last price per asset in its own
+  `storage_quote`, or all re-denominated by `?quote=`. Rows carry the snapshot
+  shape plus `asset` and `quote`.
+
+Counts / assets / asset-detail carry strong ETags and honour `If-None-Match`.
+`/v1/assets/last` deliberately does not: a cached body would serve a stale mid.
+
+- **Rust**: `NxrClient::{counts, assets, asset, assets_last, tickers_detail_for}`,
+  the `Counts` / `AssetRow` / `AssetMarket` / `AssetDetail` / `AssetLast` DTOs,
+  and `DETAIL_MAX_IDENTS`. ⚠ `tickers_packed()` is RENAMED `tickers_ids()` and
+  now reads `/v1/tickers/ids`.
+- **TypeScript**: `client.{counts, assets, asset, assetsLast, tickersDetailFor}`,
+  the `Counts` / `AssetRow` / `AssetMarket` / `AssetDetail` / `AssetLast` types,
+  and the exported `DETAIL_MAX_IDENTS`. ⚠ `tickersPacked()` is RENAMED
+  `tickersIds()`.
+- **Python**: `NxrClient.{counts, assets, asset, assets_last, tickers_detail_for}`,
+  the `Counts` / `Asset` / `AssetMarket` dataclasses, and `DETAIL_MAX_IDENTS`.
+  ⚠ `tickers_packed()` is RENAMED `tickers_ids()`. `Asset.class` is spelled
+  `cls_` because `class` is a Python keyword.
 - **FFI / Java**: unchanged. Neither exposes an HTTP client (`sdk/ffi` is a
   codec/resolver shim by design, Java calls the REST surface with its stdlib),
   so there is no client surface to extend.
+
+### Earlier in this cycle
+
+Single-ticker lookup, in every binding: `GET /v1/tickers/detail/{ident}` serves
+one row for a decimal MITCH id, a symbol (`BTC/USD` or `BTC-USD`), or a
+class-pinned symbol (`CR:BTC/FX:USD`). A class pin FORCES that asset class and
+404s rather than falling back, which is the ambiguity it exists to remove.
+
+- **Rust**: `NxrClient::ticker_detail(ident)` and
+  `client::decode_packed_ids(&[u8]) -> Vec<u64>`.
+- **TypeScript**: `client.tickerDetail(ident)` and the exported
+  `decodePackedIds(Uint8Array) -> bigint[]`. `TickerDetail.kinds` is now
+  optional: a derived pair owns no shards, so the server omits the field rather
+  than fabricating a shard window.
+- **Python**: `NxrClient.ticker_detail(ident)` and the exported
+  `decode_packed_ids(bytes) -> list[int]`. The ergo HTTP path now forwards
+  `X-NXR-Key` where it previously dropped it.
 
 ## 2026-08-14
 

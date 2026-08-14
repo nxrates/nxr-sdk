@@ -70,8 +70,13 @@ cargo run --release --example quickstart
 | `c.health()`                          | `GET /health`                  | JSON value       |
 | `c.providers()`                       | `GET /v1/providers`            | JSON             |
 | `c.tickers()`                         | `GET /v1/tickers`              | JSON             |
+| `c.counts()`                          | `GET /v1/counts`               | JSON, cached     |
+| `c.assets()`                          | `GET /v1/assets`               | JSON, cached     |
+| `c.asset(ident)`                      | `GET /v1/assets/{ident}`       | JSON             |
+| `c.assets_last(quote?)`               | `GET /v1/assets/last?quote=`   | JSON             |
 | `c.tickers_detail()`                  | `GET /v1/tickers/detail`       | JSON, cached     |
-| `c.tickers_packed()`                  | `GET /v1/tickers/detail?packed=1` | LE `u64` array |
+| `c.tickers_detail_for(&[syms])`       | `GET /v1/tickers/detail?symbols=` | JSON, max 1000 |
+| `c.tickers_ids()`                     | `GET /v1/tickers/ids`          | LE `u64` array   |
 | `c.ticker_detail(ident)`              | `GET /v1/tickers/detail/{ident}` | JSON           |
 | `c.price(sym, max_age_ms?)`           | `GET /v1/price/{ticker}`       | JSON             |
 | `c.last(&[syms], max_age_ms?)`        | `GET /v1/last?symbols=...`     | JSON             |

@@ -136,7 +136,7 @@ export function decodeBarBatch(buf: Uint8Array): Bar[] {
  * MITCH ticker ids, 8 B a row, no header. `byteLength / 8` is the row count.
  *
  * A ticker id encodes instrument type and both asset class/id pairs, so the
- * 1.25 MB packed body replaces the 32 MB JSON one for callers that hold the
+ * 1.25 MB packed body replaces the ~32 MB JSON one for callers that hold the
  * asset registry; fetch the rows they want from `/v1/tickers/detail/{ident}`.
  */
 export function decodePackedIds(buf: Uint8Array): bigint[] {

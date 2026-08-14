@@ -135,8 +135,13 @@ async fn main() -> anyhow::Result<()> {
 | `GET /metrics`                        | `metrics()`          | Prometheus text  | (TS only — `metrics()` raw body)     |
 | `GET /v1/providers`                   | `providers()`        | JSON             | provider_id → name                   |
 | `GET /v1/tickers`                     | `tickers()`          | JSON             | live snapshot for every ticker       |
-| `GET /v1/tickers/detail`              | `tickersDetail()`    | JSON, **cached** | universal integrator inventory       |
-| `GET /v1/tickers/detail?packed=1`     | `tickersPacked()`    | LE `u64` array   | full universe, 1.25 MB not 32 MB     |
+| `GET /v1/counts`                      | `counts()`           | JSON, **cached** | assets/tickers/venues/markets, ~110 B |
+| `GET /v1/assets`                      | `assets()`           | JSON, **cached** | the ~400 assets, ~60 KB              |
+| `GET /v1/assets/{ident}`              | `asset(ident)`       | JSON             | one asset + markets + tickers        |
+| `GET /v1/assets/last?quote=`          | `assetsLast(quote?)` | JSON             | last px per asset, `?quote=` overrides |
+| `GET /v1/tickers/detail`              | `tickersDetail()`    | JSON, **cached** | REGISTERED subset (no whole universe) |
+| `GET /v1/tickers/detail?symbols=`     | `tickersDetailFor()` | JSON             | rich rows for an explicit list, max 1000 |
+| `GET /v1/tickers/ids`                 | `tickersIds()`       | LE `u64` array   | full universe, 1.25 MB not 32 MB     |
 | `GET /v1/tickers/detail/{ident}`      | `tickerDetail(id)`   | JSON             | one rich row: id, symbol, or `CR:BTC/FX:USD` |
 | `GET /v1/price/{ticker_id}`           | `price(id)`          | JSON             | single live snapshot                 |
 | `GET /v1/last?symbols=...`            | `last([ids])`        | JSON             | multi-ticker snapshot                |

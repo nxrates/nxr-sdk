@@ -245,3 +245,58 @@ export interface TickersDetailResponse {
   tickers: TickerDetail[];
 }
 
+/** `/v1/counts` — structural cardinalities. Cheap enough to poll. */
+export interface Counts {
+  assets: number;
+  /** Derived universe size: every ordered pair the resolver can serve. */
+  tickers: number;
+  /** The registered subset that owns shards on disk. */
+  registered_tickers: number;
+  venues: number;
+  markets: number;
+  aggregation_interval_ms: number;
+}
+
+/** One row of `/v1/assets`. ~400 of these against 156k tickers. */
+export interface AssetRow {
+  asset: string;
+  /** Two-letter MITCH class alias ("CR" | "FX" | "EQ" | "IP" | ..). */
+  class: string;
+  class_id: number;
+  /** Packed 32-bit asset id (4-bit class + 16-bit class_id). */
+  asset_id: number;
+  /**
+   * PUBLISHED denomination, fixed per asset. Not the pivot, which is an
+   * internal aggregation basis and may move hourly.
+   */
+  storage_quote: string;
+  market_count: number;
+  venue_count: number;
+  /** Registered pair this asset is the base of, `null` when composed-only. */
+  native_ticker: string | null;
+}
+
+/** One scraped market of an asset, from `/v1/assets/{ident}`. */
+export interface AssetMarket {
+  venue: string;
+  pair: string;
+  volume_usd: number;
+  /** `true` when the asset is the QUOTE side of `pair`. */
+  inverted: boolean;
+}
+
+/**
+ * `/v1/assets/{ident}` — an `AssetRow` plus its markets and a CAPPED sample of
+ * the tickers it bases. `ticker_count` is the untruncated total.
+ */
+export interface AssetDetail extends AssetRow {
+  markets: AssetMarket[];
+  tickers: string[];
+  ticker_count: number;
+}
+
+/** One row of `/v1/assets/last`, tagged with the denomination it composed in. */
+export interface AssetLast extends SnapshotResponse {
+  asset: string;
+  quote: string;
+}

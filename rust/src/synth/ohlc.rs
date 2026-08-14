@@ -76,22 +76,18 @@ pub struct TimedOhlcCount {
     pub count: u32,
 }
 
-const FOUR_LN2: f64 = 4.0 * std::f64::consts::LN_2;
-const INV_4LN2: f64 = 1.0 / FOUR_LN2;
+use crate::vol_estimator::FOUR_LN2;
+
 const V_FLOOR: f64 = 1e-12;
 
 /// Per-leg variance under chosen estimator. Returns `NaN` on invalid input.
 #[inline]
 fn leg_variance(k: &OhlcLite, est: VarianceEstimator) -> f64 {
     match est {
-        VarianceEstimator::Parkinson => {
-            let r = (k.h / k.l).ln();
-            INV_4LN2 * r * r
-        }
-        VarianceEstimator::RogersSatchell => {
-            // ONE RS kernel for the whole project (offline .vol, live ring, synth).
-            crate::vol_estimator::rs_variance(k.o, k.h, k.l, k.c)
-        }
+        // ONE kernel per estimator for the whole project (offline .vol, live
+        // ring, synth): see `crate::vol_estimator`.
+        VarianceEstimator::Parkinson => crate::vol_estimator::parkinson_variance(k.h, k.l),
+        VarianceEstimator::RogersSatchell => crate::vol_estimator::rs_variance(k.o, k.h, k.l, k.c),
     }
 }
 

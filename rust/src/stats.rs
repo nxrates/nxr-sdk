@@ -101,28 +101,6 @@ pub fn acf(series: &[f64], lag: usize) -> f64 {
     if den > 1e-10 { num / den } else { 0.0 }
 }
 
-/// Rolling Parkinson volatility estimator over aligned high/low slices.
-///
-/// Formula: `sqrt(mean(ln(H/L)^2) / (4 ln 2))`, valid for continuous GBM.
-/// Skips bars where `low <= 0` (treated as invalid). Returns 0.0 when no
-/// valid bars are found. Arrays must be the same length.
-///
-/// For per-bin σ over OHLC see [`crate::vol_estimator::rs_sigma_from_ohlc`].
-pub fn parkinson_vol(highs: &[f64], lows: &[f64]) -> f64 {
-    let n = highs.len().min(lows.len());
-    let mut sum = 0.0;
-    let mut count = 0u32;
-    for i in 0..n {
-        if lows[i] > 0.0 && highs[i] >= lows[i] {
-            let r = (highs[i] / lows[i]).ln();
-            sum += r * r;
-            count += 1;
-        }
-    }
-    if count == 0 { return 0.0; }
-    (sum / count as f64 / (4.0 * std::f64::consts::LN_2)).sqrt()
-}
-
 /// Hurst exponent via rescaled range (R/S) analysis on a return series.
 ///
 /// H > 0.5 → trending; H < 0.5 → mean-reverting; H ~ 0.5 → random walk.

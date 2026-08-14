@@ -1,10 +1,16 @@
-//! Canonical per-bin volatility estimator — Rogers-Satchell over OHLC.
+//! Canonical volatility kernels — Rogers-Satchell (OHLC) and Parkinson (HL).
 //!
-//! ONE kernel for the 30-min vol-bin σ, shared by the offline `.vol` builder,
-//! the live [`crate::vol::LiveVolRing`], and the synth OHLC reconstruction. The
-//! ratified decision (2026-06): the canonical 30-min vol-bin σ is the
-//! Rogers-Satchell (1991) drift-robust range estimator computed over
-//! s10-resampled OHLC, with `offline == live` byte-for-byte.
+//! ONE home for both range estimators. Rogers-Satchell is the canonical per-bin
+//! 30-min vol-bin σ, shared by the offline `.vol` builder, the live
+//! [`crate::vol::LiveVolRing`], and the synth OHLC reconstruction. The ratified
+//! decision (2026-06): the canonical 30-min vol-bin σ is the Rogers-Satchell
+//! (1991) drift-robust range estimator computed over s10-resampled OHLC, with
+//! `offline == live` byte-for-byte.
+//!
+//! Parkinson ([`parkinson_variance`] / [`parkinson_sigma`]) is NOT the vol-bin
+//! basis. It survives for the two callers that genuinely need a high/low-only
+//! estimator: the synth quadratic form (needs a per-leg VARIANCE it can invert
+//! back to a log-range) and the offline audit's daily σ cross-check.
 //!
 //! ⚠ NOT every σ producer in the tree. `core/src/server/signed.rs` computes the
 //! co-signed-quote σ with its OWN private 48-bar Parkinson estimator, so a
@@ -54,6 +60,44 @@ pub fn rs_sigma_from_ohlc(o: f64, h: f64, l: f64, c: f64) -> f64 {
     rs_variance(o, h, l, c).max(0.0).sqrt()
 }
 
+/// `4 ln 2`, the Parkinson normalizer.
+pub const FOUR_LN2: f64 = 4.0 * std::f64::consts::LN_2;
+const INV_4LN2: f64 = 1.0 / FOUR_LN2;
+
+/// Parkinson variance for one high/low bucket: `ln(H/L)^2 / (4 ln 2)`.
+///
+/// Caller validates `H >= L > 0`; garbage in yields a non-finite result rather
+/// than a silent 0, because the two callers reject the bucket upstream and a
+/// masked 0 would understate σ. Pairs with the [`FOUR_LN2`] inversion back to a
+/// log-range in `synth::ohlc`.
+#[inline]
+pub fn parkinson_variance(h: f64, l: f64) -> f64 {
+    let r = (h / l).ln();
+    INV_4LN2 * r * r
+}
+
+/// Parkinson sigma (std-of-log-price) over aligned high/low slices.
+///
+/// `sqrt(mean(ln(H/L)^2) / (4 ln 2))`, valid for continuous GBM. Skips bars
+/// where `low <= 0` or `high < low`. Returns 0.0 when no valid bar is found.
+/// Same units as [`rs_sigma_from_ohlc`]: a per-bar fraction, unannualized.
+pub fn parkinson_sigma(highs: &[f64], lows: &[f64]) -> f64 {
+    let n = highs.len().min(lows.len());
+    let mut sum = 0.0;
+    let mut count = 0u32;
+    for i in 0..n {
+        if lows[i] > 0.0 && highs[i] >= lows[i] {
+            let r = (highs[i] / lows[i]).ln();
+            sum += r * r;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    (sum / count as f64 / FOUR_LN2).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +124,49 @@ mod tests {
         let (o, h, l, c) = (100.0_f64, 105.0_f64, 98.0_f64, 102.0_f64);
         let v = (h / c).ln() * (h / o).ln() + (l / c).ln() * (l / o).ln();
         assert!((rs_sigma_from_ohlc(o, h, l, c) - v.max(0.0).sqrt()).abs() < 1e-15);
+    }
+
+    /// Pins the RS contract to a hand-computed value so a refactor cannot move
+    /// σ silently: it is signed on-chain verbatim.
+    #[test]
+    fn rs_pinned_hand_computed() {
+        // O=100 H=105 L=98 C=102:
+        // ln(105/102)·ln(105/100) + ln(98/102)·ln(98/100) = 0.00222252274925343
+        assert!((rs_variance(100.0, 105.0, 98.0, 102.0) - 0.002_222_522_749_253_43).abs() < 1e-15);
+        assert!(
+            (rs_sigma_from_ohlc(100.0, 105.0, 98.0, 102.0) - 0.047_143_639_541_866_4).abs()
+                < 1e-15
+        );
+    }
+
+    /// Pins the Parkinson contract the same way.
+    #[test]
+    fn parkinson_pinned_hand_computed() {
+        // One bar, H=105 L=98: ln(105/98) = 0.0689928714869514; squared and
+        // divided by 4 ln 2 = 2.7725887222397812.
+        let v = parkinson_variance(105.0, 98.0);
+        assert!((v - 0.001_716_812_983_416_35).abs() < 1e-15, "got {v}");
+        // Single-bar sigma is sqrt of that variance.
+        let s = parkinson_sigma(&[105.0], &[98.0]);
+        assert!((s - v.sqrt()).abs() < 1e-15, "got {s}");
+        assert!((s - 0.041_434_441_994_750_5).abs() < 1e-15, "got {s}");
+        // Two bars average the SQUARED log-ranges, not the sigmas.
+        let two = parkinson_sigma(&[105.0, 101.0], &[98.0, 100.0]);
+        let manual = {
+            let a = (105.0_f64 / 98.0).ln();
+            let b = (101.0_f64 / 100.0).ln();
+            ((a * a + b * b) / 2.0 / FOUR_LN2).sqrt()
+        };
+        assert!((two - manual).abs() < 1e-15);
+    }
+
+    #[test]
+    fn parkinson_skips_invalid_bars() {
+        assert_eq!(parkinson_sigma(&[105.0], &[0.0]), 0.0);
+        assert_eq!(parkinson_sigma(&[98.0], &[105.0]), 0.0);
+        assert_eq!(parkinson_sigma(&[], &[]), 0.0);
+        // An invalid bar is dropped, not counted in the divisor.
+        let mixed = parkinson_sigma(&[105.0, 98.0], &[98.0, 105.0]);
+        assert!((mixed - parkinson_sigma(&[105.0], &[98.0])).abs() < 1e-15);
     }
 }

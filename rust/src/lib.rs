@@ -23,6 +23,7 @@ pub mod config;
 pub mod errors;
 pub mod f64_frame;
 pub mod grid;
+pub mod hot_reload;
 pub mod ipc;
 pub mod logging;
 pub mod memory;

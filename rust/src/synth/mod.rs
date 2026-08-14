@@ -41,6 +41,11 @@
 //! all: [`cross`] derives every route from the primaries that are actually live,
 //! so a convention difference is data, not code. The maths (`tick`, `ohlc`,
 //! `bar`, `rolling`) are verbatim ports.
+//!
+//! `bar` + `rolling` (the rolling-rho reconstruction path) have no NXR caller
+//! yet. Kept deliberately: they are the parity anchor for BTR's
+//! `synth-ohlc.ts`, pinned by `tests/synth_tests.rs` and specified in
+//! `docs/triangulation.md` as the runtime path. Delete only with BTR.
 
 pub mod bar;
 pub mod compose;

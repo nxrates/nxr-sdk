@@ -14,10 +14,25 @@
 //!
 //! ⚠ NOT every σ producer in the tree. `core/src/server/signed.rs` computes the
 //! co-signed-quote σ with its OWN private 48-bar Parkinson estimator, so a
-//! signed mark is gated on a σ that no `.vol` file or renko brick uses. That
-//! divergence is un-reconciled and is with the owner (audit 2026-07-25); this
-//! sentence used to claim "every σ producer", which is what would mislead the
-//! next reader into consolidating a money-path estimator as a cleanup.
+//! signed mark is gated on a σ that no `.vol` file or renko brick uses.
+//!
+//! That divergence is DELIBERATE, and swapping signed.rs to Rogers-Satchell is
+//! NOT proven better (audit 2026-08-14, 21 d of live `.s10`, 30-min bins, the
+//! signer's deployed 48- and 336-bar windows). RS/PK lands 0.94-1.05 on
+//! BTC-USDT, EUR-USD, XAU-USD and EUR-USDC, inside the σ cosign tolerance, so
+//! there is nothing to win; on a thin stable (USDC-USDT) it is 1.42-1.56,
+//! because bid-ask bounce inflates the RS corner product on a wide book. Which
+//! of the two is then CORRECT on that tape was not settled: every truth proxy
+//! available on a bounce-dominated stable is itself bounce-contaminated. Do not
+//! reopen this without a noise-robust proxy.
+//!
+//! RS stays HERE on two properties that survived review: per-bin drift
+//! contamination orders RS < GK < PK on every tape measured, and EMA(28)
+//! shrinks the variance of that contamination but not its bias, so it reaches
+//! the renko brick. Its one failure mode is exact: RS is 0 on any monotone bar
+//! (H=C,L=O or H=O,L=C). That is 0 % of non-degenerate 30-min bins on every
+//! liquid tape, 6 % only on a stale session-equity tape, and the brick's
+//! `min_pct` floor covers it.
 //!
 //! Per 30-min vol-bin OHLC (O = first s10.open, H = max s10.high,
 //! L = min s10.low, C = last s10.close, on the TDWAP mid):

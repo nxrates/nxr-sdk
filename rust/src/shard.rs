@@ -214,8 +214,10 @@ pub const FLAG_S10_FLAT_FILL: u8 = 0b0100_0000;
 /// same as flat-fill.
 ///
 /// On an `Index` (`synth::cross::Route::compose`): bid/ask/mid are the signed
-/// leg product, `confidence` and `ci` are not measured breadth so they are zero,
-/// and the record's age is the OLDEST leg observation.
+/// leg product; `ci` is the legs' relative error in quadrature and `confidence`
+/// is repacked to the WEAKEST leg, so both are real and `FLAG_CONF_ACTIVE` is
+/// set alongside this bit. A composed `ci` of 0 means the legs published no
+/// interval, never certainty. The record's age is the OLDEST leg observation.
 pub const FLAG_COMPOSED: u8 = 0b1000_0000;
 
 /// Cadence at which the delta-gate writes a liveness sentinel while the quote

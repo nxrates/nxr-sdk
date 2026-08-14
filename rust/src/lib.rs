@@ -8,7 +8,7 @@
 //! - Aggregation: [`TickAccumulator`], [`RunningStats`], [`compute_vwap`]
 //! - Resolution: [`resolve_ticker`], [`resolve_ticker_id`], [`TickerIdCache`]
 //! - Provider lookup: [`get_market_provider_by_id`]
-//! - Statistics: full-period monthly-geo sharpe/sortino helpers, OLS, drawdown
+//! - Statistics: [`stats::mean`], [`stats::std_dev`], [`stats::median`], [`stats::mad`]
 //! - Configuration: [`NxrConfig`] (environment-based)
 //! - Logging: [`logging::init`]
 

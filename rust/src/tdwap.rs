@@ -671,11 +671,7 @@ where
 
     let profile = WeightProfile {
         top_weight_share: (w_max / w_sum).clamp(0.0, 1.0),
-        n_eff: if w_sq_sum > 0.0 {
-            (w_sum * w_sum) / w_sq_sum
-        } else {
-            0.0
-        },
+        n_eff: crate::stats::n_eff_from_sums(w_sum, w_sq_sum),
     };
 
     let tdwap_bid = w_bid_sum / w_sum;

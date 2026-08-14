@@ -146,6 +146,23 @@ pub const MIN_BRICK_PCT: f64 = 0.0001;
 /// import this; no local copies allowed.
 pub const MAX_BRICKS_PER_TICK: usize = 1_000;
 
+/// PRE-FEED jump guard: a mid this far from `last_close` in a single tick is a
+/// feed spike, not a move, and must never reach the generator. Without it a
+/// 100% jump against a 0.001 brick hits [`MAX_BRICKS_PER_TICK`] silently and
+/// contaminates the walk-forward (SOL 849k bricks/day, 2026-06-01 emergency;
+/// an offline rebuild missing the guard wrote 8.2 GB of `.renko` for one
+/// ticker against a 4-8 MB/day norm, found 2026-08-03).
+/// Canonical home — live (`core::bars_renko`) and offline
+/// (`series-factory::renko_from_idx`) import this; no local copies allowed.
+pub const MAX_JUMP_PCT: f64 = 0.05;
+
+/// Consecutive [`MAX_JUMP_PCT`] trips after which the divergence is treated as
+/// a real regime change (or a stale anchor after a gap) rather than a spike,
+/// and `last_close` is reseeded so the walk resumes. A genuine spike reverts
+/// within a tick or two, resetting the counter; only a sustained divergence
+/// gets here. Same canonical-home rule as [`MAX_JUMP_PCT`].
+pub const RESEED_AFTER_TRIPS: u32 = 30;
+
 /// Streaming Renko bar generator with adaptive brick sizing.
 ///
 /// The engine is σ-agnostic: callers pass `sigma_pct` per tick (or per

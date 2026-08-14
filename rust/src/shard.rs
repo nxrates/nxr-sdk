@@ -122,6 +122,30 @@ pub const FLAG_CONF_FRESHNESS: u8 = 0b0000_1000;
 /// silently corrupts both fields — re-encode before touching it.
 pub const FLAG_CONF_ACTIVE: u8 = 0b0100_0000;
 
+/// Liveness of an `Index` as a bps fraction, decoded per the THREE-STATE rule
+/// above. The `/255` rescale is valid ONLY for [`FLAG_CONF_FRESHNESS`]: applied
+/// to a [`FLAG_CONF_ACTIVE`] byte it reads the packed pair (e.g. 138 = 10 legs,
+/// weight-ok) as "5411 bps of freshness", a number with no meaning. Under the
+/// ACTIVE encoding the only fraction the byte carries is the fresh-weight
+/// verdict, so that is what is reported; the COUNT is not a fraction and is read
+/// via `mitch::index::conf_active_count`, never through here.
+///
+/// State 3 (no marker) certifies no liveness at all and reports 0.
+#[inline]
+pub fn conf_bps(confidence: u8, flags: u8) -> u16 {
+    if flags & FLAG_CONF_ACTIVE != 0 {
+        if mitch::index::conf_fresh_weight_ok(confidence) {
+            10_000
+        } else {
+            0
+        }
+    } else if flags & FLAG_CONF_FRESHNESS != 0 {
+        (u32::from(confidence) * 10_000 / 255) as u16
+    } else {
+        0
+    }
+}
+
 /// Minimum share of base weight held by TICKING legs (`active_bw_sum/bw_sum` in
 /// `tdwap.rs`) for `fresh_weight_ok` (bit 7 of the packed `confidence` byte).
 ///

@@ -83,10 +83,42 @@ pub struct RouteLeg {
 
 /// A live quote for one leg, plus the age of the observation behind it.
 /// `age_ms: None` = never observed.
+///
+/// The uncertainty fields live HERE and not on [`LegTick`]: that struct is the
+/// shared BTR `compute_synth_tick` input and must not grow.
 #[derive(Debug, Clone, Copy)]
 pub struct LegQuote {
     pub tick: LegTick,
     pub age_ms: Option<i64>,
+    /// `Index::ci` as published (sqrt-compressed µbp of mid). 0 = not carried,
+    /// which propagates as UNKNOWN, never as "no uncertainty".
+    pub ci_ubp: u16,
+    /// The leg's `confidence` byte when it carries `FLAG_CONF_ACTIVE`. `None`
+    /// under any other encoding: no active-leg count may then be claimed.
+    pub conf_packed: Option<u8>,
+    /// `Index::accepted` — corroborating providers behind the leg.
+    pub accepted: u8,
+}
+
+impl LegQuote {
+    /// One leg straight off a live composite. The ONE place a snapshot becomes
+    /// a composable leg, so the REST and signing paths cannot decode the same
+    /// record differently.
+    pub fn from_index(idx: &crate::Index, age_ms: Option<i64>) -> Self {
+        Self {
+            tick: LegTick {
+                bid: idx.bid,
+                ask: idx.ask,
+                mid: idx.mid(),
+                conf: crate::shard::conf_bps(idx.confidence, idx.flags),
+            },
+            age_ms,
+            ci_ubp: idx.ci,
+            conf_packed: (idx.flags & crate::shard::FLAG_CONF_ACTIVE != 0)
+                .then_some(idx.confidence),
+            accepted: idx.accepted,
+        }
+    }
 }
 
 /// A composed quote and its honest provenance.
@@ -101,6 +133,18 @@ pub struct Composed {
     /// observed: a composed quote may never read fresher than its inputs, and
     /// an unknown age cannot be claimed as a known one.
     pub age_ms: Option<i64>,
+    /// Propagated `Index::ci`. Relative errors add in quadrature under both
+    /// multiplication and division, so an inverted leg contributes identically.
+    /// 0 when ANY leg published 0: an unknown input cannot compose into a
+    /// known output, and understating uncertainty is the attack.
+    pub ci_ubp: u16,
+    /// Packed `confidence` recombined per axis to the WEAKEST leg (min ticking
+    /// count, AND of the fresh-weight verdicts). `None` when any leg lacks the
+    /// ACTIVE encoding.
+    pub conf_packed: Option<u8>,
+    /// Corroboration of the weakest leg. A cross is no broader than its thinnest
+    /// hop.
+    pub accepted: u8,
 }
 
 /// Ordered legs whose signed product is the requested pair.
@@ -126,6 +170,14 @@ impl Route {
         // `Some(None)` = observed-age unknown on at least one leg.
         let mut age: Option<i64> = None;
         let mut age_known = true;
+        // Same algebra as `core::triangulator::triangulate_into`: relative CI in
+        // quadrature, `confidence` recombined per axis, `accepted` = weakest leg.
+        let mut rel_sq = 0.0_f64;
+        let mut ci_known = true;
+        let mut active = u32::MAX;
+        let mut fresh_ok = true;
+        let mut conf_known = true;
+        let mut accepted = u8::MAX;
         for l in &self.legs {
             let q = quote(l.ticker_id)?;
             ticks.push((l.exp, q.tick));
@@ -133,6 +185,20 @@ impl Route {
                 Some(a) => age = Some(age.map_or(a, |cur| cur.max(a))),
                 None => age_known = false,
             }
+            if q.ci_ubp == 0 {
+                ci_known = false;
+            } else {
+                let rel = crate::tdwap::decode_ci_ubp(q.ci_ubp) / 1e8;
+                rel_sq += rel * rel;
+            }
+            match q.conf_packed {
+                Some(b) => {
+                    active = active.min(mitch::index::conf_active_count(b));
+                    fresh_ok &= mitch::index::conf_fresh_weight_ok(b);
+                }
+                None => conf_known = false,
+            }
+            accepted = accepted.min(q.accepted);
         }
         let SynthTick {
             bid,
@@ -146,6 +212,14 @@ impl Route {
             mid,
             conf,
             age_ms: age_known.then_some(age).flatten(),
+            ci_ubp: if ci_known && !self.legs.is_empty() {
+                crate::tdwap::encode_ci_ubp(rel_sq.sqrt() * 1e8)
+            } else {
+                0
+            },
+            conf_packed: (conf_known && !self.legs.is_empty())
+                .then(|| mitch::index::conf_pack_active(active, fresh_ok)),
+            accepted: if self.legs.is_empty() { 0 } else { accepted },
         })
     }
 }
@@ -566,12 +640,19 @@ mod tests {
         assert_eq!(legs.len(), 1, "direct book wins on hops: {legs:?}");
     }
 
-    fn tick(bid: f64, ask: f64, conf: u16) -> LegTick {
-        LegTick {
-            bid,
-            ask,
-            mid: (bid + ask) * 0.5,
-            conf,
+    /// A healthy leg: 2 ticking providers, fresh-weight ok, ~10 bps of CI.
+    fn lq(bid: f64, ask: f64, conf: u16, age_ms: Option<i64>) -> LegQuote {
+        LegQuote {
+            tick: LegTick {
+                bid,
+                ask,
+                mid: (bid + ask) * 0.5,
+                conf,
+            },
+            age_ms,
+            ci_ubp: crate::tdwap::encode_ci_ubp(100_000.0),
+            conf_packed: Some(mitch::index::conf_pack_active(2, true)),
+            accepted: 3,
         }
     }
 
@@ -583,15 +664,9 @@ mod tests {
         let c = r
             .compose(|id| {
                 Some(if id == chf {
-                    LegQuote {
-                        tick: tick(0.8, 0.8, 9_000),
-                        age_ms: Some(4_200),
-                    }
+                    lq(0.8, 0.8, 9_000, Some(4_200))
                 } else {
-                    LegQuote {
-                        tick: tick(150.0, 150.0, 5_000),
-                        age_ms: Some(120),
-                    }
+                    lq(150.0, 150.0, 5_000, Some(120))
                 })
             })
             .expect("composes");
@@ -606,10 +681,7 @@ mod tests {
         let r = g.route_sym("CHF/JPY", &blind).expect("routes");
         let c = r
             .compose(|_| {
-                Some(LegQuote {
-                    tick: tick(1.0, 1.0, 10_000),
-                    age_ms: None,
-                })
+                Some(lq(1.0, 1.0, 10_000, None))
             })
             .expect("composes");
         assert!(c.age_ms.is_none(), "unknown age must not read as fresh");
@@ -621,10 +693,7 @@ mod tests {
         let r = g.route_sym("CHF/JPY", &blind).expect("routes");
         let chf = crate::resolve_ticker_id("USD/CHF");
         assert!(
-            r.compose(|id| (id == chf).then_some(LegQuote {
-                tick: tick(0.8, 0.8, 9_000),
-                age_ms: Some(1)
-            }))
+            r.compose(|id| (id == chf).then_some(lq(0.8, 0.8, 9_000, Some(1))))
             .is_none(),
             "one leg present must not fabricate a price"
         );
@@ -636,10 +705,7 @@ mod tests {
         let r = g.route_sym("JPY/USD", &blind).expect("routes");
         let c = r
             .compose(|_| {
-                Some(LegQuote {
-                    tick: tick(150.0, 150.3, 9_000),
-                    age_ms: Some(10),
-                })
+                Some(lq(150.0, 150.3, 9_000, Some(10)))
             })
             .expect("composes");
         assert!(c.bid <= c.ask);
@@ -656,7 +722,7 @@ mod tests {
         assert_eq!(route(&g, "EURC/USD"), vec![("EUR/USD".into(), 1)]);
         // CAD's primary is `USD/CAD`, so the wrap inherits the inversion.
         assert_eq!(route(&g, "QCAD/USD"), vec![("USD/CAD".into(), -1)]);
-        let q = |_| Some(LegQuote { tick: tick(1.0913, 1.0915, 9_000), age_ms: Some(70) });
+        let q = |_| Some(lq(1.0913, 1.0915, 9_000, Some(70)));
         for (wrap, under) in [("EURC/USD", "EUR/USD"), ("QCAD/USD", "CAD/USD")] {
             let w = g.route_sym(wrap, &blind).expect("routes").compose(q).expect("composes");
             let u = g.route_sym(under, &blind).expect("routes").compose(q).expect("composes");

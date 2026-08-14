@@ -110,9 +110,24 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     SynthesisRuleSpec { out_sym: "LINK/USD", leg1_sym: "LINK/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "DOT/USD",  leg1_sym: "DOT/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "LTC/USD",  leg1_sym: "LTC/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    // No XAUT/USD, USDG/USD or STABLE/USD rule here: the Pyth grant covers 7
-    // feeds (`oracles.providers.pyth.symbols`), everything else is parked since
-    // 2026-08-10 and composes on read off the CEX legs.
+    // ── <stable>/USD = <stable>/USDT × USDT/USD ──
+    // Same shape as the majors above, and for the same reason: the Pyth grant
+    // covers 7 feeds since 2026-08-10 and these are all parked. Compose-on-read
+    // already served them over REST, but SIGNING reads `state.snapshots` and
+    // cannot compose, so a signed catalog feed must be materialised or it is
+    // excluded as `unknown symbol` — 15 of 28 feeds were, until these landed.
+    // Only legs verified live 2026-08-14 are listed; a stale mark is still
+    // rejected by the feed's own `max_age_ms`, which is the correct outcome.
+    SynthesisRuleSpec { out_sym: "USDE/USD",  leg1_sym: "USDE/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
+    SynthesisRuleSpec { out_sym: "USDS/USD",  leg1_sym: "USDS/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
+    SynthesisRuleSpec { out_sym: "USD1/USD",  leg1_sym: "USD1/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
+    SynthesisRuleSpec { out_sym: "PYUSD/USD", leg1_sym: "PYUSD/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
+    SynthesisRuleSpec { out_sym: "USDG/USD",  leg1_sym: "USDG/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
+    SynthesisRuleSpec { out_sym: "RLUSD/USD", leg1_sym: "RLUSD/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
+    SynthesisRuleSpec { out_sym: "FDUSD/USD", leg1_sym: "FDUSD/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
+    // Still absent, deliberately: XAUT (no CEX USDT book found), TUSD and DAI
+    // (their /USDT legs were dead 627s and 9699s), USDTB (no data), and the
+    // AUSD/USDF/GHO/U set the owner scoped out.
 
     // ── USDT/USDC = USDT/USD × (USDC/USD)⁻¹ ──
     // Only STABLE/USDC cross with both legs live. The NATIVE deep-book ticker
@@ -203,7 +218,7 @@ mod tests {
     fn expected_rule_counts() {
         // Locks the universe size — bump explicitly when rules are added or
         // removed so reviewers notice the registry change.
-        assert_eq!(SYNTHESIS_RULES.len(), 56);
+        assert_eq!(SYNTHESIS_RULES.len(), 63);
         assert_eq!(INJECTION_RULES.len(), 11);
     }
 

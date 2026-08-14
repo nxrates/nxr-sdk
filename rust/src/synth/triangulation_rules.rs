@@ -1,14 +1,15 @@
 //! Triangulation rule registry — SINGLE SOURCE OF TRUTH for `core::triangulator`.
 //!
-//! Two families:
+//! ONE family. [`SYNTHESIS_RULES`] builds a *new* ticker from two legs via
+//! `mid_out = (inv1 ? 1/mid1 : mid1) × (inv2 ? 1/mid2 : mid2)`; the output is
+//! appended to the snapshot map as a virtual ticker.
 //!
-//! 1. **Synthesis** ([`SYNTHESIS_RULES`]): build a *new* ticker from two legs via
-//!    `mid_out = (inv1 ? 1/mid1 : mid1) × (inv2 ? 1/mid2 : mid2)`. Output is
-//!    appended to the snapshot map as a virtual ticker.
-//!
-//! 2. **Injection** ([`INJECTION_RULES`]): build a triangulated price + inject it
-//!    as a synthetic provider into an existing target ticker's VWAP state.
-//!    Provider id = `SYNTH_BASE + offset` (offset = registry position).
+//! What is NOT here any more, and must never come back: the injection registry,
+//! the `<crypto>/USD` majors, and the `<crypto>/<fiat>` crosses. A quoting leg is
+//! DERIVED now. `core::pivot` infers each CR asset's aggregation basis from the
+//! volume survey and materialises exactly one `<asset>/<storage_quote>` primary
+//! per asset; every other pair composes on read off those primaries. Adding a
+//! pin here re-freezes a basis the survey is meant to move.
 //!
 //! ## Relation to [`crate::synth::cross`]
 //!
@@ -27,9 +28,8 @@
 //!
 //! ## Adding a rule
 //!
-//! Append to the appropriate const slice. `core::triangulator::build_rules` and
-//! `build_injection_rules` resolve symbols → ids at startup; no further code change
-//! needed in the core crate.
+//! Append to the const slice. `core::triangulator::build_rules` resolves symbols
+//! → ids at startup; no further code change needed in the core crate.
 
 /// Synthesis rule (pure data — caller resolves syms → ids).
 ///
@@ -43,30 +43,16 @@ pub struct SynthesisRuleSpec {
     pub leg2_inv: bool,
 }
 
-/// Injection rule (pure data — caller resolves syms → ids + maps offset → provider_id).
-#[derive(Debug, Clone, Copy)]
-pub struct InjectionRuleSpec {
-    pub target_sym: &'static str,
-    pub leg1_sym: &'static str,
-    pub leg1_inv: bool,
-    pub leg2_sym: &'static str,
-    pub leg2_inv: bool,
-    /// Provider id offset relative to `SYNTH_BASE` (caller adds the base).
-    pub provider_offset: u16,
-}
-
 // ── Synthesis rules ─────────────────────────────────────────────────────────
 
 /// All currently-active synthesis rules. Order does NOT affect correctness:
 /// aggregator emit-paths key by `ticker_id` so per-rule output is
 /// set-equivalent.
 ///
-/// Sections:
+/// Sections, and why each survives the storage rebase: USDT is genuinely the
+/// ASSET on both sides, so neither pins a CR asset's aggregation basis.
 /// 1. USDT/<fiat> = USDT/USD × USD<FIAT>          (26 entries)
-/// 2. <crypto>/USD = <crypto>/USDT × USDT/USD     (11 majors)
-/// 3. USDT/USDC = USDT/USD × (USDC/USD)⁻¹         (1 entry)
-/// 4. <crypto>/EUR, <crypto>/GBP via inverse FX   (14 entries)
-/// 5. BTC + ETH /AUD /CHF crosses                 (4 entries)
+/// 2. USDT/USDC = USDT/USD × (USDC/USD)⁻¹         (1 entry)
 pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     // ── USDT/<EM fiat> = USDT/USD × USD/<CCY> ──
     SynthesisRuleSpec { out_sym: "USDT/JPY", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDJPY", leg2_inv: false },
@@ -96,74 +82,12 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     SynthesisRuleSpec { out_sym: "USDT/QAR", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDQAR", leg2_inv: false },
     SynthesisRuleSpec { out_sym: "USDT/EGP", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDEGP", leg2_inv: false },
 
-    // ── <crypto>/USD = <crypto>/USDT × USDT/USD ──
-    // Synthesises a USD-quoted reference from CEX USDT liquidity. SOLE source:
-    // no crypto CFD feed exists (the MT4 forwarder was removed 2026-08-10).
-    SynthesisRuleSpec { out_sym: "BTC/USD",  leg1_sym: "BTC/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "ETH/USD",  leg1_sym: "ETH/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "SOL/USD",  leg1_sym: "SOL/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "BNB/USD",  leg1_sym: "BNB/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "XRP/USD",  leg1_sym: "XRP/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "ADA/USD",  leg1_sym: "ADA/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "DOGE/USD", leg1_sym: "DOGE/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "AVAX/USD", leg1_sym: "AVAX/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "LINK/USD", leg1_sym: "LINK/USDT", leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "DOT/USD",  leg1_sym: "DOT/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "LTC/USD",  leg1_sym: "LTC/USDT",  leg1_inv: false, leg2_sym: "USDT/USD", leg2_inv: false },
-    // No XAUT/USD, USDG/USD or STABLE/USD rule here: the Pyth grant covers 7
-    // feeds (`oracles.providers.pyth.symbols`), everything else is parked since
-    // 2026-08-10 and composes on read off the CEX legs.
-
     // ── USDT/USDC = USDT/USD × (USDC/USD)⁻¹ ──
     // Only STABLE/USDC cross with both legs live. The NATIVE deep-book ticker
     // is USDC/USDT (kept untouched); this inverse form gives the BTR Stable
     // Core keeper a uniform X/USDC universe. Distinct ticker id, no overwrite.
     SynthesisRuleSpec { out_sym: "USDT/USDC",  leg1_sym: "USDT/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
 
-    // ── <crypto>/EUR + <crypto>/GBP = <crypto>/USDT × (1 / <FX>USD) ──
-    // FX provider symbol (EURUSD, GBPUSD) is inverted: USD/<fiat> = 1 / EURUSD.
-    SynthesisRuleSpec { out_sym: "BTC/EUR",  leg1_sym: "BTC/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "BTC/GBP",  leg1_sym: "BTC/USDT",  leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "ETH/EUR",  leg1_sym: "ETH/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "ETH/GBP",  leg1_sym: "ETH/USDT",  leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "SOL/EUR",  leg1_sym: "SOL/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "SOL/GBP",  leg1_sym: "SOL/USDT",  leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "BNB/EUR",  leg1_sym: "BNB/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "BNB/GBP",  leg1_sym: "BNB/USDT",  leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "XRP/EUR",  leg1_sym: "XRP/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "XRP/GBP",  leg1_sym: "XRP/USDT",  leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "ADA/EUR",  leg1_sym: "ADA/USDT",  leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "ADA/GBP",  leg1_sym: "ADA/USDT",  leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "DOGE/EUR", leg1_sym: "DOGE/USDT", leg1_inv: false, leg2_sym: "EURUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "DOGE/GBP", leg1_sym: "DOGE/USDT", leg1_inv: false, leg2_sym: "GBPUSD", leg2_inv: true },
-
-    // ── BTC + ETH AUD/CHF crosses (sufficient FX provider depth). ──
-    // AUDUSD inverted → USD/AUD. USDCHF NOT inverted (already USD/CHF).
-    SynthesisRuleSpec { out_sym: "BTC/AUD", leg1_sym: "BTC/USDT", leg1_inv: false, leg2_sym: "AUDUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "BTC/CHF", leg1_sym: "BTC/USDT", leg1_inv: false, leg2_sym: "USDCHF", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "ETH/AUD", leg1_sym: "ETH/USDT", leg1_inv: false, leg2_sym: "AUDUSD", leg2_inv: true },
-    SynthesisRuleSpec { out_sym: "ETH/CHF", leg1_sym: "ETH/USDT", leg1_inv: false, leg2_sym: "USDCHF", leg2_inv: false },
-];
-
-// ── Injection rules ─────────────────────────────────────────────────────────
-
-/// All currently-active injection rules. Inject USDC-quoted pair × USDC/USDT into
-/// the corresponding USDT-quoted target VWAP, adding alt-liquidity-pool depth.
-///
-/// `provider_offset` is **registry position** = (provider_id - SYNTH_BASE). Keep
-/// the order stable; reshuffling silently breaks provider_id continuity.
-pub const INJECTION_RULES: &[InjectionRuleSpec] = &[
-    InjectionRuleSpec { target_sym: "BTC/USDT",  leg1_sym: "BTC/USDC",  leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 0 },
-    InjectionRuleSpec { target_sym: "ETH/USDT",  leg1_sym: "ETH/USDC",  leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 1 },
-    InjectionRuleSpec { target_sym: "SOL/USDT",  leg1_sym: "SOL/USDC",  leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 2 },
-    InjectionRuleSpec { target_sym: "BNB/USDT",  leg1_sym: "BNB/USDC",  leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 3 },
-    InjectionRuleSpec { target_sym: "XRP/USDT",  leg1_sym: "XRP/USDC",  leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 4 },
-    InjectionRuleSpec { target_sym: "ADA/USDT",  leg1_sym: "ADA/USDC",  leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 5 },
-    InjectionRuleSpec { target_sym: "DOGE/USDT", leg1_sym: "DOGE/USDC", leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 6 },
-    InjectionRuleSpec { target_sym: "AVAX/USDT", leg1_sym: "AVAX/USDC", leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 7 },
-    InjectionRuleSpec { target_sym: "LINK/USDT", leg1_sym: "LINK/USDC", leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 8 },
-    InjectionRuleSpec { target_sym: "DOT/USDT",  leg1_sym: "DOT/USDC",  leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 9 },
-    InjectionRuleSpec { target_sym: "LTC/USDT",  leg1_sym: "LTC/USDC",  leg1_inv: false, leg2_sym: "USDC/USDT", leg2_inv: false, provider_offset: 10 },
 ];
 
 #[cfg(test)]
@@ -179,32 +103,12 @@ mod tests {
     }
 
     #[test]
-    fn injection_rules_unique_offsets_and_targets() {
-        let mut seen_off = std::collections::HashSet::new();
-        let mut seen_tgt = std::collections::HashSet::new();
-        for r in INJECTION_RULES {
-            assert!(seen_off.insert(r.provider_offset), "duplicate offset {}", r.provider_offset);
-            assert!(seen_tgt.insert(r.target_sym), "duplicate target {}", r.target_sym);
-        }
-    }
-
-    #[test]
-    fn injection_offsets_dense_from_zero() {
-        // Provider id continuity: offsets must be 0..n contiguous (or core's
-        // SYNTH_BASE arithmetic + downstream provider-id reservations break).
-        for (i, r) in INJECTION_RULES.iter().enumerate() {
-            assert_eq!(r.provider_offset as usize, i,
-                "INJECTION_RULES[{}].provider_offset = {} (expected {})",
-                i, r.provider_offset, i);
-        }
-    }
-
-    #[test]
     fn expected_rule_counts() {
         // Locks the universe size — bump explicitly when rules are added or
-        // removed so reviewers notice the registry change.
-        assert_eq!(SYNTHESIS_RULES.len(), 56);
-        assert_eq!(INJECTION_RULES.len(), 11);
+        // removed so reviewers notice the registry change. 26 `USDT/<fiat>` +
+        // `USDT/USDC`: USDT genuinely IS the asset in both, so neither is a pin
+        // on a CR asset's basis.
+        assert_eq!(SYNTHESIS_RULES.len(), 27);
     }
 
     #[test]

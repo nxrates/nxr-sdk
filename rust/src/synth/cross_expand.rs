@@ -1,4 +1,4 @@
-//! Expand `cexs.cross_pairs` into synth-pipeline triples `(synth, leg_a, leg_b)`.
+//! Expand a cross catalog into synth-pipeline triples `(synth, leg_a, leg_b)`.
 //!
 //! Crosses never persist `.idx`; the kernel composes leg streams in RAM and
 //! materialises `.s10` + `.renko` only. Historical bars are rebuilt from the
@@ -11,17 +11,24 @@ use std::collections::HashSet;
 
 /// Return synth-pipeline work items for all resolvable crosses.
 ///
+/// Both legs are taken in `storage_quote`, the PUBLISHED denomination, so a
+/// cross composes off the same `<asset>/<storage_quote>` primaries `core::pivot`
+/// materialises. It was a literal `{base}/USDT`, which quietly priced the peg at
+/// 1 and pinned every cross to a basis the volume survey is free to move.
+///
 /// Skips:
-/// - `BASE/USDT` primaries (`BASE` ∈ `primary_bases`)
-/// - any `*/USDT` cross (triangulator-owned fiat/stable primaries)
-/// - crosses whose USDT legs do not resolve
+/// - `BASE/<storage_quote>` primaries (`BASE` ∈ `primary_bases`)
+/// - any `*/<storage_quote>` cross (that IS a primary, not a cross)
+/// - crosses whose legs do not resolve
 pub fn expand_cross_pairs(
     cross_pairs: &[String],
     primary_bases: &[String],
+    storage_quote: &str,
 ) -> Vec<SynthPairYml> {
+    let quote = storage_quote.to_uppercase();
     let primaries: HashSet<String> = primary_bases
         .iter()
-        .map(|b| format!("{}/USDT", b.to_uppercase()))
+        .map(|b| format!("{}/{quote}", b.to_uppercase()))
         .collect();
 
     let mut out = Vec::with_capacity(cross_pairs.len());
@@ -38,10 +45,10 @@ pub fn expand_cross_pairs(
         let Some((base, quote)) = synth_sym.split_once('/') else {
             continue;
         };
-        if quote == "USDT" {
+        if quote == storage_quote {
             continue;
         }
-        let Some((leg_a, leg_b)) = legs_for_cross(base, quote) else {
+        let Some((leg_a, leg_b)) = legs_for_cross(base, quote, storage_quote) else {
             continue;
         };
         if !leg_resolves(&leg_a) || !leg_resolves(&leg_b) {
@@ -59,10 +66,10 @@ pub fn expand_cross_pairs(
 /// Generate the full directed N×(N−1) crypto-cross catalog over `assets`.
 ///
 /// Every ordered pair of distinct assets `A/B` (both directions — `A/B` and
-/// `B/A` are distinct inverse crosses) becomes a cross string, USDT-pivoted at
-/// composition time by [`legs_for_cross`]. This is the "all crosses by default"
-/// input: feed the result to [`expand_cross_pairs`], which drops any pair whose
-/// `A/USDT`/`B/USDT` legs don't resolve. Assets are the single canonical crypto
+/// `B/A` are distinct inverse crosses) becomes a cross string, pivoted at
+/// composition time by [`legs_for_cross`] onto the storage quote. This is the
+/// "all crosses by default" input: feed the result to [`expand_cross_pairs`],
+/// which drops any pair whose legs don't resolve. Assets are the single canonical crypto
 /// universe (`cexs.assets`); no per-cross declaration.
 pub fn all_crypto_crosses(assets: &[String]) -> Vec<String> {
     let up: Vec<String> = assets
@@ -87,13 +94,14 @@ fn normalize_cross(sym: &str) -> String {
         .replace('-', "/")
 }
 
-fn legs_for_cross(base: &str, quote: &str) -> Option<(String, String)> {
+fn legs_for_cross(base: &str, quote: &str, storage_quote: &str) -> Option<(String, String)> {
     if base.is_empty() || quote.is_empty() || base == quote {
         return None;
     }
-    let leg_a = format!("{}/USDT", base);
-    let leg_b = format!("{}/USDT", quote);
-    Some((leg_a, leg_b))
+    Some((
+        format!("{base}/{storage_quote}"),
+        format!("{quote}/{storage_quote}"),
+    ))
 }
 
 fn leg_resolves(sym: &str) -> bool {
@@ -113,29 +121,29 @@ mod tests {
         assert!(set.contains("ETH/BTC") && set.contains("BTC/ETH")); // both directions
         assert!(!set.contains("BTC/BTC"));
         // Feeds expand_cross_pairs cleanly (legs resolve for real majors).
-        let expanded = expand_cross_pairs(&out, &["BTC".into(), "ETH".into(), "SOL".into()]);
-        assert!(expanded.iter().any(|p| p.synth_sym == "ETH/BTC" && p.base_sym == "ETH/USDT"));
+        let expanded = expand_cross_pairs(&out, &["BTC".into(), "ETH".into(), "SOL".into()], "USD");
+        assert!(expanded.iter().any(|p| p.synth_sym == "ETH/BTC" && p.base_sym == "ETH/USD"));
     }
 
     #[test]
-    fn skips_usdt_primaries_and_keeps_crypto_crosses() {
+    fn skips_storage_quote_primaries_and_keeps_crypto_crosses() {
         let crosses = vec![
-            "BTC/USDT".into(),
+            "BTC/USD".into(),
             "ETH/BTC".into(),
             "BNB/ETH".into(),
             "PYUSD/USDC".into(),
-            "EUR/USDT".into(),
+            "EUR/USD".into(),
         ];
         let primaries = vec!["BTC".into(), "ETH".into(), "PYUSD".into()];
-        let out = expand_cross_pairs(&crosses, &primaries);
+        let out = expand_cross_pairs(&crosses, &primaries, "USD");
         let syms: HashSet<_> = out.iter().map(|p| p.synth_sym.as_str()).collect();
-        assert!(!syms.contains("BTC/USDT"));
-        assert!(!syms.contains("EUR/USDT"));
+        assert!(!syms.contains("BTC/USD"));
+        assert!(!syms.contains("EUR/USD"));
         assert!(syms.contains("ETH/BTC"));
         assert!(syms.contains("BNB/ETH"));
         assert!(syms.contains("PYUSD/USDC"));
         let eth_btc = out.iter().find(|p| p.synth_sym == "ETH/BTC").unwrap();
-        assert_eq!(eth_btc.base_sym, "ETH/USDT");
-        assert_eq!(eth_btc.quote_sym, "BTC/USDT");
+        assert_eq!(eth_btc.base_sym, "ETH/USD");
+        assert_eq!(eth_btc.quote_sym, "BTC/USD");
     }
 }

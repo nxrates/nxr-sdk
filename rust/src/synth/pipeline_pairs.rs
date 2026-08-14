@@ -6,14 +6,14 @@ use crate::synth::cross_expand::{all_crypto_crosses, expand_cross_pairs};
 /// Synth cross catalog for offline backfill/calibrate (and cross enumeration).
 ///
 /// ALL crosses by default: the full directed N² over the canonical crypto
-/// universe `cexs.assets`, USDT-pivoted. `expand_cross_pairs` drops any pair
-/// whose `A/USDT`/`B/USDT` legs don't resolve. No per-cross declaration —
-/// `cexs.cross_pairs` is retired. `synths.initial_pairs` stays only as a
-/// deprecated manual override when non-empty (empty in prod).
+/// universe `cexs.assets`, composed off the `<asset>/<storage_quote>` primaries.
+/// `expand_cross_pairs` drops any pair whose legs don't resolve. No per-cross
+/// declaration. `synths.initial_pairs` stays only as a deprecated manual
+/// override when non-empty (empty in prod).
 pub fn synth_pipeline_pairs(yml: &PipelineYml) -> Vec<SynthPairYml> {
     if !yml.synths.initial_pairs.is_empty() {
         return yml.synths.initial_pairs.clone();
     }
     let crosses = all_crypto_crosses(&yml.cexs.assets);
-    expand_cross_pairs(&crosses, &yml.series.pipeline.pairs)
+    expand_cross_pairs(&crosses, &yml.series.pipeline.pairs, &yml.cexs.pivot.storage_quote_for(""))
 }

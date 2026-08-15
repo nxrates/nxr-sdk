@@ -15,5 +15,5 @@ pub fn synth_pipeline_pairs(yml: &PipelineYml) -> Vec<SynthPairYml> {
         return yml.synths.initial_pairs.clone();
     }
     let crosses = all_crypto_crosses(&yml.cexs.assets);
-    expand_cross_pairs(&crosses, &yml.series.pipeline.pairs, &yml.cexs.pivot.storage_quote_for(""))
+    expand_cross_pairs(&crosses, &yml.series.pipeline.pairs, &yml.cexs.storage.storage_quote_for(""))
 }

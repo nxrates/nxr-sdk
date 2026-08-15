@@ -1055,10 +1055,10 @@ pub struct CexsYml {
     /// Per-asset market ranking + storage denomination
     /// (`docs/internal/storage-quote.md`).
     #[serde(default)]
-    pub pivot: PivotYml,
+    pub storage: StorageYml,
 }
 
-/// `cexs.pivot:` block: per-asset market ranking, weight caps and the published
+/// `cexs.storage:` block: per-asset market ranking, weight caps and the published
 /// storage denomination. Genuinely YAML-sourced: no env indirection, no Rust
 /// literal that outranks the file (the mistake `max_weight_per_source` and
 /// friends still carry).
@@ -1067,7 +1067,7 @@ pub struct CexsYml {
 /// and the aggregation basis it was named for is gone; rename key + struct to
 /// `storage:` / `StorageYml` in the same change that rolls the ConfigMap.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct PivotYml {
+pub struct StorageYml {
     /// Markets aggregated per asset (top-N by volume).
     #[serde(default)]
     pub max_markets_per_asset: Option<usize>,
@@ -1094,7 +1094,7 @@ pub struct PivotYml {
     pub storage_quote_overrides: std::collections::BTreeMap<String, String>,
 }
 
-impl PivotYml {
+impl StorageYml {
     /// Storage quote for `asset`: its override, else the global, else `USD`.
     pub fn storage_quote_for(&self, asset: &str) -> String {
         self.storage_quote_overrides
@@ -1308,7 +1308,7 @@ impl Default for BackfillDiskYml {
 mod tests {
     use super::*;
 
-    /// The deployed `config.yml` must actually reach `PivotYml`. These two keys
+    /// The deployed `config.yml` must actually reach `StorageYml`. These two keys
     /// sat in the YAML with no field behind them, so serde dropped them and the
     /// file asserted a storage policy the code never applied. Parse the REAL
     /// file, not a fixture: a fixture would have passed the whole time.
@@ -1319,11 +1319,11 @@ mod tests {
             return; // submodule checked out standalone: nothing to pin
         };
         let y: PipelineYml = serde_yml::from_str(&raw).expect("config.yml parses");
-        let pivot = y.cexs.pivot;
+        let pivot = y.cexs.storage;
         assert_eq!(
             pivot.storage_quote.as_deref(),
             Some("USD"),
-            "config.yml declares storage_quote but PivotYml did not read it"
+            "config.yml declares storage_quote but StorageYml did not read it"
         );
         assert!(
             pivot.storage_quote_overrides.is_empty(),

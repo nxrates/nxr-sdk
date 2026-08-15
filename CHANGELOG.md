@@ -99,7 +99,7 @@ written under the old id will not be found under the new one.
   Falcon Finance, Gnosis, The Graph, Kamino, Meteora, Render, Venus, Lombard,
   Sanctum Infinity); two malformed rows repaired. `weights_schema.rs` gained
   `asset_markets: BTreeMap<String, Vec<AssetMarket>>` and `pipeline_config.rs`
-  gained `CexsYml.pivot: PivotYml` (internal pipeline config, NOT client
+  gained `CexsYml.pivot: StorageYml` (internal pipeline config, NOT client
   surface, deliberately not ported to the other bindings).
   `client.rs` re-derived against the server DTOs, same closure as TS below:
   `SnapshotResponse` gained `flags`, `age_ms` and `status` (`age_ms` is

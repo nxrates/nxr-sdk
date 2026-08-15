@@ -29,6 +29,7 @@
 //!   `Index.flags`. This lets a gap-detection audit distinguish a *quiet*
 //!   market (sentinels present) from a *producer outage* (no sentinels).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
@@ -426,6 +427,116 @@ pub fn vol_dir(data_root: &Path) -> PathBuf {
 /// backfill writes this and the live producer primes from it.
 pub fn vol_path_for_id(data_root: &Path, ticker_id: u64) -> PathBuf {
     vol_dir(data_root).join(format!("{}.vol", ticker_id))
+}
+
+/// The sealed daily shard trees, as `(subdir, extension)`. `indexes` holds 56 B
+/// [`IndexRecord`]; `bars` holds 96 B `Bar` under TWO extensions in ONE
+/// directory. The rolling `.vol` is deliberately absent: it has no date, so it
+/// cannot be swept, moved or archived per day. Use [`ticker_artifacts`] to see
+/// everything, this table only when a per-day cutoff is the whole point.
+pub const DAILY_TREES: [(&str, &str); 3] =
+    [("indexes", "idx"), ("bars", "s10"), ("bars", "renko")];
+
+/// One on-disk artefact owned by a ticker id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickerArtifact {
+    /// Subdirectory under `data_root`: `indexes`, `bars`, or `vol`.
+    pub tree: &'static str,
+    /// File extension: `idx`, `s10`, `renko`, or `vol`.
+    pub ext: &'static str,
+    /// `None` for the rolling `.vol`, which is one whole-file artefact spanning
+    /// all history, replaced by atomic rename and read from its tail.
+    pub date: Option<NaiveDate>,
+    pub path: PathBuf,
+}
+
+/// Every file on disk owned by `ticker_id`: the sealed daily shards of both
+/// trees PLUS the rolling `.vol`. The single answer to "what does this ticker
+/// own"; migration, retention and archival call this and nothing else. A tool
+/// that walks `{indexes,bars}` by hand silently drops `.vol`, which is exactly
+/// how the phantom-id migration left every sigma prime pointing at a dead id.
+///
+/// Ids are RAW here, without the `series_alias` wrap mapping [`idx_dir`] and
+/// [`bars_dir`] apply: a wrap owns no bytes of its own, and resolving it would
+/// hand a caller the underlying's files to move or delete.
+pub fn ticker_artifacts(data_root: &Path, ticker_id: u64) -> Result<Vec<TickerArtifact>> {
+    let mut out = Vec::new();
+    for (tree, ext) in DAILY_TREES {
+        let dir = data_root.join(tree).join(ticker_id.to_string());
+        for (date, path) in list_shards(&dir, ext)? {
+            out.push(TickerArtifact {
+                tree,
+                ext,
+                date: Some(date),
+                path,
+            });
+        }
+    }
+    let vol = vol_path_for_id(data_root, ticker_id);
+    if vol.is_file() {
+        out.push(TickerArtifact {
+            tree: "vol",
+            ext: "vol",
+            date: None,
+            path: vol,
+        });
+    }
+    Ok(out)
+}
+
+/// Re-key a ticker's rolling `.vol` from `old_id` to `new_id`, the `.vol` half
+/// of any id migration. `false` means there was nothing to move. An existing
+/// destination is an ERROR, never an overwrite: that would hand one ticker's
+/// sigma prime to another.
+pub fn rename_vol(data_root: &Path, old_id: u64, new_id: u64) -> Result<bool> {
+    let src = vol_path_for_id(data_root, old_id);
+    if !src.is_file() {
+        return Ok(false);
+    }
+    let dst = vol_path_for_id(data_root, new_id);
+    if dst.exists() {
+        anyhow::bail!(
+            "{} already exists: refusing to overwrite the sigma prime",
+            dst.display()
+        );
+    }
+    fs::create_dir_all(vol_dir(data_root))?;
+    fs::rename(&src, &dst)
+        .with_context(|| format!("rename {} -> {}", src.display(), dst.display()))?;
+    Ok(true)
+}
+
+/// Every ticker id holding bytes on disk, across both shard trees and `vol/`.
+/// The entry point for a whole-store pass (retention, migration, archival);
+/// [`ticker_artifacts`] then enumerates each id.
+pub fn stored_ticker_ids(data_root: &Path) -> Result<BTreeSet<u64>> {
+    let mut ids = BTreeSet::new();
+    for (tree, _) in DAILY_TREES {
+        let dir = data_root.join(tree);
+        if !dir.is_dir() {
+            continue;
+        }
+        for e in fs::read_dir(&dir).with_context(|| format!("read_dir {}", dir.display()))? {
+            let p = e?.path();
+            if p.is_dir()
+                && let Some(id) = p.file_name().and_then(|n| n.to_str()?.parse().ok())
+            {
+                ids.insert(id);
+            }
+        }
+    }
+    let vdir = vol_dir(data_root);
+    if vdir.is_dir() {
+        for e in fs::read_dir(&vdir).with_context(|| format!("read_dir {}", vdir.display()))? {
+            let p = e?.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("vol")
+                && let Some(id) = p.file_stem().and_then(|n| n.to_str()?.parse().ok())
+            {
+                ids.insert(id);
+            }
+        }
+    }
+    Ok(ids)
 }
 
 /// Manifest path inside a ticker directory.
@@ -1591,6 +1702,43 @@ mod tests {
         let dir = idx_dir(&root, 703);
         let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 4); // 4 distinct observations kept, 1 identical dropped
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The enumerator is the ONLY inventory: a ticker holding all four artefact
+    /// kinds must report all four, `.vol` included. Every tool that walks the
+    /// store by hand has so far dropped `.vol`; this test is what stops the next
+    /// one.
+    #[test]
+    fn ticker_artifacts_reports_every_kind_including_vol() {
+        let root = std::env::temp_dir()
+            .join(format!("nxr_shard_artifacts_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let id = 711u64;
+        for (tree, ext) in DAILY_TREES {
+            let dir = root.join(tree).join(id.to_string());
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(format!("2026-01-02.{ext}")), b"x").unwrap();
+        }
+        // Decoys: a manifest and a foreign ticker must not be reported.
+        fs::write(manifest_path(&root.join("bars").join(id.to_string())), b"{}").unwrap();
+        fs::create_dir_all(vol_dir(&root)).unwrap();
+        fs::write(vol_path_for_id(&root, id), b"v").unwrap();
+        fs::write(vol_path_for_id(&root, 712), b"v").unwrap();
+
+        let found = ticker_artifacts(&root, id).unwrap();
+        let mut kinds: Vec<&str> = found.iter().map(|a| a.ext).collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, ["idx", "renko", "s10", "vol"]);
+        assert!(found.iter().all(|a| a.path.is_file()));
+        // The rolling artefact is dateless by construction; the shards are not.
+        assert_eq!(found.iter().filter(|a| a.date.is_none()).count(), 1);
+
+        assert_eq!(
+            stored_ticker_ids(&root).unwrap().into_iter().collect::<Vec<_>>(),
+            vec![711, 712],
+            "a vol-only ticker still has bytes on disk"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -570,6 +570,31 @@ pub fn read_vol_tail(path: &std::path::Path, max_rows: usize) -> Vec<(i64, f64)>
     out
 }
 
+/// Drop everything before the newest `max_rows` records, returning the bytes
+/// removed (0 if the file is missing, short enough, or not a record-size
+/// multiple). This is the rolling `.vol` counterpart to daily-shard retention:
+/// the file carries no dates to sweep, and no consumer ever reads further back
+/// than [`read_vol_tail`] with the live prime's depth, so row count is the only
+/// bound its shape admits.
+///
+/// tmp + rename, matching how the offline backfill publishes the same file: a
+/// concurrent prime reads the whole file in one `fs::read` and must never
+/// observe a truncated one.
+pub fn trim_vol_tail(path: &std::path::Path, max_rows: usize) -> std::io::Result<u64> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() % VOL_RECORD_BYTES != 0 {
+        return Ok(0); // corrupt or foreign format: not this function's to heal
+    }
+    let keep_from = bytes.len().saturating_sub(max_rows * VOL_RECORD_BYTES);
+    if keep_from == 0 {
+        return Ok(0);
+    }
+    let tmp = path.with_extension("vol.trim");
+    std::fs::write(&tmp, &bytes[keep_from..])?;
+    std::fs::rename(&tmp, path)?;
+    Ok(keep_from as u64)
+}
+
 impl VolSource for LiveVolRing {
     #[inline]
     fn len(&self) -> usize {

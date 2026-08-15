@@ -1076,10 +1076,10 @@ pub struct PivotYml {
     pub max_weight_at_max_markets: Option<f64>,
     /// A challenger pivot must beat the incumbent by this ratio.
     #[serde(default)]
-    pub main_leg_switch_ratio: Option<f64>,
+    pub pivot_switch_ratio: Option<f64>,
     /// Minimum dwell between volume-driven pivot switches.
     #[serde(default)]
-    pub main_leg_min_dwell_secs: Option<u64>,
+    pub pivot_min_dwell_secs: Option<u64>,
     /// PUBLISHED denomination for every CR asset, distinct from the pivot. The
     /// pivot is the internal aggregation basis and moves with liquidity; this
     /// decides the ticker_id, and therefore the `.idx`/`.s10` directory name,

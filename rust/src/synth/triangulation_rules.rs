@@ -5,8 +5,8 @@
 //! appended to the snapshot map as a virtual ticker.
 //!
 //! What is NOT here any more, and must never come back: the injection registry,
-//! the `<crypto>/USD` majors, and the `<crypto>/<fiat>` crosses. A quoting leg is
-//! DERIVED now. `core::pivot` infers each CR asset's aggregation basis from the
+//! the `<crypto>/USD` majors, and the `<crypto>/<fiat>` crosses. A storage
+//! primary is DERIVED now. `core::pivot` infers each CR asset's pivot from the
 //! volume survey and materialises exactly one `<asset>/<storage_quote>` primary
 //! per asset; every other pair composes on read off those primaries. Adding a
 //! pin here re-freezes a basis the survey is meant to move.

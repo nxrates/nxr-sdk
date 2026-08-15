@@ -205,7 +205,7 @@ pub struct AssetRow {
     pub class_id: u16,
     /// Packed 32-bit asset id (4-bit class + 16-bit class_id).
     pub asset_id: u32,
-    /// PUBLISHED denomination, fixed per asset. Not the pivot (an internal
+    /// PUBLISHED denomination, fixed per asset. Not a counter (an internal
     /// aggregation basis that may move hourly).
     pub storage_quote: String,
     pub market_count: usize,

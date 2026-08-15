@@ -1052,14 +1052,20 @@ pub struct CexsYml {
     /// Volume scraper config — URLs + intervals. Was: `weights::scraper::CMC_PAIRS_URL`.
     #[serde(default)]
     pub scraper: ScraperYml,
-    /// Pivot inference knobs (`docs/internal/pivot-inference.md`).
+    /// Per-asset market ranking + storage denomination
+    /// (`docs/internal/storage-quote.md`).
     #[serde(default)]
     pub pivot: PivotYml,
 }
 
-/// `cexs.pivot:` block: per-asset market ranking + weight cap knobs.
-/// Genuinely YAML-sourced: no env indirection, no Rust literal that outranks
-/// the file (the mistake `max_weight_per_source` and friends still carry).
+/// `cexs.pivot:` block: per-asset market ranking, weight caps and the published
+/// storage denomination. Genuinely YAML-sourced: no env indirection, no Rust
+/// literal that outranks the file (the mistake `max_weight_per_source` and
+/// friends still carry).
+///
+/// ponytail: the YAML key is still `pivot:` because it is a deployed ConfigMap
+/// and the aggregation basis it was named for is gone; rename key + struct to
+/// `storage:` / `StorageYml` in the same change that rolls the ConfigMap.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PivotYml {
     /// Markets aggregated per asset (top-N by volume).
@@ -1074,24 +1080,16 @@ pub struct PivotYml {
     /// Weight cap at `n >= max_markets_per_asset`.
     #[serde(default)]
     pub max_weight_at_max_markets: Option<f64>,
-    /// A challenger pivot must beat the incumbent by this ratio.
-    #[serde(default)]
-    pub pivot_switch_ratio: Option<f64>,
-    /// Minimum dwell between volume-driven pivot switches.
-    #[serde(default)]
-    pub pivot_min_dwell_secs: Option<u64>,
-    /// PUBLISHED denomination for every CR asset, distinct from the pivot. The
-    /// pivot is the internal aggregation basis and moves with liquidity; this
-    /// decides the ticker_id, and therefore the `.idx`/`.s10` directory name,
-    /// so it is fixed. Aggregate in pivot basis, convert ONCE into this.
-    /// Absent = `USD`. Was declared in `config.yml` but read by nothing, so the
-    /// YAML asserted a policy the code never applied.
+    /// PUBLISHED denomination for every CR asset: it decides the ticker_id, and
+    /// therefore the `.idx`/`.s10` directory name, so it is fixed for the
+    /// process. Every market of an asset is converted straight into it.
+    /// Absent = `USD`.
     pub storage_quote: Option<String>,
     /// Per-asset exceptions, keyed by base asset symbol. Keep EMPTY: it exists
     /// for an asset with no credible route to the storage quote, not as a
     /// tuning surface. An unreachable storage quote must fail loudly at boot
-    /// rather than publish in pivot basis, which would put two denominations in
-    /// one series.
+    /// rather than publish in a foreign denomination, which would put two units
+    /// in one series.
     #[serde(default)]
     pub storage_quote_overrides: std::collections::BTreeMap<String, String>,
 }

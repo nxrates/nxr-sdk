@@ -266,7 +266,7 @@ export interface AssetRow {
   /** Packed 32-bit asset id (4-bit class + 16-bit class_id). */
   asset_id: number;
   /**
-   * PUBLISHED denomination, fixed per asset. Not the pivot, which is an
+   * PUBLISHED denomination, fixed per asset. Not a counter, which is an
    * internal aggregation basis and may move hourly.
    */
   storage_quote: string;

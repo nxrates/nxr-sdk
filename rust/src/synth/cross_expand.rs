@@ -12,7 +12,7 @@ use std::collections::HashSet;
 /// Return synth-pipeline work items for all resolvable crosses.
 ///
 /// Both legs are taken in `storage_quote`, the PUBLISHED denomination, so a
-/// cross composes off the same `<asset>/<storage_quote>` primaries `core::pivot`
+/// cross composes off the same `<asset>/<storage_quote>` primaries `core::storage`
 /// materialises. It was a literal `{base}/USDT`, which quietly priced the peg at
 /// 1 and pinned every cross to a basis the volume survey is free to move.
 ///

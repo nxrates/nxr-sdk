@@ -76,7 +76,7 @@ pub struct WeightsFile {
     #[serde(default)]
     pub exchanges: BTreeMap<String, ExchangeMeta>,
     /// Per-CR-asset market ranking derived from `pair_volumes`. FACTS only: the
-    /// pivot decision belongs to core, which has liveness and hysteresis.
+    /// conversion belongs to core, which has the bridges and the liveness view.
     #[serde(default)]
     pub asset_markets: BTreeMap<String, Vec<AssetMarket>>,
     /// Calibrated Renko `multiplier` per ticker (output of `nxr-calibrate`).

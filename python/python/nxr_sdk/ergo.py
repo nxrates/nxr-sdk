@@ -235,7 +235,7 @@ class Asset:
     class_id: int = 0
     #: Packed 32-bit asset id (4-bit class + 16-bit class_id).
     asset_id: int = 0
-    #: PUBLISHED denomination, fixed per asset. Never the (hourly) pivot.
+    #: PUBLISHED denomination, fixed per asset. Never a counter denomination.
     storage_quote: str = ""
     market_count: int = 0
     venue_count: int = 0

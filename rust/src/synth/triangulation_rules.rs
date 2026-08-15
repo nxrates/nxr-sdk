@@ -6,10 +6,11 @@
 //!
 //! What is NOT here any more, and must never come back: the injection registry,
 //! the `<crypto>/USD` majors, and the `<crypto>/<fiat>` crosses. A storage
-//! primary is DERIVED now. `core::pivot` infers each CR asset's pivot from the
-//! volume survey and materialises exactly one `<asset>/<storage_quote>` primary
-//! per asset; every other pair composes on read off those primaries. Adding a
-//! pin here re-freezes a basis the survey is meant to move.
+//! primary is DERIVED now. `core::storage` converts each CR asset's surveyed
+//! markets straight into its storage quote and materialises exactly one
+//! `<asset>/<storage_quote>` primary per asset; every other pair composes on
+//! read off those primaries. Adding a pin here re-freezes a route the survey is
+//! meant to move.
 //!
 //! ## Relation to [`crate::synth::cross`]
 //!
@@ -143,7 +144,7 @@ mod tests {
     /// The graph is built from the rule LEGS only, which is the resolver's
     /// contract (edges are primaries). That contract is what retired the
     /// `derive_legs` self-reference guard: the USDT/JPY bug was a registered
-    /// synthesis OUTPUT winning a pivot leg, and an output is not a primary, so
+    /// synthesis OUTPUT winning a conversion leg, and an output is not a primary, so
     /// it is not in the graph to win.
     #[test]
     fn every_synthesis_rule_is_routable_from_its_own_legs() {

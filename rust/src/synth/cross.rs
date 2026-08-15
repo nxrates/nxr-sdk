@@ -3,7 +3,7 @@
 //! Every live primary ticker is an undirected edge between its two packed
 //! MITCH asset ids, usable in either direction (inverted, exponent flipped).
 //! Crossing any pair is then a shortest-path query on that graph, so nothing
-//! here is anchored to USD, USDT or any other pivot, and nothing is gated on
+//! here is anchored to USD, USDT or any other bridge, and nothing is gated on
 //! which forwarder observed the leg: a leg is a leg whether it arrived from
 //! cTrader, Pyth, IBKR or a CEX.
 //!
@@ -27,7 +27,7 @@
 //! trustworthy as its weakest hop, and summing depth lets one deep leg mask a
 //! leg with no book behind it. Remaining ties break on the leg symbols, which
 //! keeps a volume-blind caller (no weights file yet) deterministic and, because
-//! `EUR/USD` sorts before `EUR/USDT`, keeps the deep USD pivot that the retired
+//! `EUR/USD` sorts before `EUR/USDT`, keeps the deep USD bridge that the retired
 //! per-symbol `SYNTH_PATHS` pins used to hard-code.
 
 use std::cmp::Ordering;
@@ -63,7 +63,7 @@ pub fn symbol_assets(sym: &str) -> Option<(AssetId, AssetId)> {
 
 /// Longest route considered.
 ///
-/// 3 covers every shape in production: direct, one pivot (`CHF/JPY` over
+/// 3 covers every shape in production: direct, one bridge (`CHF/JPY` over
 /// `USD/CHF` + `USD/JPY`), and an instrument quoted in a non-anchor currency
 /// re-quoted through that currency (`GER40/EUR` + `EUR/USD` + `USD/JPY`).
 /// ponytail: 3 hops, raising it needs a bound on the frontier expansion below,
@@ -261,7 +261,7 @@ impl CrossGraph {
     ///
     /// Only offer tickers with a real book behind them. A composed output used
     /// as an edge is how a cross ends up referencing itself, which is the
-    /// self-reference class the retired `derive_legs` pivot guard existed for:
+    /// self-reference class the retired `derive_legs` bridge guard existed for:
     /// here it is a build-time contract instead of a per-query special case.
     /// Self-pairs (`USDT/USDT`) are dropped: no book backs them and they can
     /// only add a zero-length detour.
@@ -574,7 +574,7 @@ mod tests {
     /// The USD pin the table encoded per symbol: with a thin `EUR/USDT` also
     /// present, both routes are 2 legs, so the tie-break must keep USD.
     #[test]
-    fn volume_blind_tie_break_keeps_the_usd_pivot() {
+    fn volume_blind_tie_break_keeps_the_usd_bridge() {
         let g = graph(&["EUR/USD", "USDC/USD", "EUR/USDT", "USDC/USDT"]);
         assert_eq!(
             route(&g, "EUR/USDC"),
@@ -582,7 +582,7 @@ mod tests {
         );
     }
 
-    /// Depth beats symbol order when weights are known: the thin pivot loses
+    /// Depth beats symbol order when weights are known: the thin bridge loses
     /// even though its symbols sort first.
     #[test]
     fn depth_ranks_by_the_thinnest_leg() {
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn shortest_route_wins_over_a_longer_deeper_one() {
-        // GBP/JPY direct, or GBP→USD→JPY. Depth favours the pivot route; hop
+        // GBP/JPY direct, or GBP→USD→JPY. Depth favours the bridge route; hop
         // count must still take the direct book.
         let g = graph(&["GBP/JPY", "GBP/USD", "USD/JPY"]);
         let vol = |id: u64| -> f64 {

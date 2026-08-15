@@ -66,7 +66,7 @@ pub fn expand_cross_pairs(
 /// Generate the full directed N×(N−1) crypto-cross catalog over `assets`.
 ///
 /// Every ordered pair of distinct assets `A/B` (both directions — `A/B` and
-/// `B/A` are distinct inverse crosses) becomes a cross string, pivoted at
+/// `B/A` are distinct inverse crosses) becomes a cross string, bridged at
 /// composition time by [`legs_for_cross`] onto the storage quote. This is the
 /// "all crosses by default" input: feed the result to [`expand_cross_pairs`],
 /// which drops any pair whose legs don't resolve. Assets are the single canonical crypto

@@ -26,7 +26,7 @@ use crate::tdwap::{decode_ci_ubp, encode_ci_ubp};
 /// - `open/close`     = product of leg opens / closes — exact synthetic endpoints.
 /// - `high/low`       = ALIGNED corners: envelope of {open, close, Π highᵢ^expᵢ,
 ///   Π lowᵢ^expᵢ} — assumes leg extremes co-occur (correlated legs sharing a
-///   pivot quote, the overwhelmingly common case). The outward corner
+///   bridge quote, the overwhelmingly common case). The outward corner
 ///   (+1 leg high ÷ −1 leg low) was REJECTED 2026-07-15: it multiplies leg
 ///   ranges and paints large symmetric synthetic wicks on every cross,
 ///   especially after rollup to high TFs. Aligned corners can under-range

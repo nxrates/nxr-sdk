@@ -1063,9 +1063,9 @@ pub struct CexsYml {
 /// literal that outranks the file (the mistake `max_weight_per_source` and
 /// friends still carry).
 ///
-/// ponytail: the YAML key is still `pivot:` because it is a deployed ConfigMap
-/// and the aggregation basis it was named for is gone; rename key + struct to
-/// `storage:` / `StorageYml` in the same change that rolls the ConfigMap.
+/// Serde ignores unknown keys, so a ConfigMap still carrying the retired
+/// `pivot:` key falls back to defaults rather than failing: roll the ConfigMap
+/// with the image that reads `storage:`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct StorageYml {
     /// Markets aggregated per asset (top-N by volume).
@@ -1319,17 +1319,17 @@ mod tests {
             return; // submodule checked out standalone: nothing to pin
         };
         let y: PipelineYml = serde_yml::from_str(&raw).expect("config.yml parses");
-        let pivot = y.cexs.storage;
+        let storage = y.cexs.storage;
         assert_eq!(
-            pivot.storage_quote.as_deref(),
+            storage.storage_quote.as_deref(),
             Some("USD"),
             "config.yml declares storage_quote but StorageYml did not read it"
         );
         assert!(
-            pivot.storage_quote_overrides.is_empty(),
+            storage.storage_quote_overrides.is_empty(),
             "overrides must stay empty: they are for an asset with no USD route, not tuning"
         );
-        assert_eq!(pivot.storage_quote_for("BTC"), "USD");
+        assert_eq!(storage.storage_quote_for("BTC"), "USD");
     }
 
     fn cal() -> CalibrationYml {
@@ -1453,7 +1453,7 @@ mod tests {
         );
     }
 
-    /// Sepolia 24-asset pivot (2026-07-21): SYRUPUSDC (Maple's yield-bearing
+    /// Sepolia 24-asset set (2026-07-21): SYRUPUSDC (Maple's yield-bearing
     /// vault share, NAV ≈1.174) deliberately is NOT in `cexs.pegged` (same
     /// reasoning as EURC/SUSDE), so classify_ticker would bucket its /USDT and
     /// /USDC crosses `crypto_alt` (no class default, flat 300bpd) without the

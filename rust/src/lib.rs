@@ -80,7 +80,7 @@ pub use shard::{BarShardWriter, IdxShardWriter};
 
 pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
 pub use renko::{RenkoConfig, RenkoGenerator};
-pub use vol::{LiveVolRing, MtfVolCalculator, VolConfig, VolSource, read_vol_tail};
+pub use vol::{LiveVolRing, MtfVolCalculator, VolConfig, VolSource, read_vol_tail, trim_vol_tail};
 pub use vol_estimator::rs_sigma_from_ohlc;
 
 // ---- Ticker resolution ----

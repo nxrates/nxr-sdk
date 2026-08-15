@@ -163,7 +163,7 @@ pub fn effective_list<'a>(yaml: &'a [String], default: &'static [&'static str])
 pub const DEFAULT_CRYPTO_MAJORS: &[&str] = &["BTC", "ETH", "SOL", "BNB", "XRP"];
 
 /// Audit-frozen fallback stablecoin list. Mirrors the Tier-1 set in
-/// `config.yml::cexs.stablecoins`. Used only when YAML empty (warn).
+/// `config.yml::cexs.pegged`. Used only when YAML empty (warn).
 /// `EURC` intentionally omitted from the fallback — Tier-1 is USD-pegged.
 pub const DEFAULT_STABLECOINS: &[&str] = &[
     "USDT", "USDC", "FDUSD", "BUSD", "TUSD", "DAI",

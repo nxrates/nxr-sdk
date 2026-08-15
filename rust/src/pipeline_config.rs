@@ -116,9 +116,36 @@ fn default_true() -> bool {
     true
 }
 
+/// Packed record layout of a signed blob. The EIP-712 digest commits to BYTES,
+/// never to a schema, so a blob built in one layout and decoded in the other
+/// carries a VALID signature over misparsed prices. Declared per deployment and
+/// never inferred: it must equal the consumer contract's `RECORD_BYTES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordFormat {
+    /// Legacy: 24 B/record, keyed by the deployment-local on-chain ordinal.
+    Idx24,
+    /// Current: 30 B/record, keyed by the content-derived MITCH ticker id.
+    Ticker30,
+}
+
+impl RecordFormat {
+    pub const fn record_bytes(self) -> usize {
+        match self {
+            Self::Idx24 => 24,
+            Self::Ticker30 => 30,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedQuotesYml {
+    /// REQUIRED wire layout of every emitted/validated record. No default: a
+    /// guess here is a wrong-price push, since a mismatched layout still
+    /// verifies on-chain. See [`RecordFormat`].
+    #[serde(default)]
+    pub record_format: Option<RecordFormat>,
     /// Deployed ExternalOracle address (0x-hex, 20 bytes) — EIP-712
     /// `verifyingContract`.
     pub oracle: String,

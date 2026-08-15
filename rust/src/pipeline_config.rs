@@ -1009,12 +1009,15 @@ pub struct CexsYml {
     /// `weights::config::Cexs::aliases`.
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
-    /// Stablecoins recognized at runtime (was: `core::weights::BRIDGE_STABLES`,
-    /// `series_factory/renko_trailing::STABLE_SYMBOLS`, `mtf_sweep::STABLE_SYMBOLS`).
+    /// USD-pegged subset of `assets`: a PRICE property, not universe membership.
+    /// Selects the tight ingest band plus absolute peg anchor, the peg-tight
+    /// signed-quote ci ceiling, and it is the only thing that makes
+    /// `signed_quotes.single_source` legal on a feed. Distinct from
+    /// `triangulation.stablecoins`, which selects auto-cross leg eligibility.
     #[serde(default)]
-    pub stablecoins: Vec<String>,
-    /// Bridge-quoted stables (subset of `stablecoins` used for synth-USD
-    /// derivation). If empty, callers fall back to `stablecoins`.
+    pub pegged: Vec<String>,
+    /// Bridge-quoted stables (subset of `pegged` used for synth-USD
+    /// derivation). If empty, callers fall back to `pegged`.
     #[serde(default)]
     pub bridge_stables: Vec<String>,
     /// USD fiat quote aliases recognized by the synth-injection builder as
@@ -1173,7 +1176,7 @@ pub struct CalibrationYml {
     /// Per-asset-class `target_bpd` defaults keyed by `AssetClassBucket::as_key`
     /// (e.g. "crypto_stable" → 50). Applied when no per-pair override matches,
     /// using the class detected by `asset_class::bucket_for_pair` (which reads
-    /// MITCH wire bits + the `cexs.stablecoins` membership list). Lets every
+    /// MITCH wire bits + the `cexs.pegged` membership list). Lets every
     /// stable/stable pair inherit the low target by CLASS, so a newly listed
     /// stablecoin can't silently fall back to the flat 300 default just because
     /// nobody added it to the per-pair override list.
@@ -1434,7 +1437,7 @@ mod tests {
     }
 
     /// EURC/USDC (2026-07-21): classify_ticker (asset_class.rs) wrongly buckets
-    /// it `crypto_stable` (EURC ∈ cexs.stablecoins, CR/CR vs USDC) even though
+    /// it `crypto_stable` (EURC ∈ cexs.pegged, CR/CR vs USDC) even though
     /// EURC is EUR-pegged (~1.14), not a $1 peg. The real repo config.yml
     /// carries an explicit per-pair override to force it back to the
     /// FX-appropriate flat tier regardless of the (wrong) class the runtime
@@ -1453,10 +1456,10 @@ mod tests {
     }
 
     /// Sepolia 24-asset pivot (2026-07-21): SYRUPUSDC (Maple's yield-bearing
-    /// vault share, NAV ≈1.174) deliberately is NOT in `cexs.stablecoins` (same
+    /// vault share, NAV ≈1.174) deliberately is NOT in `cexs.pegged` (same
     /// reasoning as EURC/SUSDE), so classify_ticker would bucket its /USDT and
     /// /USDC crosses `crypto_alt` (no class default, flat 300bpd) without the
-    /// explicit override. AUSD (Agora Dollar) IS in `cexs.stablecoins`, so its
+    /// explicit override. AUSD (Agora Dollar) IS in `cexs.pegged`, so its
     /// (CR,FX) /USD leg needs the same explicit-override treatment U/USDG/USDF/
     /// USDTB/BFUSD all needed — class detection never fires for a CR,FX pair.
     #[test]

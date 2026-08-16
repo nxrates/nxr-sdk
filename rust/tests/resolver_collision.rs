@@ -405,8 +405,13 @@ fn crypto_quoted_bases_never_lose_to_an_equity() {
 
     // Every token traded against a crypto quote must own its ticker, including
     // the ones whose ticker an equity also uses.
+    //
+    // INF/USDT was in this list until 2026-08-15. Sanctum Infinity had no CEX
+    // market on any venue we scrape, so its crypto-assets.csv row was removed
+    // and INF now resolves to the Informa equity, which is the correct answer
+    // once no crypto INF is served.
     for sym in [
-        "CFG/USDT", "MET/USDT", "FF/USDT", "INF/USDT", "BARD/USDT", "ENS/USDT", "GNO/USDT",
+        "CFG/USDT", "MET/USDT", "FF/USDT", "BARD/USDT", "ENS/USDT", "GNO/USDT",
         "GRT/USDT", "KMNO/USDT", "RENDER/USDT", "RNDR/USDT", "XVS/USDT",
     ] {
         let id = nxr_sdk::try_resolve_ticker_id(sym)

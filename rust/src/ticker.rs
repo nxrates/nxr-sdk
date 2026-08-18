@@ -10,10 +10,10 @@ use tracing::warn;
 /// caller — this fn does no case folding). Returns `None` when the input
 /// has no `/`, has more than one `/`, or either side is empty.
 ///
-/// Single SDK source of truth — was duplicated as
-/// `pair.split('/')` ad-hoc parsing across `core::weights`,
-/// `weights::main`, `series-factory::bin::nxr_calibrate`, `crypto::client`,
-/// `crypto::exchange::upbit`. Phase 59.R3.H4.
+/// Single SDK source of truth. Replaced ad-hoc splitting in `core::weights`,
+/// `weights::main`, `series-factory::bin::nxr_calibrate`, `crypto::client`
+/// (phase 59.R3.H4) and, in `crypto::exchange::upbit`, `format_symbol` then
+/// `normalize_symbol` (which kept a hand-rolled `find('-')` until 2026-08-18).
 #[inline]
 pub fn split_pair(pair: &str) -> Option<(&str, &str)> {
     split_pair_multi(pair, &['/'])

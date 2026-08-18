@@ -218,12 +218,12 @@ pub struct SignedQuotesYml {
     /// observation (ms). Default 250, hard-capped at 500.
     #[serde(default)]
     pub provenance_tolerance_ms: Option<i64>,
-    /// Signable catalog (allowlist + per-feed policy). `idx` MUST equal the
-    /// feed's position in the on-chain append-only `feedIds[]` (idx never
-    /// remaps). Consumers subscribe dynamically via
-    /// `GET /v1/quote/signed?idxs=…` (catalog-ordered subset); absent `idxs`
-    /// defaults to this full list. Keeper cross-checks
-    /// `feedIds(idx) == feed_id` at startup and requires subscription ⊆ catalog.
+    /// Signable catalog (per-feed policy; signing itself is universal). Every
+    /// row carries an EXPLICIT `idx`, its 1-based ordinal in the consumer
+    /// contract's append-only `feedIds[]`. Array position is NOT the ordinal
+    /// and must never be used as one. `/v1/quote/signed/meta` publishes each
+    /// `idx`; consumers subscribe via `GET /v1/quote/signed?idxs=…` (explicit
+    /// idx values) or `?symbols=…`, and both absent defaults to this full list.
     pub feeds: Vec<SignedFeedYml>,
     /// Asset-level blacklist for UNIVERSAL signing. Any NON-catalog requested
     /// symbol whose base OR quote ASSET is listed here is refused (400) even
@@ -352,12 +352,18 @@ pub struct SignedPeerYml {
 }
 
 /// One signed-quote feed: an NXR symbol this deployment may sign, plus its
-/// signing policy. Carries NO on-chain ordinal: the record is keyed by the
-/// MITCH ticker id the symbol resolves to, and the ordinal→feed mapping is
-/// BTR's business concern, held on the BTR side only.
+/// signing policy and its on-chain ordinal.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedFeedYml {
+    /// This feed's ordinal in the consumer contract's append-only `feedIds[]`.
+    /// 1-BASED as deployed, and an EXPLICIT value: it is NOT the row's array
+    /// position and must never be derived from position. It is the on-chain
+    /// binding, so a wrong value writes a price into the WRONG feed slot under
+    /// a valid signature. A tier signs a SUBSET of one contract's `feedIds[]`,
+    /// so a configured set need be neither contiguous nor start at 1; only
+    /// uniqueness is enforced (signed.rs boot).
+    pub idx: u16,
     /// NXR symbol whose mark/σ/CI back the feed (e.g. `BTC-USDC`).
     pub symbol: String,
     /// Required maximum deviation, in basis points, between a proposed mark
@@ -424,6 +430,21 @@ pub struct SignedFeedYml {
     /// retention keeps.
     #[serde(default)]
     pub sigma_window_bars: Option<u32>,
+    /// Publish the RECIPROCAL of `symbol`: the mark is `1/mid(symbol)` and the
+    /// record carries the reciprocal pair's MITCH ticker id.
+    ///
+    /// Set where the feed is DENOMINATED in a pair NXR only serves the other
+    /// way up. BTR declares that split per asset (`sdk/src/venues/nxr.ts`
+    /// `NXR_MARKS`: `nxrSymbol` = what the record means, `nxrQuote` = the pair
+    /// actually served), and its generator emits `invert: true` for exactly the
+    /// four USD-base FX legs whose `nxrQuote` is set: `USD-CAD`, `USD-BRL`,
+    /// `USD-JPY`, `USD-KRW`. Dropping the flip there publishes 1.387 into a
+    /// CAD/USD slot: a plausible number, upside down.
+    ///
+    /// σ and CI are RELATIVE (log-return σ, bps confidence) and invariant under
+    /// inversion, so only the mid flips.
+    #[serde(default)]
+    pub invert: bool,
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the
@@ -1516,7 +1537,7 @@ mod tests {
              chain_id: 56\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 3\n\
              min_composite_freshness_bps: 9000\nquorum: 2\npeers:\n\
                - { url: 'http://signer.internal:8080', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 2.0 }\n",
+             feeds:\n  - { idx: 1, symbol: 'BTC-USDC', cosign_tolerance_bps: 2.0 }\n",
         )
         .expect("parse hardened signed_quotes schema");
         assert_eq!(current.min_interval_ms, 5);
@@ -1528,7 +1549,7 @@ mod tests {
              chain_id: 56\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 3\n\
              min_composite_freshness_bps: 9000\nquorum: 2\npeers:\n\
                - { url: 'http://signer.internal:8080', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { symbol: 'BTC-USDC' }\n";
+             feeds:\n  - { idx: 1, symbol: 'BTC-USDC' }\n";
         assert!(
             serde_yml::from_str::<SignedQuotesYml>(missing_feed_tolerance).is_err(),
             "every feed must explicitly set cosign_tolerance_bps"
@@ -1538,7 +1559,7 @@ mod tests {
                       chain_id: 56\nmark_max_age_s: 120\nmin_accepted_providers: 3\n\
                       min_composite_freshness_bps: 9000\nquorum: 2\n\
                       peers: ['http://signer.internal:8080']\ncosign_tolerance_bps: 25\n\
-                      feeds:\n  - { symbol: 'BTC-USDC' }\n";
+                      feeds:\n  - { idx: 1, symbol: 'BTC-USDC' }\n";
         assert!(
             serde_yml::from_str::<SignedQuotesYml>(legacy).is_err(),
             "legacy seconds/unpinned-peer config must fail closed"
@@ -1570,7 +1591,7 @@ mod tests {
              chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
              min_composite_freshness_bps: 500\nquorum: 1\npeers: []\n\
              feeds:\n\
-               - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+               - { idx: 1, symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse");
         // Default legs are 6 h / 2 d / 1 w ⇒ longest = 7 d ⇒ 7 + edge day.
@@ -1607,9 +1628,9 @@ mod tests {
              min_composite_freshness_bps: 500\nquorum: 2\npeers:\n\
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
              feeds:\n\
-               - { symbol: 'USDT-USD', cosign_tolerance_bps: 2.0 }\n\
-               - { symbol: 'usds-usdc', cosign_tolerance_bps: 2.0 }\n\
-               - { symbol: 'ETH-USDC', cosign_tolerance_bps: 5.0 }\n",
+               - { idx: 1, symbol: 'USDT-USD', cosign_tolerance_bps: 2.0 }\n\
+               - { idx: 2, symbol: 'usds-usdc', cosign_tolerance_bps: 2.0 }\n\
+               - { idx: 3, symbol: 'ETH-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse sign_only-absent schema");
         // Opt-in: absent ⇒ false, so full-replica behavior is untouched by default.
@@ -1627,7 +1648,7 @@ mod tests {
              chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 2\n\
              min_composite_freshness_bps: 9000\nquorum: 2\nsign_only: true\npeers:\n\
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+             feeds:\n  - { idx: 1, symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse explicit sign_only:true");
         assert!(on.sign_only);
@@ -1750,5 +1771,49 @@ mod tests {
             "a cross composes on read and must never be backfilled or reported missing"
         );
         assert_eq!(y.relay_providers(), vec!["pyth", "pepperstone"]);
+    }
+
+    /// REGRESSION GUARD, not a style test. This block is the live ConfigMap
+    /// `nxr-signer-sepolia-config` `signed_quotes.feeds`. `SignedQuotesYml` is
+    /// `deny_unknown_fields`, so a schema that has dropped `idx` or `invert`
+    /// does not degrade: it fails to parse and crashloops the whole signer
+    /// fleet on boot. Note what it legitimately contains: the SAME symbol on
+    /// two slots (BTC-USDC at idx 17 and 18, distinct ERC-20s sharing one
+    /// mark), and a non-contiguous idx set (no 19, 21, 22, 23, 25) because a
+    /// tier signs a SUBSET of one contract's `feedIds[]`.
+    #[test]
+    fn live_sepolia_configmap_feeds_parse() {
+        let feeds: Vec<SignedFeedYml> = serde_yml::from_str(
+            r#"
+- { idx: 1, symbol: USDT-USD, cosign_tolerance_bps: 5.0, max_age_ms: 60000, single_source: true, optional: true }
+- { idx: 2, symbol: USDE-USD, cosign_tolerance_bps: 5.0, max_age_ms: 60000, single_source: true, optional: true }
+- { idx: 16, symbol: ETH-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, sigma_window_bars: 336 }
+- { idx: 17, symbol: BTC-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, optional: true, sigma_window_bars: 336 }
+- { idx: 18, symbol: BTC-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, optional: true, sigma_window_bars: 336 }
+- { idx: 20, symbol: XAUT-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, optional: true, min_active_providers: 1, sigma_tol_pbps: 500, sigma_window_bars: 336 }
+- { idx: 24, symbol: USD-CAD, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
+- { idx: 26, symbol: USD-BRL, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
+- { idx: 27, symbol: USD-JPY, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
+- { idx: 28, symbol: USD-KRW, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
+"#,
+        )
+        .expect("the live ConfigMap feeds block must parse");
+
+        assert_eq!(
+            feeds.iter().map(|f| f.idx).collect::<Vec<_>>(),
+            vec![1, 2, 16, 17, 18, 20, 24, 26, 27, 28],
+            "idx is the feed's own 1-based field, never its array position"
+        );
+        assert_eq!(
+            feeds.iter().filter(|f| f.symbol == "BTC-USDC").count(),
+            2,
+            "one mark on two on-chain slots is legal; only idx is unique"
+        );
+        assert_eq!(
+            feeds.iter().filter(|f| f.invert).map(|f| f.symbol.as_str()).collect::<Vec<_>>(),
+            vec!["USD-CAD", "USD-BRL", "USD-JPY", "USD-KRW"],
+            "the four USD-base FX legs publish the reciprocal"
+        );
+        assert!(!feeds[0].invert, "invert defaults false");
     }
 }

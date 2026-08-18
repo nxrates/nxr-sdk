@@ -226,14 +226,16 @@ pub struct SignedQuotesYml {
     /// `feedIds(idx) == feed_id` at startup and requires subscription ⊆ catalog.
     pub feeds: Vec<SignedFeedYml>,
     /// Asset-level blacklist for UNIVERSAL signing. Any NON-catalog requested
-    /// symbol whose base OR quote ASSET (uppercased token symbol, e.g. `USDF`,
-    /// `BUSD`) is listed here is refused (400) even when it resolves to a
-    /// routable ticker. Catalog feeds are NOT gated by this: an
-    /// operator-declared feed carries its own explicit per-feed policy, so it
-    /// may legitimately name a blacklisted asset. Empty (default) = universal
-    /// signing for every routable symbol. Match is by asset symbol, never by
-    /// ticker id, so a blacklist entry covers every pair quoting that asset
-    /// regardless of which exchange materialized it.
+    /// symbol whose base OR quote ASSET is listed here is refused (400) even
+    /// when it resolves to a routable ticker. An entry may name the asset in
+    /// any identifier form: its token SYMBOL (`USDF`, `BUSD`), its long human
+    /// NAME, or its MITCH ASSET ID (decimal global id). Match is by asset
+    /// identity, never by ticker id, so one entry covers every pair carrying
+    /// that asset on either side, regardless of which exchange materialized it.
+    /// Catalog feeds are NOT gated by this: an operator-declared feed carries
+    /// its own explicit per-feed policy, so it may legitimately name a
+    /// blacklisted asset. Empty (default) = universal signing for every
+    /// routable symbol.
     #[serde(default)]
     pub blacklisted_assets: Vec<String>,
     /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts

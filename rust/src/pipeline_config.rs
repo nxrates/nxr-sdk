@@ -111,6 +111,27 @@ fn default_domain_name() -> String {
     "BTR ExternalOracle".to_string()
 }
 
+/// Label of the domain synthesized from the transitional singleton keys, and
+/// the fallback `default_domain` when exactly one domain is declared.
+pub const DEFAULT_DOMAIN_LABEL: &str = "default";
+
+/// One allow-listed EIP-712 domain. Signers are CONSUMER AGNOSTIC: the domain
+/// is a per-REQUEST parameter validated against this allow-list, never pod
+/// identity, so one replica set serves every consumer.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedDomainYml {
+    /// EIP-712 domain `name`. Binds every signature to the consumer contract's
+    /// domain string; changing it changes the digest.
+    #[serde(default = "default_domain_name")]
+    pub name: String,
+    /// EIP-712 domain chainId.
+    pub chain_id: u64,
+    /// Deployed ExternalOracle address (0x-hex, 20 bytes) — EIP-712
+    /// `verifyingContract`.
+    pub oracle: String,
+}
+
 /// `#[serde(default)]` for a bool that must stay on when the YAML is silent.
 fn default_true() -> bool {
     true
@@ -146,17 +167,29 @@ pub struct SignedQuotesYml {
     /// verifies on-chain. See [`RecordFormat`].
     #[serde(default)]
     pub record_format: Option<RecordFormat>,
-    /// Deployed ExternalOracle address (0x-hex, 20 bytes) — EIP-712
-    /// `verifyingContract`.
-    pub oracle: String,
-    /// EIP-712 domain chainId of the deployment.
-    pub chain_id: u64,
-    /// EIP-712 domain `name`. Per-deployment: binds every signature to the
-    /// consumer contract's domain string. Changing it changes the digest, so
-    /// override only to match a differently-domained verifier; the default is
-    /// the currently deployed value.
-    #[serde(default = "default_domain_name")]
-    pub domain_name: String,
+    /// Allow-listed EIP-712 domains, label → domain. A request names one via
+    /// `?domain=<label>`; an unknown label is refused. Signing is consumer
+    /// agnostic, so this is the ONLY place a consumer's domain is declared.
+    #[serde(default)]
+    pub domains: BTreeMap<String, SignedDomainYml>,
+    /// Label served when a request names no domain. Optional when exactly one
+    /// domain is declared.
+    #[serde(default)]
+    pub default_domain: Option<String>,
+    /// DEPRECATED alias for a one-entry [`Self::domains`] map, labelled
+    /// [`DEFAULT_DOMAIN_LABEL`]: the singleton domain that predates the
+    /// per-request allow-list.
+    ///
+    /// It exists ONLY so one release can parse a not-yet-migrated ConfigMap.
+    /// [`SignedQuotesYml`] is `deny_unknown_fields`, so without these fields
+    /// the image and the ConfigMap can never be rolled in either order.
+    /// REMOVE once every signer ConfigMap carries `domains`.
+    #[serde(default)]
+    pub oracle: Option<String>,
+    #[serde(default)]
+    pub chain_id: Option<u64>,
+    #[serde(default)]
+    pub domain_name: Option<String>,
     /// Required blob rebuild/cache floor in milliseconds. Must be in 1..=10
     /// so a newly observed provider tick is not hidden behind a stale cache.
     pub min_interval_ms: u64,
@@ -289,6 +322,39 @@ impl SignedQuotesYml {
             ),
             (None, None) => crate::mtf::MtfWindows::default(),
         }
+    }
+
+    /// Allow-listed domains, resolving the deprecated singleton alias: the map
+    /// wins when both are set, and the singletons alone synthesize the
+    /// one-entry map they always meant. Empty here is a boot error, raised by
+    /// the signer (which also parses the addresses and rejects aliasing
+    /// separators), not silently defaulted.
+    pub fn domain_map(&self) -> BTreeMap<String, SignedDomainYml> {
+        if !self.domains.is_empty() {
+            return self.domains.clone();
+        }
+        let Some(oracle) = self.oracle.clone() else {
+            return BTreeMap::new();
+        };
+        BTreeMap::from([(
+            DEFAULT_DOMAIN_LABEL.to_string(),
+            SignedDomainYml {
+                name: self.domain_name.clone().unwrap_or_else(default_domain_name),
+                chain_id: self.chain_id.unwrap_or_default(),
+                oracle,
+            },
+        )])
+    }
+
+    /// Label used when a request names no domain: the declared one, else the
+    /// sole declared domain. `None` = ambiguous (several domains, no default),
+    /// which the signer refuses at boot.
+    pub fn default_domain_label(&self) -> Option<String> {
+        if let Some(l) = &self.default_domain {
+            return Some(l.clone());
+        }
+        let m = self.domain_map();
+        (m.len() == 1).then(|| m.into_keys().next().expect("len 1"))
     }
 
     /// True when the deprecated alias is present alongside the current key, so

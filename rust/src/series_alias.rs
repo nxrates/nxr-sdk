@@ -45,12 +45,16 @@ use mitch::ticker::{TickerId, pack_asset as asset};
 /// stands would interleave it into the underlying's shards, so `registry_gate`
 /// refuses to boot on that config instead of trusting the reader to notice.
 const WRAPS: &[(u32, u32, bool)] = &[
-    // Custodial BTC wraps: own books, so series-share only.
+    // WBTC carries real CEX depth, so it is in `cexs.assets` and the weights
+    // routine marks it from its own books: series-share only, never parity.
     (asset(CR, 19201), BTC, false), // WBTC
-    (asset(CR, 3901), BTC, false),  // cbBTC
-    (asset(CR, 17901), BTC, false), // TBTC
-    (asset(CR, 2401), BTC, false),  // BTCB (Bitcoin BEP2)
-    (asset(CR, 3201), BTC, false),  // BBTC (BounceBit BTC)
+    // The remaining custodial wraps have no off-chain book to mark from, so the
+    // underlying's mark IS theirs. Listing one in `cexs.assets` while the row
+    // stands is refused at boot rather than silently interleaving two tapes.
+    (asset(CR, 3901), BTC, true),  // cbBTC
+    (asset(CR, 17901), BTC, true), // TBTC
+    (asset(CR, 2401), BTC, true),  // BTCB (Bitcoin BEP2)
+    (asset(CR, 3201), BTC, true),  // BBTC (BounceBit BTC)
     // FX wrappers (BTR FX Core pool): no feed of their own, priced at parity.
     (asset(CR, 6251), asset(FX, 1301), true),  // EURC → EUR
     (asset(CR, 21601), asset(FX, 601), true),  // QCAD → CAD
@@ -149,6 +153,26 @@ mod tests {
         }
     }
 
+    /// WBTC marks from its OWN books, the other custodial wraps mark at parity
+    /// off BTC. The split is what decides whether a wrap needs its own tape: a
+    /// parity wrap is routed over the underlying's legs, while WBTC is expected
+    /// in `cexs.assets` so the weights routine gives it an independent mark.
+    #[test]
+    fn only_wbtc_marks_from_its_own_book() {
+        assert!(
+            !is_parity_wrap(id_of("WBTC/USDT")),
+            "WBTC has CEX depth: parity would proxy BTC's mark and hide a de-peg"
+        );
+        for w in ["CBBTC/USDT", "TBTC/USDT", "BTCB/USDT", "BBTC/USDT"] {
+            assert!(is_parity_wrap(id_of(w)), "{w} has no book of its own");
+            assert_eq!(
+                peg_asset(base_asset(id_of(w))),
+                base_asset(id_of("BTC/USDT")),
+                "{w} marks at parity off BTC"
+            );
+        }
+    }
+
     /// The FX wrappers: distinct exposed id (a de-peg stays visible on the wire),
     /// the UNDERLYING currency's series on disk, across asset classes.
     #[test]
@@ -181,16 +205,6 @@ mod tests {
                 !crate::shard::idx_dir(root, w).ends_with(w.to_string()),
                 "{wrap} must not name its own idx dir"
             );
-        }
-    }
-
-    /// The custodial BTC wraps have their OWN books, so they are series-shared
-    /// but NOT parity: their mark must stay their own.
-    #[test]
-    fn custodial_btc_wraps_are_not_parity_pegged() {
-        for w in ["WBTC/USDT", "CBBTC/USDT", "TBTC/USDT", "BTCB/USDT", "BBTC/USDT"] {
-            let b = base_asset(id_of(w));
-            assert_eq!(peg_asset(b), b, "{w} must not price off BTC at parity");
         }
     }
 

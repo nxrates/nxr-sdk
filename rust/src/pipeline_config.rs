@@ -226,9 +226,10 @@ pub struct SignedQuotesYml {
     /// `feedIds(idx) == feed_id` at startup and requires subscription ⊆ catalog.
     pub feeds: Vec<SignedFeedYml>,
     /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts
-    /// its ticker universe to ONLY the symbols this signer must sign — every
-    /// `feeds[].symbol` and `feeds[].quote_via` — instead of the full config
-    /// universe (2000+ tickers). The UDP registry gate then drops all other
+    /// its ticker universe to ONLY the symbols this signer must sign (every
+    /// `feeds[].symbol`, plus each composed feed's LEGS found through the graph
+    /// at sign time) instead of the full config universe (2000+ tickers). The
+    /// UDP registry gate then drops all other
     /// frames, so the emit cycle + s10/renko/σ producers run for ~30 tickers,
     /// not thousands (~50-100x less CPU). σ for the signed symbols is
     /// bit-identical to the full-universe path (same per-ticker pipeline); only
@@ -315,15 +316,14 @@ impl SignedQuotesYml {
     }
 
     /// The exact ticker-symbol set this signer must aggregate to sign: every
-    /// feed symbol plus every bridge (`quote_via`) leg, uppercased/deduped.
-    /// This is the universe the `sign_only` mode restricts `symbol_map` to.
+    /// feed symbol, uppercased/deduped. A composed feed's LEGS are found
+    /// through the cross graph at sign time (via `sigma_key`'s route), not
+    /// declared here, which is what makes the universe derived rather than a
+    /// hand-maintained catalogue.
     pub fn signed_symbols(&self) -> std::collections::BTreeSet<String> {
         let mut s = std::collections::BTreeSet::new();
         for f in &self.feeds {
             s.insert(f.symbol.to_uppercase());
-            if let Some(v) = &f.quote_via {
-                s.insert(v.to_uppercase());
-            }
         }
         s
     }
@@ -351,16 +351,10 @@ pub struct SignedFeedYml {
     /// and each co-signer's own live mark. Runtime policy accepts 0.01..=5.0.
     /// One basis point is 0.01%; for example, 0.25 bps is 0.0025%.
     pub cosign_tolerance_bps: f64,
-    /// Optional bridge symbol: pushed mark = `mark(symbol) × mark(quote_via)`
-    /// (e.g. `CAKE-USDT × USDT-USDC`), CI/σ composed in quadrature — mirrors
-    /// keeper `quote_via` (ORC-04).
-    #[serde(default)]
-    pub quote_via: Option<String>,
     /// Per-feed freshness tier (ms) for THIS feed's own source leg, by source
-    /// cadence: unset = global `mark_max_age_ms` (sub-second CEX books);
-    /// Pyth-Lazer-cadence sources (~1s ticks) set 1500. Bridge `quote_via`
-    /// legs always stay on the global CEX bound. Bounds 1..=1500 enforced at
-    /// boot (signed.rs `validate_feed_max_age_ms`).
+    /// cadence: unset = global `mark_max_age_ms` (sub-second CEX books); a
+    /// composed feed's legs stay on the global CEX bound. Bounds 1..=1500
+    /// enforced at boot (signed.rs `validate_feed_max_age_ms`).
     #[serde(default)]
     pub max_age_ms: Option<u64>,
     /// DECLARED single-source allowance: this feed may be signed while only ONE
@@ -1539,7 +1533,7 @@ mod tests {
     }
 
     /// Light-node mode: opt-in flag + the exact ticker subset it scopes
-    /// the aggregator to (every feed symbol + every quote_via bridge leg).
+    /// the aggregator to (every feed symbol, plus each composed feed's legs).
     /// The repo `config.yml` must actually carry the MINUTE-based windows: a
     /// serde default would silently paper over a stale `_days` key.
     #[test]
@@ -1601,26 +1595,19 @@ mod tests {
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
              feeds:\n\
                - { symbol: 'USDT-USD', cosign_tolerance_bps: 2.0 }\n\
-               - { symbol: 'usds-usdt', quote_via: 'USDT-USDC', cosign_tolerance_bps: 2.0 }\n\
+               - { symbol: 'usds-usdc', cosign_tolerance_bps: 2.0 }\n\
                - { symbol: 'ETH-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse sign_only-absent schema");
         // Opt-in: absent ⇒ false, so full-replica behavior is untouched by default.
         assert!(!sq.sign_only);
-        // signed_symbols() = every feed symbol + every quote_via leg, uppercased + deduped.
+        // signed_symbols() = every feed symbol (a composed feed's legs are found
+        // via the graph at sign time, not declared), uppercased + deduped.
         let s = sq.signed_symbols();
         assert!(s.contains("USDT-USD"));
-        assert!(s.contains("USDS-USDT"), "case-normalized feed symbol");
-        assert!(
-            s.contains("USDT-USDC"),
-            "quote_via bridge leg MUST be scoped in"
-        );
+        assert!(s.contains("USDS-USDC"), "case-normalized feed symbol");
         assert!(s.contains("ETH-USDC"));
-        assert_eq!(
-            s.len(),
-            4,
-            "USDT-USD + USDS-USDT + USDT-USDC + ETH-USDC, deduped"
-        );
+        assert_eq!(s.len(), 3, "USDT-USD + USDS-USDC + ETH-USDC, deduped");
 
         let on: SignedQuotesYml = serde_yml::from_str(
             "oracle: '0x1111111111111111111111111111111111111111'\n\

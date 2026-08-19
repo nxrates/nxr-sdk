@@ -304,7 +304,11 @@ impl AssetResolver {
                             asset.name,
                         );
                     } else {
-                        tracing::warn!(
+                        // EXPECTED, and resolved: exact_rank picks the winner and
+                        // class_filter disambiguates at lookup (see the block comment
+                        // above). It fired 316 times on every single boot, which is
+                        // noise describing the table working, not a collision to fix.
+                        tracing::debug!(
                             key = %norm,
                             existing = %existing.name,
                             incoming = %asset.name,

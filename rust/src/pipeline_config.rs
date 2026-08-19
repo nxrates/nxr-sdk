@@ -224,6 +224,18 @@ pub struct SignedQuotesYml {
     /// to the exact signer address expected in its response.
     #[serde(default)]
     pub peers: Vec<SignedPeerYml>,
+    /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
+    /// cosign peers, in the same fan-out. Operator config only, never a peer's
+    /// or a request's claim, and never a mark source: a cold FLEET has no warm
+    /// peer to seed from, so peers alone can never bootstrap one.
+    ///
+    /// Must address a FULL node, never this signer tier's own Service: a VIP
+    /// that round-robins onto the cold replicas reproduces the very bug this
+    /// fixes, silently. The request carries `NXR_API_KEY`, so declare only an
+    /// endpoint the operator trusts with it. Roll it to EVERY replica in one
+    /// change: a partially seeded fleet is a partially armed one.
+    #[serde(default)]
+    pub archive_urls: Vec<String>,
     /// Minimum total signatures per served quote (self + peers). Required and
     /// must be >= 2; a build below quorum fails closed (503).
     pub quorum: Option<u8>,
@@ -235,12 +247,15 @@ pub struct SignedQuotesYml {
     /// observation (ms). Default 250, hard-capped at 500.
     #[serde(default)]
     pub provenance_tolerance_ms: Option<i64>,
-    /// Signable catalog (per-feed policy; signing itself is universal). Every
-    /// row carries an EXPLICIT `idx`, its 0-based ordinal in the consumer
-    /// contract's append-only `feedIds[]`. Array position is NOT the ordinal
-    /// and must never be used as one. `/v1/quote/signed/meta` publishes each
-    /// `idx`; consumers subscribe via `GET /v1/quote/signed?idxs=…` (explicit
-    /// idx values) or `?symbols=…`, and both absent defaults to this full list.
+    /// Signable catalog (per-feed policy; signing itself is universal). A row is
+    /// identified by its `symbol`, which resolves to the MITCH ticker id the
+    /// wire carries: a ticker22 record is tickerId||priceB64||sigma||conf and
+    /// holds no array ordinal, so nothing here binds to a consumer's slot
+    /// numbering. `/v1/quote/signed/meta` publishes each `ticker` as a STRING
+    /// (a u64 id does not survive a JSON double); consumers subscribe via
+    /// `GET /v1/quote/signed?tickers=…` or `?symbols=…`, and both absent
+    /// defaults to this full list. Symbols are unique; two rows resolving to
+    /// one ticker is legal and the first row's policy wins.
     pub feeds: Vec<SignedFeedYml>,
     /// Asset-level blacklist for UNIVERSAL signing. Any NON-catalog requested
     /// symbol whose base OR quote ASSET is listed here is refused (400) even
@@ -406,17 +421,6 @@ pub struct SignedPeerYml {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedFeedYml {
-    /// This feed's ordinal in the consumer contract's append-only `feedIds[]`.
-    /// 0-BASED as deployed (the Arc map starts at 0; the sepolia map is the
-    /// misnumbered one), and an EXPLICIT value: it is NOT the row's array
-    /// position and must never be derived from position. No longer a wire key
-    /// (records are keyed by MITCH ticker id); it survives only as the
-    /// `?idxs=` subscription selector and the keeper's slot binding.
-    /// A tier signs a SUBSET of one contract's `feedIds[]`, so a configured
-    /// set need be neither contiguous nor start at 0; only uniqueness is
-    /// enforced (signed.rs boot). `None` = no on-chain slot: a universally
-    /// synthesized feed, never selectable by `?idxs=`.
-    pub idx: Option<u16>,
     /// NXR symbol whose mark/σ/CI back the feed (e.g. `BTC-USDC`).
     pub symbol: String,
     /// Required maximum deviation, in basis points, between a proposed mark
@@ -1583,6 +1587,21 @@ mod tests {
         assert_eq!(c.target_for_pair("FDUSD/USDT"), 300.0); // not in override map
     }
 
+    /// ARCHIVE FALLBACK: `archive_urls` is OPTIONAL. The live signer
+    /// ConfigMaps are `deny_unknown_fields` and none of them carries the key,
+    /// so a non-defaulted field would crashloop the fleet on the image roll.
+    #[test]
+    fn archive_urls_is_optional_and_parses() {
+        assert!(
+            signed_yml("").archive_urls.is_empty(),
+            "absent = today's peers-only seed"
+        );
+        assert_eq!(
+            signed_yml("archive_urls: ['http://nxr-svc.nxr.svc.cluster.local']\n").archive_urls,
+            vec!["http://nxr-svc.nxr.svc.cluster.local"]
+        );
+    }
+
     #[test]
     fn signed_quotes_requires_pinned_peers_and_tight_ms_freshness() {
         let current: SignedQuotesYml = serde_yml::from_str(
@@ -1590,7 +1609,7 @@ mod tests {
              chain_id: 56\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 3\n\
              min_composite_freshness_bps: 9000\nquorum: 2\npeers:\n\
                - { url: 'http://signer.internal:8080', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { idx: 1, symbol: 'BTC-USDC', cosign_tolerance_bps: 2.0 }\n",
+             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 2.0 }\n",
         )
         .expect("parse hardened signed_quotes schema");
         assert_eq!(current.min_interval_ms, 5);
@@ -1602,7 +1621,7 @@ mod tests {
              chain_id: 56\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 3\n\
              min_composite_freshness_bps: 9000\nquorum: 2\npeers:\n\
                - { url: 'http://signer.internal:8080', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { idx: 1, symbol: 'BTC-USDC' }\n";
+             feeds:\n  - { symbol: 'BTC-USDC' }\n";
         assert!(
             serde_yml::from_str::<SignedQuotesYml>(missing_feed_tolerance).is_err(),
             "every feed must explicitly set cosign_tolerance_bps"
@@ -1612,7 +1631,7 @@ mod tests {
                       chain_id: 56\nmark_max_age_s: 120\nmin_accepted_providers: 3\n\
                       min_composite_freshness_bps: 9000\nquorum: 2\n\
                       peers: ['http://signer.internal:8080']\ncosign_tolerance_bps: 25\n\
-                      feeds:\n  - { idx: 1, symbol: 'BTC-USDC' }\n";
+                      feeds:\n  - { symbol: 'BTC-USDC' }\n";
         assert!(
             serde_yml::from_str::<SignedQuotesYml>(legacy).is_err(),
             "legacy seconds/unpinned-peer config must fail closed"
@@ -1644,7 +1663,7 @@ mod tests {
              chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
              min_composite_freshness_bps: 500\nquorum: 1\npeers: []\n\
              feeds:\n\
-               - { idx: 1, symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+               - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse");
         // Default legs are 6 h / 2 d / 1 w ⇒ longest = 7 d ⇒ 7 + edge day.
@@ -1681,9 +1700,9 @@ mod tests {
              min_composite_freshness_bps: 500\nquorum: 2\npeers:\n\
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
              feeds:\n\
-               - { idx: 1, symbol: 'USDT-USD', cosign_tolerance_bps: 2.0 }\n\
-               - { idx: 2, symbol: 'usds-usdc', cosign_tolerance_bps: 2.0 }\n\
-               - { idx: 3, symbol: 'ETH-USDC', cosign_tolerance_bps: 5.0 }\n",
+               - { symbol: 'USDT-USD', cosign_tolerance_bps: 2.0 }\n\
+               - { symbol: 'usds-usdc', cosign_tolerance_bps: 2.0 }\n\
+               - { symbol: 'ETH-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse sign_only-absent schema");
         // Opt-in: absent ⇒ false, so full-replica behavior is untouched by default.
@@ -1701,7 +1720,7 @@ mod tests {
              chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 2\n\
              min_composite_freshness_bps: 9000\nquorum: 2\nsign_only: true\npeers:\n\
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
-             feeds:\n  - { idx: 1, symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
         )
         .expect("parse explicit sign_only:true");
         assert!(on.sign_only);
@@ -1826,46 +1845,51 @@ mod tests {
         assert_eq!(y.relay_providers(), vec!["pyth", "pepperstone"]);
     }
 
-    /// REGRESSION GUARD, not a style test. This block is the live ConfigMap
-    /// `nxr-signer-sepolia-config` `signed_quotes.feeds`. `SignedQuotesYml` is
-    /// `deny_unknown_fields`, so a schema that has dropped `idx` or `invert`
-    /// does not degrade: it fails to parse and crashloops the whole signer
-    /// fleet on boot. Note what it legitimately contains: the SAME symbol on
-    /// two slots (BTC-USDC at idx 17 and 18, distinct ERC-20s sharing one
-    /// mark), and a non-contiguous idx set (no 19, 21, 22, 23, 25) because a
-    /// tier signs a SUBSET of one contract's `feedIds[]`.
+    /// REGRESSION GUARD, not a style test. `SignedQuotesYml` is
+    /// `deny_unknown_fields`, so a schema drift does not degrade: it fails to
+    /// parse and crashloops the whole signer fleet on boot.
+    ///
+    /// ⚠ MIGRATION HAZARD, pinned here deliberately. Feeds are keyed by SYMBOL
+    /// (resolved to a MITCH ticker id); the `idx` array ordinal is GONE, and a
+    /// ConfigMap that still carries it is REJECTED rather than ignored. Every
+    /// legacy tier's live ConfigMap still carries `idx`, so rolling this image
+    /// onto one without rendering its ConfigMap first crashloops it. Image and
+    /// ConfigMap move together, per tier.
     #[test]
-    fn live_sepolia_configmap_feeds_parse() {
+    fn live_configmap_feeds_parse() {
         let feeds: Vec<SignedFeedYml> = serde_yml::from_str(
             r#"
-- { idx: 1, symbol: USDT-USD, cosign_tolerance_bps: 5.0, max_age_ms: 60000, single_source: true, optional: true }
-- { idx: 2, symbol: USDE-USD, cosign_tolerance_bps: 5.0, max_age_ms: 60000, single_source: true, optional: true }
-- { idx: 16, symbol: ETH-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, sigma_window_bars: 336 }
-- { idx: 17, symbol: BTC-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, optional: true, sigma_window_bars: 336 }
-- { idx: 18, symbol: BTC-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, optional: true, sigma_window_bars: 336 }
-- { idx: 20, symbol: XAUT-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, optional: true, min_active_providers: 1, sigma_tol_pbps: 500, sigma_window_bars: 336 }
-- { idx: 24, symbol: USD-CAD, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
-- { idx: 26, symbol: USD-BRL, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
-- { idx: 27, symbol: USD-JPY, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
-- { idx: 28, symbol: USD-KRW, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
+- { symbol: USDT-USD, cosign_tolerance_bps: 5.0, max_age_ms: 60000, single_source: true, optional: true }
+- { symbol: ETH-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, sigma_window_bars: 336 }
+- { symbol: BTC-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, optional: true, sigma_window_bars: 336 }
+- { symbol: XAUT-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000, optional: true, min_active_providers: 1, sigma_tol_pbps: 500, sigma_window_bars: 336 }
+- { symbol: USD-CAD, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
+- { symbol: USD-JPY, cosign_tolerance_bps: 5.0, max_age_ms: 30000, invert: true, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
+- { symbol: NVDA-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 60000, min_active_providers: 1, optional: true, sigma_window_bars: 336 }
 "#,
         )
-        .expect("the live ConfigMap feeds block must parse");
+        .expect("the rendered ConfigMap feeds block must parse");
+        assert_eq!(feeds.len(), 7);
+        assert_eq!(
+            feeds.iter().map(|f| f.symbol.as_str()).collect::<Vec<_>>(),
+            vec![
+                "USDT-USD", "ETH-USDC", "BTC-USDC", "XAUT-USDC", "USD-CAD", "USD-JPY", "NVDA-USDC"
+            ],
+            "a feed is named by its symbol, which resolves to the MITCH ticker the wire carries"
+        );
+
+        // A stale row carrying the retired ordinal must be REFUSED, not
+        // silently ignored: ignoring it would let an operator believe a slot
+        // binding still exists when nothing reads one.
+        let stale: Result<Vec<SignedFeedYml>, _> = serde_yml::from_str(
+            "- { idx: 17, symbol: BTC-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000 }",
+        );
+        assert!(stale.is_err(), "a feed row still carrying `idx` must fail to parse");
 
         assert_eq!(
-            feeds.iter().map(|f| f.idx.unwrap()).collect::<Vec<_>>(),
-            vec![1, 2, 16, 17, 18, 20, 24, 26, 27, 28],
-            "idx is the feed's own explicit field, never its array position"
-        );
-        assert_eq!(
-            feeds.iter().filter(|f| f.symbol == "BTC-USDC").count(),
-            2,
-            "one mark on two on-chain slots is legal; only idx is unique"
-        );
-        assert_eq!(
             feeds.iter().filter(|f| f.invert).map(|f| f.symbol.as_str()).collect::<Vec<_>>(),
-            vec!["USD-CAD", "USD-BRL", "USD-JPY", "USD-KRW"],
-            "the four USD-base FX legs publish the reciprocal"
+            vec!["USD-CAD", "USD-JPY"],
+            "the USD-base FX legs publish the reciprocal"
         );
         assert!(!feeds[0].invert, "invert defaults false");
     }

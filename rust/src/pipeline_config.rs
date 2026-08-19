@@ -115,6 +115,113 @@ fn default_domain_name() -> String {
 /// the fallback `default_domain` when exactly one domain is declared.
 pub const DEFAULT_DOMAIN_LABEL: &str = "default";
 
+/// Packed record layout of a signed blob, a property of the CONSUMER: the
+/// deployed `ExternalOracle` decodes exactly one of these, and the EIP-712
+/// digest commits to BYTES rather than to a schema, so a signature over the
+/// wrong layout still verifies and the contract simply misparses the prices.
+/// It is therefore declared per domain, never inferred and never global.
+///
+/// PRODUCT RULE, unchanged: a feed's identity is its MITCH ticker id.
+/// [`Self::Idx24`] is a COMPATIBILITY SHIM for oracles deployed before the
+/// ticker-keyed record existed, not a return to slot-keyed configuration. It
+/// is the only reason [`SignedFeedYml::idx`] exists, it is the only mode in
+/// which that ordinal is read, and both go away with the last legacy oracle.
+/// PARSED LENIENTLY, RESOLVED STRICTLY. The YAML field is a plain `String` and
+/// unknown spellings are refused by [`RecordFormat::parse`] at signer boot, not
+/// by serde at config load.
+///
+/// Both are FATAL to the node (`SignedQuotes::from_env` propagates, and the
+/// server boots with `?`), exactly as every other `signed_quotes` config error
+/// is: the deliberate choice here is the MESSAGE, not the blast radius. Serde
+/// says `unknown variant \`ticker30\``, which reads as a typo; `parse` says the
+/// spelling is RETIRED and names the two layouts this build emits, which is
+/// what an operator holding a not-yet-migrated ConfigMap actually needs.
+///
+/// The derived `Deserialize` IS strict and is for the WIRE, not for config: a
+/// co-sign proposal naming a layout this build does not implement must be
+/// refused by the extractor, which costs one request rather than a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordFormat {
+    /// LEGACY, 24 B/record, NO blob header, `sourceTs` repeated per record:
+    /// `idx:u16 | priceB64:u64 | sigma:u32 | conf:u16 | sourceTs:u64`,
+    /// big-endian. Keyed by the consumer's own `feedIds[]` array index, so
+    /// every feed in an `idx24` domain MUST carry [`SignedFeedYml::idx`] and a
+    /// ticker with no configured ordinal is not expressible in this layout.
+    Idx24,
+    /// NATIVE, 8 B header + 22 B/record:
+    /// `version:u8 | sourceTs:u48 | reserved:u8` then
+    /// `tickerId:u64 | priceB64:u64 | sigma:u32 | conf:u16`, big-endian.
+    /// Keyed by the MITCH ticker id, so no ordinal exists or is required.
+    Ticker22,
+}
+
+impl Default for RecordFormat {
+    /// The layout this build is native to. An `idx24` consumer must SAY so.
+    fn default() -> Self {
+        Self::Ticker22
+    }
+}
+
+impl RecordFormat {
+    /// One config spelling to a layout. `Err` names what is accepted; the
+    /// caller turns that into a signer boot failure.
+    ///
+    /// `ticker30` is named explicitly because it was briefly the emitted layout
+    /// (2026-08-14 to 08-19) and may still sit in a ConfigMap: it is RETIRED,
+    /// not merely misspelled, and an operator who reads "unknown value" would
+    /// go looking for a typo instead of for the migration.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim() {
+            "idx24" => Ok(Self::Idx24),
+            "ticker22" => Ok(Self::Ticker22),
+            "ticker30" => Err(
+                "signed_quotes record_format `ticker30` is RETIRED and this build cannot emit \
+                 it. Declare `ticker22` if the consumer contract was migrated, `idx24` if it \
+                 still decodes 24 B idx-keyed records."
+                    .to_string(),
+            ),
+            other => Err(format!(
+                "signed_quotes record_format {other:?} is not a layout this build emits; \
+                 accepted: `idx24`, `ticker22`"
+            )),
+        }
+    }
+
+    /// Bytes per packed record.
+    pub fn record_bytes(self) -> usize {
+        match self {
+            Self::Idx24 => 24,
+            Self::Ticker22 => 22,
+        }
+    }
+
+    /// Bytes of blob preamble before the first record. `idx24` has none: it
+    /// predates the version byte, which is why length can never discriminate
+    /// the two (a 4-record 22 B blob is 96 B, also a whole number of 24 B
+    /// records) and why the declared format is the only gate.
+    pub fn header_bytes(self) -> usize {
+        match self {
+            Self::Idx24 => 0,
+            Self::Ticker22 => 8,
+        }
+    }
+
+    /// Config spelling, for errors and the served roster.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idx24 => "idx24",
+            Self::Ticker22 => "ticker22",
+        }
+    }
+}
+
+impl std::fmt::Display for RecordFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One allow-listed EIP-712 domain. Signers are CONSUMER AGNOSTIC: the domain
 /// is a per-REQUEST parameter validated against this allow-list, never pod
 /// identity, so one replica set serves every consumer.
@@ -130,6 +237,14 @@ pub struct SignedDomainYml {
     /// Deployed ExternalOracle address (0x-hex, 20 bytes) — EIP-712
     /// `verifyingContract`.
     pub oracle: String,
+    /// Packed record layout THIS consumer decodes. Absent = the deployment
+    /// default [`SignedQuotesYml::record_format`], itself defaulting to
+    /// [`RecordFormat::Ticker22`]. Declared here because it is a property of
+    /// the oracle at [`Self::oracle`]: two domains on one node routinely differ
+    /// while a legacy chain is migrated. Spelling is validated at signer boot,
+    /// never at config load: see [`RecordFormat`].
+    #[serde(default)]
+    pub record_format: Option<String>,
 }
 
 /// `#[serde(default)]` for a bool that must stay on when the YAML is silent.
@@ -140,15 +255,17 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedQuotesYml {
-    /// DEPRECATED and IGNORED. The blob's own `version` byte is the only
-    /// layout discriminator, so a config enum would be a second mechanism.
+    /// DEPLOYMENT-WIDE DEFAULT record layout, for domains that declare no
+    /// [`SignedDomainYml::record_format`] of their own. Absent = the build's
+    /// native [`RecordFormat::Ticker22`].
     ///
-    /// Accepted-and-ignored rather than removed: `SignedQuotesYml` is
-    /// `deny_unknown_fields` and the live ConfigMaps (`nxr-signer-config`,
-    /// `nxr-signer-ref-config`, `nxr-signer-arc-config`,
-    /// `nxr-signer-sepolia-config`) still carry `record_format: idx24`, so
-    /// removing the key crashloops the fleet on the image roll. Boot warns.
-    /// REMOVE once no signer ConfigMap carries the key.
+    /// This key was briefly accepted-and-ignored (the blob's version byte was
+    /// held to be the sole discriminator). That is true of a blob once it
+    /// exists, but it cannot tell an EMITTER which layout its consumer
+    /// decodes, and every live signer ConfigMap already says `idx24` and means
+    /// it. So the key is honoured again rather than duplicated: one enum, one
+    /// meaning, overridable per domain. Spelling is validated at signer boot,
+    /// never at config load: see [`RecordFormat`].
     #[serde(default)]
     pub record_format: Option<String>,
     /// Allow-listed EIP-712 domains, label → domain. A request names one via
@@ -251,7 +368,9 @@ pub struct SignedQuotesYml {
     /// identified by its `symbol`, which resolves to the MITCH ticker id the
     /// wire carries: a ticker22 record is tickerId||priceB64||sigma||conf and
     /// holds no array ordinal, so nothing here binds to a consumer's slot
-    /// numbering. `/v1/quote/signed/meta` publishes each `ticker` as a STRING
+    /// numbering. A row ALSO carries [`SignedFeedYml::idx`] where a legacy
+    /// `idx24` consumer needs one, which is the single exception and is read
+    /// only by that layout. `/v1/quote/signed/meta` publishes each `ticker` as a STRING
     /// (a u64 id does not survive a JSON double); consumers subscribe via
     /// `GET /v1/quote/signed?tickers=…` or `?symbols=…`, and both absent
     /// defaults to this full list. Symbols are unique; two rows resolving to
@@ -351,8 +470,35 @@ impl SignedQuotesYml {
                 name: self.domain_name.clone().unwrap_or_else(default_domain_name),
                 chain_id: self.chain_id.unwrap_or_default(),
                 oracle,
+                // The singleton alias predates per-domain layouts, so it takes
+                // the deployment default, which is where its `record_format`
+                // was already written.
+                record_format: None,
             },
         )])
+    }
+
+    /// Resolved record layout for one domain: the domain's own declaration,
+    /// then the deployment default, then the build's native layout. THE one
+    /// resolution rule, so the boot validator and the emitter cannot disagree
+    /// about which domains are legacy.
+    pub fn record_format_for(&self, d: &SignedDomainYml) -> Result<RecordFormat, String> {
+        match d.record_format.as_deref().or(self.record_format.as_deref()) {
+            Some(s) => RecordFormat::parse(s),
+            None => Ok(RecordFormat::default()),
+        }
+    }
+
+    /// Labels of every declared domain served in `fmt`, sorted. An unresolvable
+    /// spelling propagates so the signer refuses to arm.
+    pub fn domains_in_format(&self, fmt: RecordFormat) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for (label, d) in self.domain_map() {
+            if self.record_format_for(&d)? == fmt {
+                out.push(label);
+            }
+        }
+        Ok(out)
     }
 
     /// Label used when a request names no domain: the declared one, else the
@@ -444,6 +590,20 @@ pub struct SignedPeerYml {
 pub struct SignedFeedYml {
     /// NXR symbol whose mark/σ/CI back the feed (e.g. `BTC-USDC`).
     pub symbol: String,
+    /// LEGACY consumer ordinal: this feed's position in the deployed
+    /// `ExternalOracle.feedIds[]` array. OPTIONAL, and read ONLY by
+    /// [`RecordFormat::Idx24`], which has no other way to name a feed.
+    ///
+    /// IDENTITY IS THE MITCH TICKER ID. This ordinal is not identity and is not
+    /// a return to slot-keyed configuration: it is a compatibility shim for
+    /// oracles deployed before the ticker-keyed record existed. NXR holding a
+    /// copy of BTR's ordinal table is precisely what drifted and crashlooped
+    /// the signers, so nothing under `ticker22` may read it, no default may be
+    /// invented for it, and an `idx24` domain whose feeds lack it is a BOOT
+    /// ERROR rather than a guess (`signed.rs::validate_idx24_ordinals`).
+    /// Delete the field with the last legacy oracle.
+    #[serde(default)]
+    pub idx: Option<u16>,
     /// Required maximum deviation, in basis points, between a proposed mark
     /// and each co-signer's own live mark. Runtime policy accepts 0.01..=5.0.
     /// One basis point is 0.01%; for example, 0.25 bps is 0.0025%.
@@ -1870,12 +2030,10 @@ mod tests {
     /// `deny_unknown_fields`, so a schema drift does not degrade: it fails to
     /// parse and crashloops the whole signer fleet on boot.
     ///
-    /// ⚠ MIGRATION HAZARD, pinned here deliberately. Feeds are keyed by SYMBOL
-    /// (resolved to a MITCH ticker id); the `idx` array ordinal is GONE, and a
-    /// ConfigMap that still carries it is REJECTED rather than ignored. Every
-    /// legacy tier's live ConfigMap still carries `idx`, so rolling this image
-    /// onto one without rendering its ConfigMap first crashloops it. Image and
-    /// ConfigMap move together, per tier.
+    /// Feeds are keyed by SYMBOL (resolved to a MITCH ticker id). The `idx`
+    /// array ordinal is OPTIONAL and read only by an `idx24` domain, so a live
+    /// ConfigMap that still carries it parses either way: with `idx` for a
+    /// legacy consumer, without it for a ticker-keyed one.
     #[test]
     fn live_configmap_feeds_parse() {
         let feeds: Vec<SignedFeedYml> = serde_yml::from_str(
@@ -1899,13 +2057,22 @@ mod tests {
             "a feed is named by its symbol, which resolves to the MITCH ticker the wire carries"
         );
 
-        // A stale row carrying the retired ordinal must be REFUSED, not
-        // silently ignored: ignoring it would let an operator believe a slot
-        // binding still exists when nothing reads one.
-        let stale: Result<Vec<SignedFeedYml>, _> = serde_yml::from_str(
-            "- { idx: 17, symbol: BTC-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000 }",
-        );
-        assert!(stale.is_err(), "a feed row still carrying `idx` must fail to parse");
+        // Every feed row above omits `idx`, and that must stay legal: nothing
+        // under `ticker22` reads an ordinal.
+        assert!(feeds.iter().all(|f| f.idx.is_none()), "ticker22 needs no ordinal");
+
+        // A live legacy row DOES carry one, and it must parse. The deployed arc
+        // maps are 0-BASED, so slot 0 is a real feed and the "no slot" sentinel
+        // is the field's ABSENCE, never a literal 0.
+        let legacy: Vec<SignedFeedYml> = serde_yml::from_str(
+            r#"
+- { idx: 0, symbol: USDT-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 1500, single_source: true, optional: true }
+- { idx: 17, symbol: BTC-USDC, cosign_tolerance_bps: 5.0, max_age_ms: 30000 }
+"#,
+        )
+        .expect("a legacy ConfigMap row carrying `idx` must parse");
+        assert_eq!(legacy[0].idx, Some(0), "0 is a real arc slot, not a sentinel");
+        assert_eq!(legacy[1].idx, Some(17));
 
         assert_eq!(
             feeds.iter().filter(|f| f.invert).map(|f| f.symbol.as_str()).collect::<Vec<_>>(),

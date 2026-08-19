@@ -137,36 +137,20 @@ fn default_true() -> bool {
     true
 }
 
-/// Packed record layout of a signed blob. The EIP-712 digest commits to BYTES,
-/// never to a schema, so a blob built in one layout and decoded in the other
-/// carries a VALID signature over misparsed prices. Declared per deployment and
-/// never inferred: it must equal the consumer contract's `RECORD_BYTES`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RecordFormat {
-    /// Legacy: 24 B/record, keyed by the deployment-local on-chain ordinal.
-    Idx24,
-    /// Current: 30 B/record, keyed by the content-derived MITCH ticker id.
-    Ticker30,
-}
-
-impl RecordFormat {
-    pub const fn record_bytes(self) -> usize {
-        match self {
-            Self::Idx24 => 24,
-            Self::Ticker30 => 30,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedQuotesYml {
-    /// REQUIRED wire layout of every emitted/validated record. No default: a
-    /// guess here is a wrong-price push, since a mismatched layout still
-    /// verifies on-chain. See [`RecordFormat`].
+    /// DEPRECATED and IGNORED. The blob's own `version` byte is the only
+    /// layout discriminator, so a config enum would be a second mechanism.
+    ///
+    /// Accepted-and-ignored rather than removed: `SignedQuotesYml` is
+    /// `deny_unknown_fields` and the live ConfigMaps (`nxr-signer-config`,
+    /// `nxr-signer-ref-config`, `nxr-signer-arc-config`,
+    /// `nxr-signer-sepolia-config`) still carry `record_format: idx24`, so
+    /// removing the key crashloops the fleet on the image roll. Boot warns.
+    /// REMOVE once no signer ConfigMap carries the key.
     #[serde(default)]
-    pub record_format: Option<RecordFormat>,
+    pub record_format: Option<String>,
     /// Allow-listed EIP-712 domains, label → domain. A request names one via
     /// `?domain=<label>`; an unknown label is refused. Signing is consumer
     /// agnostic, so this is the ONLY place a consumer's domain is declared.
@@ -252,7 +236,7 @@ pub struct SignedQuotesYml {
     #[serde(default)]
     pub provenance_tolerance_ms: Option<i64>,
     /// Signable catalog (per-feed policy; signing itself is universal). Every
-    /// row carries an EXPLICIT `idx`, its 1-based ordinal in the consumer
+    /// row carries an EXPLICIT `idx`, its 0-based ordinal in the consumer
     /// contract's append-only `feedIds[]`. Array position is NOT the ordinal
     /// and must never be used as one. `/v1/quote/signed/meta` publishes each
     /// `idx`; consumers subscribe via `GET /v1/quote/signed?idxs=…` (explicit
@@ -423,13 +407,16 @@ pub struct SignedPeerYml {
 #[serde(deny_unknown_fields)]
 pub struct SignedFeedYml {
     /// This feed's ordinal in the consumer contract's append-only `feedIds[]`.
-    /// 1-BASED as deployed, and an EXPLICIT value: it is NOT the row's array
-    /// position and must never be derived from position. It is the on-chain
-    /// binding, so a wrong value writes a price into the WRONG feed slot under
-    /// a valid signature. A tier signs a SUBSET of one contract's `feedIds[]`,
-    /// so a configured set need be neither contiguous nor start at 1; only
-    /// uniqueness is enforced (signed.rs boot).
-    pub idx: u16,
+    /// 0-BASED as deployed (the Arc map starts at 0; the sepolia map is the
+    /// misnumbered one), and an EXPLICIT value: it is NOT the row's array
+    /// position and must never be derived from position. No longer a wire key
+    /// (records are keyed by MITCH ticker id); it survives only as the
+    /// `?idxs=` subscription selector and the keeper's slot binding.
+    /// A tier signs a SUBSET of one contract's `feedIds[]`, so a configured
+    /// set need be neither contiguous nor start at 0; only uniqueness is
+    /// enforced (signed.rs boot). `None` = no on-chain slot: a universally
+    /// synthesized feed, never selectable by `?idxs=`.
+    pub idx: Option<u16>,
     /// NXR symbol whose mark/σ/CI back the feed (e.g. `BTC-USDC`).
     pub symbol: String,
     /// Required maximum deviation, in basis points, between a proposed mark
@@ -1866,9 +1853,9 @@ mod tests {
         .expect("the live ConfigMap feeds block must parse");
 
         assert_eq!(
-            feeds.iter().map(|f| f.idx).collect::<Vec<_>>(),
+            feeds.iter().map(|f| f.idx.unwrap()).collect::<Vec<_>>(),
             vec![1, 2, 16, 17, 18, 20, 24, 26, 27, 28],
-            "idx is the feed's own 1-based field, never its array position"
+            "idx is the feed's own explicit field, never its array position"
         );
         assert_eq!(
             feeds.iter().filter(|f| f.symbol == "BTC-USDC").count(),

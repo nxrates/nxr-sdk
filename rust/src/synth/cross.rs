@@ -399,6 +399,18 @@ impl CrossGraph {
     /// depth in USD (`0.0` when unknown). `None` = the pair is not composable
     /// from the current primaries, which is the honest answer, not an error.
     pub fn route(&self, base: AssetId, quote: AssetId, vol: &dyn Fn(u64) -> f64) -> Option<Route> {
+        self.route_barring(base, quote, vol, None)
+    }
+
+    /// [`Self::route`] with one ticker id barred from the edge set, in both
+    /// directions and at every hop.
+    fn route_barring(
+        &self,
+        base: AssetId,
+        quote: AssetId,
+        vol: &dyn Fn(u64) -> f64,
+        barred: Option<u64>,
+    ) -> Option<Route> {
         // A parity wrap (EURC, QCAD, …) IS its underlying node: identifying the
         // two computes what a 1.0 peg edge would, with no synthetic leg that has
         // no book, no ticker_id and no age behind it (`series_alias::peg_asset`).
@@ -438,8 +450,11 @@ impl CrossGraph {
             // full fan-out through a hub asset like USD.
             let last_hop = c.legs.len() + 1 == MAX_HOPS;
             for e in self.adj.get(&c.at).map(Vec::as_slice).unwrap_or(&[]) {
-                if (last_hop && e.peer != quote) || c.path.contains(&e.peer) {
-                    continue; // out of budget, or a cycle that can only lengthen
+                if Some(e.ticker_id) == barred
+                    || (last_hop && e.peer != quote)
+                    || c.path.contains(&e.peer)
+                {
+                    continue; // the pair itself, out of budget, or a lengthening cycle
                 }
                 let mut legs = c.legs.clone();
                 legs.push(RouteLeg {
@@ -465,6 +480,26 @@ impl CrossGraph {
     pub fn route_sym(&self, sym: &str, vol: &dyn Fn(u64) -> f64) -> Option<Route> {
         let (base, quote) = self.assets_of(sym)?;
         self.route(base, quote, vol)
+    }
+
+    /// [`Self::route_sym`] for the DECOMPOSE intent: a pair may never route
+    /// through ITSELF.
+    ///
+    /// NO CROSSES OF CROSSES applies to the requested pair too. A cross that is
+    /// registered as a primary is its own edge, so the plain router answers a
+    /// decomposition request with a one-leg identity route pointing at the very
+    /// series the caller has none of. That is how a light node, where every
+    /// signed cross IS registered, "composed" `EUR/USDC` from `EUR/USDC` and
+    /// read an empty shard dir (2026-08-19). Barring the requested ticker id is
+    /// what makes compose-on-read a function of the LEGS rather than of
+    /// `symbol_map` membership or of a materialization gate.
+    ///
+    /// A different id between the same two assets stays eligible: a parity
+    /// wrap's underlying (`EURC/USD` over `EUR/USD`) is another pair, not this
+    /// one.
+    pub fn decompose_sym(&self, sym: &str, vol: &dyn Fn(u64) -> f64) -> Option<Route> {
+        let (base, quote) = self.assets_of(sym)?;
+        self.route_barring(base, quote, vol, crate::try_resolve_ticker_id(sym))
     }
 
     /// `(base, quote)` asset ids of a requested pair. Each side is read off the
@@ -688,6 +723,34 @@ mod tests {
         };
         let legs = g.route_sym("GBP/JPY", &vol).expect("routes").legs;
         assert_eq!(legs.len(), 1, "direct book wins on hops: {legs:?}");
+    }
+
+    /// A cross that is ITSELF a registered primary (every signed feed on a
+    /// light node) is its own edge, so the plain router answers a
+    /// decomposition request with a one-leg identity route. `decompose_sym`
+    /// must bar the pair from its own route and cross the legs instead.
+    #[test]
+    fn a_registered_cross_decomposes_into_legs_never_into_itself() {
+        let g = graph(&["EUR/USD", "USDC/USD", "EUR/USDC"]);
+        assert_eq!(
+            route(&g, "EUR/USDC"),
+            vec![("EUR/USDC".into(), 1)],
+            "plain routing still takes the direct book"
+        );
+        for sym in ["EUR/USDC", "EUR-USDC"] {
+            let legs: Vec<(String, i8)> = g
+                .decompose_sym(sym, &blind)
+                .unwrap_or_else(|| panic!("{sym} must decompose"))
+                .legs
+                .iter()
+                .map(|l| (l.sym.to_string(), l.exp))
+                .collect();
+            assert_eq!(
+                legs,
+                vec![("EUR/USD".into(), 1), ("USDC/USD".into(), -1)],
+                "{sym} must not route through itself"
+            );
+        }
     }
 
     /// A healthy leg: 2 ticking providers, fresh-weight ok, ~10 bps of CI.

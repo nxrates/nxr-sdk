@@ -4,7 +4,9 @@
 //! where business logic belongs. Provides:
 //! - `resolve_ticker`: full symbol -> TickerMatch resolution with suffix stripping + quote detection
 //! - `resolve_asset` / `resolve_asset_in_class`: fuzzy asset lookup with Jaro-Winkler scoring
-//! - `get_asset_by_id` / `get_asset_by_global_id`: exact asset lookup by numeric ID
+//! - `get_asset_by_id` / `asset_by_id`: exact asset lookup by numeric ID
+//! - `ticker_admissible`: the one resolvability + blacklist gate, shared by the
+//!   UDP ingest path and the signing path
 
 use mitch::common::{AssetClass, InstrumentType, MitchError};
 use mitch::constants::{
@@ -760,7 +762,265 @@ pub fn resolve_asset_in_class(
 
 /// Get asset by exact class and class_id.
 pub fn get_asset_by_id(asset_class: AssetClass, class_id: u16) -> Option<Asset> {
-    RESOLVER.by_id.get(&(asset_class, class_id)).cloned()
+    asset_by_id(asset_class, class_id).cloned()
+}
+
+/// Borrowed form of [`get_asset_by_id`]. The tables are `'static`, so the hot
+/// paths (two lookups per UDP frame) never pay the two `String` clones.
+pub fn asset_by_id(asset_class: AssetClass, class_id: u16) -> Option<&'static Asset> {
+    RESOLVER.by_id.get(&(asset_class, class_id))
+}
+
+/// The `(base, quote)` assets a MITCH ticker id names. `None` on a side means
+/// that side names no registered asset. The ONE decode, so identity, price
+/// class and admissibility can never disagree about what a ticker is.
+pub fn ticker_assets(ticker_id: u64) -> (Option<&'static Asset>, Option<&'static Asset>) {
+    let t = TickerId::from_raw(ticker_id);
+    (
+        asset_by_id(t.base_asset_class(), t.base_asset_id()),
+        asset_by_id(t.quote_asset_class(), t.quote_asset_id()),
+    )
+}
+
+/// Case-insensitive hit on ANY identifier form of `asset`: every alias
+/// (including the canonical symbol), the long human `name`, or the decimal
+/// 32-bit MITCH global asset id. An operator writing the list in whichever form
+/// they have to hand must reach the same asset.
+///
+/// ⚠ ALIASES COLLIDE ACROSS CLASSES, by design and in numbers (`load_class`
+/// logs ~316 such collisions on every boot: `DASH` is both crypto Dash and the
+/// equity DoorDash, `ES` both the S&P 500 index and Eversource, `SOLV` both
+/// Solv and Solventum). A short alias therefore blacklists MORE than one asset,
+/// and since this predicate also gates UDP ingest, that gaps the collided
+/// asset's history rather than merely refusing to sign it. Prefer the MITCH
+/// asset id form for anything under 5 characters.
+pub fn asset_blacklisted(asset: &Asset, blacklisted: &std::collections::HashSet<String>) -> bool {
+    if blacklisted.is_empty() {
+        return false;
+    }
+    let hit = |t: &str| blacklisted.iter().any(|b| b.eq_ignore_ascii_case(t));
+    // `Asset::id` IS `pack_asset(class, class_id)` (see `AssetResolver::new`), so
+    // the id form costs one `itoa`-free format into a stack buffer, not a heap
+    // `String` per leg per frame.
+    let mut gid = [0u8; 10];
+    let gid = fmt_u32(asset.id, &mut gid);
+    hit(&asset.name) || hit(gid) || asset.aliases.split('|').any(hit)
+}
+
+/// Decimal `n` written into `buf`, returned as a borrowed `str`. u32 max is 10
+/// digits, so a `[u8; 10]` never overflows.
+fn fmt_u32(mut n: u32, buf: &mut [u8; 10]) -> &str {
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    // Digits only: always valid UTF-8.
+    std::str::from_utf8(&buf[i..]).unwrap_or("")
+}
+
+/// Why [`ticker_admissible`] refused a ticker id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickerRefusal {
+    /// A shape the resolver cannot mint: non-SPOT, or a non-zero sub-type.
+    Shape,
+    /// Base names no registered asset, or a blacklisted one.
+    Base,
+    /// Quote names no registered asset, or a blacklisted one.
+    Quote,
+}
+
+impl std::fmt::Display for TickerRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Shape => "not a SPOT ticker with sub-type 0",
+            Self::Base => "base asset is unregistered or blacklisted",
+            Self::Quote => "quote asset is unregistered or blacklisted",
+        })
+    }
+}
+
+/// THE admissibility predicate: RESOLVABILITY, not membership.
+///
+/// A ticker id is admissible when it is a shape [`crate::try_resolve_ticker_id`]
+/// could have minted (SPOT, sub-type 0) and both of its assets are in the
+/// canonical tables and un-blacklisted. No configured list takes part. There is
+/// no ticker declaration and no whitelist anywhere, and the asset blacklist is
+/// the ONLY exclusion, which is why it is enforced here rather than per call
+/// site: a blacklisted asset must be unreachable through composition too.
+///
+/// Shared by the UDP ingest gate and the signing path so a node's ingested,
+/// served and signable universes cannot drift. A light node therefore ingests,
+/// prices and signs anything a full node does.
+///
+/// This is also the ingest bound that replaced the registry whitelist, the root
+/// cause fix for the 2026-07-10 runtime OOM: `Index::validate` only rejects
+/// ticker==0, the price-sanity gate fails OPEN for a never-before-seen id, and
+/// no per-ticker map evicts, so an unbounded id space grows `state`/`dirty`/
+/// `msg_counter` for the life of the process. The admissible set here is finite
+/// and fixed at build time: 2,278 assets across 6 class tables, so at most
+/// 2,278^2 (about 5.2M) ids instead of 2^64. Pinning SPOT and sub-type 0 is
+/// load-bearing for that bound, not cosmetic: the 20 free sub-type bits alone
+/// would multiply it by 2^20, and the instrument-type nibble by another 16.
+/// Random wire corruption clears all four conditions with probability about
+/// 3e-13 per frame (asset ids are sparse: 2,278 live points in a 2^20
+/// class-and-id space), i.e. never within a process lifetime.
+pub fn ticker_admissible(
+    ticker_id: u64,
+    blacklisted: &std::collections::HashSet<String>,
+) -> Result<(), TickerRefusal> {
+    let t = TickerId::from_raw(ticker_id);
+    // RAW nibbles, not the decoded enums: `InstrumentType::from_id` and
+    // `AssetClass::from_id` fall back to variant 0 for the reserved codes, so
+    // `t.is_spot()` is true for instrument types 14 and 15 and class 14/15 read
+    // as EQ. Comparing each nibble against what it decoded to rejects exactly
+    // the undefined codes, which is what keeps the admissible set at one raw id
+    // per (base, quote) pair instead of nine.
+    if (ticker_id >> 60) & 0xF != InstrumentType::SPOT as u64
+        || t.sub_type() != 0
+        || (ticker_id >> 56) & 0xF != t.base_asset_class() as u64
+        || (ticker_id >> 36) & 0xF != t.quote_asset_class() as u64
+    {
+        return Err(TickerRefusal::Shape);
+    }
+    let (base, quote) = ticker_assets(ticker_id);
+    match base {
+        Some(a) if !asset_blacklisted(a, blacklisted) => {}
+        _ => return Err(TickerRefusal::Base),
+    }
+    match quote {
+        Some(a) if !asset_blacklisted(a, blacklisted) => {}
+        _ => return Err(TickerRefusal::Quote),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod admissibility_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    const SOL_USDC: u64 = 448_509_916_384_067_584;
+    const BTC_USDC: u64 = 435_315_776_850_755_584;
+
+    /// Resolvability, not membership: any id whose two legs name registered
+    /// assets is admissible, whether or not anything declared it.
+    #[test]
+    fn a_registered_pair_is_admissible_without_being_declared() {
+        let none = HashSet::new();
+        assert_eq!(ticker_admissible(SOL_USDC, &none), Ok(()));
+        assert_eq!(ticker_admissible(BTC_USDC, &none), Ok(()));
+    }
+
+    /// The bound: an id must decode to assets the canonical tables actually
+    /// hold. `class_id` is u16 and the tables are sparse, so almost none do.
+    #[test]
+    fn an_unregistered_asset_is_refused_on_either_leg() {
+        let none = HashSet::new();
+        let t = TickerId::from_raw(SOL_USDC);
+        let bad_base = TickerId::new(
+            InstrumentType::SPOT,
+            t.base_asset_class(),
+            0xFFFF,
+            t.quote_asset_class(),
+            t.quote_asset_id(),
+            0,
+        )
+        .unwrap()
+        .raw;
+        let bad_quote = TickerId::new(
+            InstrumentType::SPOT,
+            t.base_asset_class(),
+            t.base_asset_id(),
+            t.quote_asset_class(),
+            0xFFFF,
+            0,
+        )
+        .unwrap()
+        .raw;
+        assert_eq!(ticker_admissible(bad_base, &none), Err(TickerRefusal::Base));
+        assert_eq!(ticker_admissible(bad_quote, &none), Err(TickerRefusal::Quote));
+        // The FNV phantom an unresolvable symbol used to mint decodes to noise.
+        assert!(ticker_admissible(crate::phantom_ticker_id("EUR/USDT"), &none).is_err());
+    }
+
+    /// SPOT and sub-type 0 are load-bearing for the bound, not cosmetic: the 20
+    /// free sub-type bits alone would multiply the admissible id space by 2^20
+    /// and the instrument-type nibble by another 16. `try_resolve_ticker_id`
+    /// can mint neither, so neither is reachable from a symbol.
+    #[test]
+    fn only_the_shape_the_resolver_mints_is_admissible() {
+        let none = HashSet::new();
+        assert_eq!(
+            ticker_admissible(SOL_USDC | 1, &none),
+            Err(TickerRefusal::Shape)
+        );
+        assert_eq!(
+            ticker_admissible(SOL_USDC | 0xFFFFF, &none),
+            Err(TickerRefusal::Shape)
+        );
+        for itype in 1u64..16 {
+            assert_eq!(
+                ticker_admissible(SOL_USDC | (itype << 60), &none),
+                Err(TickerRefusal::Shape),
+                "instrument type {itype}"
+            );
+        }
+        // The RESERVED codes are the trap: `from_id` maps 14 and 15 back to
+        // variant 0, so a decoded-enum check would read them as SPOT and as EQ
+        // and admit eight extra raw ids for every real pair.
+        for reserved in [14u64, 15] {
+            assert_eq!(
+                ticker_admissible(SOL_USDC | (reserved << 56), &none),
+                Err(TickerRefusal::Shape),
+                "reserved base class {reserved}"
+            );
+            assert_eq!(
+                ticker_admissible(SOL_USDC | (reserved << 36), &none),
+                Err(TickerRefusal::Shape),
+                "reserved quote class {reserved}"
+            );
+        }
+    }
+
+    /// The blacklist is the SOLE exclusion, binds on the ASSET (either leg), and
+    /// accepts every identifier form an operator might have to hand.
+    #[test]
+    fn the_blacklist_binds_either_leg_in_any_identifier_form() {
+        for banned in ["SOL", "sol", "WSOL", "Solana", "407917"] {
+            let set: HashSet<String> = [banned.to_string()].into_iter().collect();
+            assert_eq!(
+                ticker_admissible(SOL_USDC, &set),
+                Err(TickerRefusal::Base),
+                "{banned} as base"
+            );
+            assert_eq!(ticker_admissible(BTC_USDC, &set), Ok(()), "{banned} unrelated");
+        }
+        let quote_banned: HashSet<String> = ["USDC".to_string()].into_iter().collect();
+        assert_eq!(
+            ticker_admissible(SOL_USDC, &quote_banned),
+            Err(TickerRefusal::Quote)
+        );
+    }
+
+    /// The MITCH asset id form the test above spells literally must be the one
+    /// `pack_asset` produces, or that case passes vacuously. `Asset::id` must
+    /// BE that value: `asset_blacklisted` reads the field instead of repacking.
+    #[test]
+    fn the_mitch_asset_id_form_is_the_packed_global_id() {
+        let (base, _) = ticker_assets(SOL_USDC);
+        let base = base.expect("SOL registered");
+        assert_eq!(base.id, pack_asset(base.class, base.class_id));
+        assert_eq!(base.id.to_string(), "407917");
+        let mut buf = [0u8; 10];
+        assert_eq!(fmt_u32(base.id, &mut buf), "407917");
+        assert_eq!(fmt_u32(0, &mut [0u8; 10]), "0");
+        assert_eq!(fmt_u32(u32::MAX, &mut [0u8; 10]), "4294967295");
+    }
 }
 
 #[cfg(test)]

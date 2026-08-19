@@ -264,21 +264,31 @@ pub struct SignedQuotesYml {
     /// NAME, or its MITCH ASSET ID (decimal global id). Match is by asset
     /// identity, never by ticker id, so one entry covers every pair carrying
     /// that asset on either side, regardless of which exchange materialized it.
-    /// Catalog feeds are NOT gated by this: an operator-declared feed carries
-    /// its own explicit per-feed policy, so it may legitimately name a
-    /// blacklisted asset. Empty (default) = universal signing for every
-    /// routable symbol.
+    /// This is the SOLE exclusion mechanism. It binds at UDP ingest as well as
+    /// on the signing path (one predicate,
+    /// [`crate::resolve::ticker_admissible`]), so a blacklisted asset never
+    /// reaches state and cannot be reached as a route leg of some composed
+    /// pair either. Empty (default) = universal signing for every routable
+    /// symbol. Read through [`Self::blacklist_set`], never field-by-field: the
+    /// normalization has to be identical everywhere it is applied.
     #[serde(default)]
     pub blacklisted_assets: Vec<String>,
-    /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts
-    /// its ticker universe to ONLY the symbols this signer must sign (every
-    /// `feeds[].symbol`, plus each composed feed's LEGS found through the graph
-    /// at sign time) instead of the full config universe (2000+ tickers). The
-    /// UDP registry gate then drops all other
-    /// frames, so the emit cycle + s10/renko/σ producers run for ~30 tickers,
-    /// not thousands (~50-100x less CPU). σ for the signed symbols is
-    /// bit-identical to the full-universe path (same per-ticker pipeline); only
-    /// the ticker SET differs. `false` (default) keeps full-replica behavior.
+    /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts the
+    /// MATERIALISED universe (`symbol_map`, and the triangulation rules whose
+    /// outputs it persists) to the symbols this signer must sign: every
+    /// `feeds[].symbol` plus each composed feed's LEGS found through the graph
+    /// at sign time, instead of the full config universe (2000+ tickers). The
+    /// s10/renko/σ producers and the shard writers then run for ~30 tickers,
+    /// not thousands. σ for the signed symbols is bit-identical to the
+    /// full-universe path (same per-ticker pipeline); only the ticker SET
+    /// differs. `false` (default) keeps full-replica behavior.
+    ///
+    /// SERVE, not INGEST. This does NOT narrow what the node accepts on the
+    /// wire, and must not: ingest admits on resolvability
+    /// ([`crate::resolve::ticker_admissible`]) so a light node can price and
+    /// sign any resolvable ticker, including one no feed declares. Coupling
+    /// the two is what made `/v1/price/SOL-USDC` answer empty on a signer
+    /// holding SOL's marks.
     #[serde(default)]
     pub sign_only: bool,
     /// LIGHT NODE retention, in whole days of sealed shards to keep BESIDES
@@ -398,6 +408,17 @@ impl SignedQuotesYml {
     /// through the cross graph at sign time (via `sigma_key`'s route), not
     /// declared here, which is what makes the universe derived rather than a
     /// hand-maintained catalogue.
+    /// The blacklist as the predicate consumes it: trimmed, uppercased, empties
+    /// dropped. ONE normalization, so the ingest gate and the signing path can
+    /// never disagree about whether an operator's entry matched.
+    pub fn blacklist_set(&self) -> std::collections::HashSet<String> {
+        self.blacklisted_assets
+            .iter()
+            .map(|a| a.trim().to_ascii_uppercase())
+            .filter(|a| !a.is_empty())
+            .collect()
+    }
+
     pub fn signed_symbols(&self) -> std::collections::BTreeSet<String> {
         let mut s = std::collections::BTreeSet::new();
         for f in &self.feeds {

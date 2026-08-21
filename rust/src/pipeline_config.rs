@@ -18,7 +18,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::mtf::SigmaLeg;
 use crate::vol::VolConfig;
+use crate::vol_estimator::SigmaEstimator;
 
 /// Default min 24h USD volume below which the core weights builder skips
 /// emitting a synth injection rule (stablecoin- or USD-quoted pairs).
@@ -294,22 +296,24 @@ pub struct SignedQuotesYml {
     /// Required blob rebuild/cache floor in milliseconds. Must be in 1..=10
     /// so a newly observed provider tick is not hidden behind a stale cache.
     pub min_interval_ms: u64,
-    /// Multi-timeframe Parkinson σ legs, in MINUTES, with optional per-leg
-    /// weights. Default 6 h / 2 d / 1 w, EQUAL-weighted.
+    /// Multi-timeframe σ legs, in MINUTES, with optional per-leg weights.
+    /// Default 1 h / 24 h / 7 d, INVERSE-VARIANCE-weighted (weights = bar
+    /// counts).
     ///
     /// Each leg is a Parkinson σ over the same 30 m bar and differs only in
     /// sample length, so the blend needs no annualisation. A leg that cannot
     /// reach the arming floor is DROPPED and the weights renormalise over the
     /// survivors; σ is never emitted from a short sample.
     ///
-    /// Weights are EQUAL by design, not inverse-variance. Parkinson's sampling
-    /// variance falls like `1/n`, so inverse-variance would give the 336-bar
-    /// weekly leg ~28x the 12-bar 6 h leg and the blend would be the weekly
-    /// window with extra steps: exactly the lag this replaces. On the money
-    /// path σ is a risk premium with asymmetric loss (understating it is the
+    /// The DEFAULT weights are inverse-variance (bar counts), because the
+    /// default leg set now spans DIFFERENT estimators and bar widths whose
+    /// sampling variances differ by an order of magnitude; a flat mean would
+    /// let the noisy 12-bar fast leg drag the blend. A deployment that pins
+    /// its own `sigma_windows_min` WITHOUT `weights` keeps EQUAL weighting:
+    /// same-window Parkinson legs are equally efficient, and on the money path
+    /// σ is a risk premium with asymmetric loss (understating it is the
     /// attack; overstating only widens the band and is separately capped at
-    /// co-sign), so responsiveness is bought deliberately with efficiency.
-    /// Override per deployment if a venue justifies it.
+    /// co-sign).
     #[serde(default)]
     pub sigma_windows_min: Option<crate::mtf::MtfWindows>,
     /// DEPRECATED alias for [`Self::sigma_windows_min`]: the single 30 m
@@ -433,6 +437,31 @@ fn default_light_retention_days() -> u16 {
 
 /// Bar width the σ estimator rolls up to, in minutes.
 pub const SIGMA_BAR_MIN: u32 = 30;
+
+/// Resolve per-leg σ specs for one feed: the deployment's windows (minutes)
+/// plus the feed's optional per-leg estimator and bar-width declarations.
+/// Undeclared keys fall back to all-Parkinson on the canonical 30 m bar; the
+/// whole-set default (nothing declared anywhere) is
+/// [`crate::mtf::DEFAULT_SIGMA_LEGS`] and is handled by the caller.
+pub fn resolve_sigma_legs(
+    windows_min: &[u32],
+    estimators: Option<&[SigmaEstimator]>,
+    bar_min: Option<&[u32]>,
+) -> Vec<SigmaLeg> {
+    windows_min
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| SigmaLeg {
+            window_min: w,
+            bar_min: bar_min
+                .and_then(|v| v.get(i).copied())
+                .unwrap_or(SIGMA_BAR_MIN),
+            estimator: estimators
+                .and_then(|v| v.get(i).copied())
+                .unwrap_or(crate::vol_estimator::SigmaEstimator::Parkinson),
+        })
+        .collect()
+}
 
 impl SignedQuotesYml {
     /// σ legs for this signer, defaulted to 6 h / 2 d / 1 w equal-weighted.
@@ -668,6 +697,23 @@ pub struct SignedFeedYml {
     /// retention keeps.
     #[serde(default)]
     pub sigma_window_bars: Option<u32>,
+    /// Per-leg σ ESTIMATOR for THIS feed, aligned with the leg order of the
+    /// deployment's `sigma_windows_min` (`parkinson` | `gk` | `yz`; the long
+    /// spellings `garman_klass` / `yang_zhang` are accepted). Absent =
+    /// all-Parkinson over whatever windows are configured, EXCEPT when nothing
+    /// σ-related is declared anywhere, where the whole default leg set applies
+    /// (1 h @ 5 m YZ / 24 h @ 30 m GK / 7 d @ 30 m GK). Vector length must
+    /// equal the window count; a mismatch is a BOOT ERROR, never a silent
+    /// realignment.
+    #[serde(default)]
+    pub sigma_estimators: Option<Vec<SigmaEstimator>>,
+    /// Per-leg σ rollup width in minutes for THIS feed, aligned with
+    /// `sigma_windows_min`. Absent = every leg on the canonical 30 m bar.
+    /// Each leg must resolve to at least MIN_VOL_BARS bars at its own width,
+    /// and its per-bar estimate is rescaled to the per-30 m-bar contract scale
+    /// before blending, so mixed widths stay one dimension.
+    #[serde(default)]
+    pub sigma_bar_min: Option<Vec<u32>>,
     /// Publish the RECIPROCAL of `symbol`: the mark is `1/mid(symbol)` and the
     /// record carries the reciprocal pair's MITCH ticker id.
     ///
@@ -683,6 +729,14 @@ pub struct SignedFeedYml {
     /// inversion, so only the mid flips.
     #[serde(default)]
     pub invert: bool,
+}
+
+impl SignedFeedYml {
+    /// True when this feed declares any per-leg σ key, so the signer can tell
+    /// a deliberate override set apart from the whole-set default.
+    pub fn has_sigma_leg_overrides(&self) -> bool {
+        self.sigma_estimators.is_some() || self.sigma_bar_min.is_some()
+    }
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the
@@ -1668,10 +1722,75 @@ mod tests {
         assert_eq!(w.weights, vec![2.0, 1.0]);
     }
 
+    /// Per-feed σ leg keys parse (serde aliases included) and resolve per leg.
+    #[test]
+    fn sigma_leg_overrides_parse_and_resolve() {
+        let parse = |feeds: &str| -> SignedQuotesYml {
+            let y = format!(
+                "oracle: \"0x0000000000000000000000000000000000000000\"\n\
+                 chain_id: 11155111\n\
+                 min_interval_ms: 5\n\
+                 mark_max_age_ms: 500\n\
+                 min_accepted_providers: 2\n\
+                 min_composite_freshness_bps: 500\n\
+                 quorum: 2\n\
+                 feeds:\n{feeds}"
+            );
+            serde_yml::from_str::<SignedQuotesYml>(&y).expect("signed_quotes parses")
+        };
+        let y = parse(
+            "  - { symbol: BTC-USDC, cosign_tolerance_bps: 2.0, sigma_estimators: [yz, gk, parkinson], sigma_bar_min: [5, 30, 30] }\n",
+        );
+        assert_eq!(y.feeds.len(), 1);
+        let f = &y.feeds[0];
+        assert!(f.has_sigma_leg_overrides());
+        assert_eq!(
+            f.sigma_estimators,
+            Some(vec![
+                crate::vol_estimator::SigmaEstimator::Yz,
+                crate::vol_estimator::SigmaEstimator::Gk,
+                crate::vol_estimator::SigmaEstimator::Parkinson,
+            ])
+        );
+        assert_eq!(f.sigma_bar_min, Some(vec![5, 30, 30]));
+        // Long spellings alias to the same variants.
+        let y2 = parse(
+            "  - { symbol: BTC-USDC, cosign_tolerance_bps: 2.0, sigma_estimators: [yang_zhang, garman_klass] }\n",
+        );
+        assert_eq!(
+            y2.feeds[0].sigma_estimators,
+            Some(vec![
+                crate::vol_estimator::SigmaEstimator::Yz,
+                crate::vol_estimator::SigmaEstimator::Gk,
+            ])
+        );
+        // Undeclared keys fall back to all-Parkinson on the 30 m bar.
+        let legs = resolve_sigma_legs(&crate::mtf::DEFAULT_SIGMA_WINDOWS_MIN, None, None);
+        assert_eq!(legs.len(), 3);
+        assert!(legs.iter().all(|l| l.estimator
+            == crate::vol_estimator::SigmaEstimator::Parkinson
+            && l.bar_min == SIGMA_BAR_MIN));
+        // Declared widths and estimators land on the matching legs.
+        let legs = resolve_sigma_legs(
+            &crate::mtf::DEFAULT_SIGMA_WINDOWS_MIN,
+            f.sigma_estimators.as_deref(),
+            f.sigma_bar_min.as_deref(),
+        );
+        assert_eq!(legs[0].bar_min, 5);
+        assert_eq!(legs[0].estimator, crate::vol_estimator::SigmaEstimator::Yz);
+        assert_eq!(legs[1].estimator, crate::vol_estimator::SigmaEstimator::Gk);
+        assert_eq!(
+            legs[2].estimator,
+            crate::vol_estimator::SigmaEstimator::Parkinson
+        );
+        // A feed without the keys declares no override.
+        let plain = parse("  - { symbol: BTC-USDC, cosign_tolerance_bps: 2.0 }\n");
+        assert!(!plain.feeds[0].has_sigma_leg_overrides());
+    }
     #[test]
     fn sigma_windows_min_wins_when_both_keys_are_present() {
         let c = signed_yml(
-            "sigma_lookback_bars: 48\nsigma_windows_min:\n  windows_min: [360, 2880, 10080]\n",
+            "sigma_lookback_bars: 48\nsigma_windows_min:\n  windows_min: [60, 1440, 10080]\n",
         );
         assert!(c.has_stale_sigma_alias(), "loader must WARN on this file");
         assert_eq!(
@@ -2052,14 +2171,23 @@ mod tests {
         assert_eq!(
             feeds.iter().map(|f| f.symbol.as_str()).collect::<Vec<_>>(),
             vec![
-                "USDT-USD", "ETH-USDC", "BTC-USDC", "XAUT-USDC", "USD-CAD", "USD-JPY", "NVDA-USDC"
+                "USDT-USD",
+                "ETH-USDC",
+                "BTC-USDC",
+                "XAUT-USDC",
+                "USD-CAD",
+                "USD-JPY",
+                "NVDA-USDC"
             ],
             "a feed is named by its symbol, which resolves to the MITCH ticker the wire carries"
         );
 
         // Every feed row above omits `idx`, and that must stay legal: nothing
         // under `ticker22` reads an ordinal.
-        assert!(feeds.iter().all(|f| f.idx.is_none()), "ticker22 needs no ordinal");
+        assert!(
+            feeds.iter().all(|f| f.idx.is_none()),
+            "ticker22 needs no ordinal"
+        );
 
         // A live legacy row DOES carry one, and it must parse. The deployed arc
         // maps are 0-BASED, so slot 0 is a real feed and the "no slot" sentinel
@@ -2071,11 +2199,19 @@ mod tests {
 "#,
         )
         .expect("a legacy ConfigMap row carrying `idx` must parse");
-        assert_eq!(legacy[0].idx, Some(0), "0 is a real arc slot, not a sentinel");
+        assert_eq!(
+            legacy[0].idx,
+            Some(0),
+            "0 is a real arc slot, not a sentinel"
+        );
         assert_eq!(legacy[1].idx, Some(17));
 
         assert_eq!(
-            feeds.iter().filter(|f| f.invert).map(|f| f.symbol.as_str()).collect::<Vec<_>>(),
+            feeds
+                .iter()
+                .filter(|f| f.invert)
+                .map(|f| f.symbol.as_str())
+                .collect::<Vec<_>>(),
             vec!["USD-CAD", "USD-JPY"],
             "the USD-base FX legs publish the reciprocal"
         );

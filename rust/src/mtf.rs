@@ -14,17 +14,106 @@
 //!
 //! ## Dimensional note
 //!
-//! Legs differ ONLY in sample LENGTH, never in bar width: every leg estimates
-//! the same per-bar sigma over the same bar. Blending therefore needs no
-//! annualisation and no horizon rescale, and none is applied here.
+//! Legs may differ in bar WIDTH (a 5 m fast leg beside 30 m slow legs). Each
+//! leg's kernel prices a PER-BAR sigma at its own width; the consumer rescales
+//! via [`SigmaLeg::to_per_30m_scale`] BEFORE blending, so the blend stays a
+//! per-30 m-bar sigma and needs no annualisation and no horizon rescale, and
+//! none is applied here. This preserves the downstream per-30 m-bar contract.
 
 use serde::{Deserialize, Serialize};
 
-/// Signed-quote sigma legs: 6 h / 2 d / 1 w, in minutes.
+/// Signed-quote sigma legs, in minutes: 1 h / 24 h / 7 d.
 ///
-/// The short leg tracks a live regime change, the long legs put a floor under
-/// a quiet weekend that a single 24 h window collapses through.
-pub const DEFAULT_SIGMA_WINDOWS_MIN: [u32; 3] = [360, 2_880, 10_080];
+/// The short leg tracks a live regime change at a 5 m bar width, the long legs
+/// put a floor under a quiet weekend that a single 24 h window collapses
+/// through.
+pub const DEFAULT_SIGMA_WINDOWS_MIN: [u32; 3] = [60, 1_440, 10_080];
+
+/// Bar width per signed-quote sigma leg, in minutes: the fast leg rolls up at
+/// 5 m to capture intra-hour bursts, the mid/slow legs stay on the canonical
+/// 30 m bar.
+pub const DEFAULT_SIGMA_BAR_MIN: [u32; 3] = [5, 30, 30];
+
+/// Blend weight per signed-quote sigma leg, INVERSE-VARIANCE: a range
+/// estimator's sampling variance falls like 1/n, so quality scales with the
+/// leg's bar count (12 / 48 / 336). `MtfWindows::blend` multiplies these by
+/// the runtime taper quality, so a partially filled long leg does not get its
+/// full prior.
+pub const DEFAULT_SIGMA_WEIGHTS: [f64; 3] = [12.0, 48.0, 336.0];
+
+/// One resolved sigma leg: lookback in MINUTES, rollup bar width in minutes,
+/// and the kernel that prices it.
+///
+/// A leg's own estimate is a PER-BAR sigma at `bar_min` width; the consumer
+/// rescales to the contract scale (per 30 m bar) by `sqrt(bar_min/30)` before
+/// blending, so legs of different widths stay dimensionally comparable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigmaLeg {
+    /// Lookback in minutes. Converted to bars at [`SigmaLeg::bar_min`] by
+    /// [`SigmaLeg::bars`].
+    pub window_min: u32,
+    /// Rollup bar width in minutes (> 0).
+    pub bar_min: u32,
+    /// Kernel that prices this leg.
+    pub estimator: crate::vol_estimator::SigmaEstimator,
+}
+
+impl Default for SigmaLeg {
+    fn default() -> Self {
+        Self {
+            window_min: DEFAULT_SIGMA_WINDOWS_MIN[0],
+            bar_min: DEFAULT_SIGMA_BAR_MIN[0],
+            estimator: crate::vol_estimator::SigmaEstimator::Yz,
+        }
+    }
+}
+
+impl SigmaLeg {
+    /// Lookback in whole bars of this leg's own width. Rounds down, never
+    /// below 1: the caller's arming floor decides whether that is enough.
+    pub fn bars(&self) -> usize {
+        (self.window_min.max(1) / self.bar_min.max(1)).max(1) as usize
+    }
+
+    /// Span of the lookback in WHOLE 30 m bars: the history depth this leg
+    /// needs from storage that keeps only the canonical 30 m series. THE
+    /// retention/scan conversion for mixed-width leg sets.
+    pub fn span_bars_30m(&self) -> usize {
+        (self.window_min.max(1) / 30).max(1) as usize
+    }
+
+    /// Rescale a per-bar sigma at this leg's width to the per-30 m-bar
+    /// contract scale. Variance accumulates linearly in time, so the factor
+    /// is `sqrt(30/bar_min)`: a per-5 m sigma UNDERSTATES the per-30 m move.
+    pub fn to_per_30m_scale(&self, per_bar_sigma: f64) -> f64 {
+        per_bar_sigma * (30.0 / self.bar_min as f64).sqrt()
+    }
+
+    /// Per-bar sigma of this leg over OHLC slices AT ITS OWN WIDTH.
+    pub fn sigma(&self, opens: &[f64], highs: &[f64], lows: &[f64], closes: &[f64]) -> f64 {
+        self.estimator.sigma(opens, highs, lows, closes)
+    }
+}
+
+/// The default signed-quote sigma leg set: 1 h @ 5 m Yang-Zhang, 24 h @ 30 m
+/// Garman-Klass, 7 d @ 30 m Garman-Klass, blended by inverse-variance weights.
+pub const DEFAULT_SIGMA_LEGS: [SigmaLeg; 3] = [
+    SigmaLeg {
+        window_min: 60,
+        bar_min: 5,
+        estimator: crate::vol_estimator::SigmaEstimator::Yz,
+    },
+    SigmaLeg {
+        window_min: 1_440,
+        bar_min: 30,
+        estimator: crate::vol_estimator::SigmaEstimator::Gk,
+    },
+    SigmaLeg {
+        window_min: 10_080,
+        bar_min: 30,
+        estimator: crate::vol_estimator::SigmaEstimator::Gk,
+    },
+];
 
 /// Renko brick-sizing legs: 14 d / 60 d / 180 d, in minutes.
 pub const DEFAULT_BRICK_WINDOWS_MIN: [u32; 3] = [20_160, 86_400, 259_200];
@@ -138,7 +227,10 @@ impl MtfWindows {
 
 impl Default for MtfWindows {
     fn default() -> Self {
-        Self::equal(DEFAULT_SIGMA_WINDOWS_MIN)
+        Self::new(
+            DEFAULT_SIGMA_WINDOWS_MIN.to_vec(),
+            DEFAULT_SIGMA_WEIGHTS.to_vec(),
+        )
     }
 }
 
@@ -148,19 +240,58 @@ mod tests {
 
     #[test]
     fn minutes_to_bars_at_several_bar_sizes() {
-        let w = MtfWindows::equal(DEFAULT_SIGMA_WINDOWS_MIN);
+        // Default legs: 1 h / 24 h / 1 w with INVERSE-VARIANCE weights.
+        let w = MtfWindows::default();
+        assert_eq!(w.windows_min, DEFAULT_SIGMA_WINDOWS_MIN.to_vec());
+        assert_eq!(w.weights, DEFAULT_SIGMA_WEIGHTS.to_vec());
+        assert_eq!(w.bars(30), vec![2, 48, 336]);
+        assert_eq!(w.bars(5), vec![12, 288, 2_016]);
+        // Legacy 6 h / 2 d / 1 w set, kept as an explicit case.
+        let legacy = MtfWindows::equal([360u32, 2_880, 10_080]);
         assert_eq!(
-            w.bars(30),
+            legacy.bars(30),
             vec![12, 96, 336],
             "6 h / 2 d / 1 w in 30 m bars"
         );
-        assert_eq!(w.bars(1), vec![360, 2_880, 10_080], "1 m bars");
-        assert_eq!(w.bars(60), vec![6, 48, 168], "1 h bars");
-        assert_eq!(w.bars(1_440), vec![1, 2, 7], "1 d bars, 6 h floors to 1");
-        assert_eq!(w.max_bars(30), 336);
+        assert_eq!(legacy.bars(1), vec![360, 2_880, 10_080], "1 m bars");
+        assert_eq!(legacy.bars(60), vec![6, 48, 168], "1 h bars");
+        assert_eq!(
+            legacy.bars(1_440),
+            vec![1, 2, 7],
+            "1 d bars, 6 h floors to 1"
+        );
+        assert_eq!(legacy.max_bars(30), 336);
         // Brick-sizing legs keep their 14/60/180-day meaning in minutes.
         let b = MtfWindows::equal(DEFAULT_BRICK_WINDOWS_MIN);
         assert_eq!(b.bars(30), vec![14 * 48, 60 * 48, 180 * 48]);
+    }
+
+    #[test]
+    fn sigma_leg_resolution_and_scaling() {
+        let fast = &DEFAULT_SIGMA_LEGS[0];
+        assert_eq!(fast.bars(), 12, "1 h at 5 m bars");
+        assert_eq!(fast.span_bars_30m(), 2);
+        assert_eq!(DEFAULT_SIGMA_LEGS[1].bars(), 48, "24 h at 30 m bars");
+        assert_eq!(DEFAULT_SIGMA_LEGS[2].bars(), 336, "1 w at 30 m bars");
+        assert_eq!(DEFAULT_SIGMA_LEGS[2].span_bars_30m(), 336);
+        // A 5 m-bar sigma is a per-5-minute number: the per-30 m-bar contract
+        // scale is sqrt(6) larger.
+        let s = fast.to_per_30m_scale(0.001);
+        assert!((s - 0.001 * (30.0f64 / 5.0).sqrt()).abs() < 1e-15);
+        // A 30 m leg is already at contract scale.
+        assert_eq!(DEFAULT_SIGMA_LEGS[1].to_per_30m_scale(0.001), 0.001);
+        assert_eq!(
+            DEFAULT_SIGMA_LEGS[0].estimator,
+            crate::vol_estimator::SigmaEstimator::Yz
+        );
+        assert_eq!(
+            DEFAULT_SIGMA_LEGS[1].estimator,
+            crate::vol_estimator::SigmaEstimator::Gk
+        );
+        assert_eq!(
+            DEFAULT_SIGMA_LEGS[2].estimator,
+            crate::vol_estimator::SigmaEstimator::Gk
+        );
     }
 
     #[test]

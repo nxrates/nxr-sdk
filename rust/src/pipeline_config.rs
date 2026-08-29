@@ -156,6 +156,12 @@ pub enum RecordFormat {
     /// `tickerId:u64 | priceB64:u64 | sigma:u32 | conf:u16`, big-endian.
     /// Keyed by the MITCH ticker id, so no ordinal exists or is required.
     Ticker22,
+    /// V2 PACKED-SLOT, 9 B header + 100 B/record for `ExternalOracleV2`:
+    /// `header = version:u8(=2) | seq:u32 | sourceTsDs:u32`, then per SLOT
+    /// `slotId:u32 | priceWord:32 | sigmaWord:32 | confWord:32`, big-endian.
+    /// 8 mids per slot; keyed by a per-feed `global_index` (slotId = gi/8,
+    /// laneIdx = gi%8) with a per-feed `exp_bias`. See `server::signed_v2`.
+    PackedV2,
 }
 
 impl Default for RecordFormat {
@@ -177,6 +183,7 @@ impl RecordFormat {
         match s.trim() {
             "idx24" => Ok(Self::Idx24),
             "ticker22" => Ok(Self::Ticker22),
+            "packedV2" | "packed_v2" => Ok(Self::PackedV2),
             "ticker30" => Err(
                 "signed_quotes record_format `ticker30` is RETIRED and this build cannot emit \
                  it. Declare `ticker22` if the consumer contract was migrated, `idx24` if it \
@@ -185,7 +192,7 @@ impl RecordFormat {
             ),
             other => Err(format!(
                 "signed_quotes record_format {other:?} is not a layout this build emits; \
-                 accepted: `idx24`, `ticker22`"
+                 accepted: `idx24`, `ticker22`, `packedV2`"
             )),
         }
     }
@@ -195,6 +202,7 @@ impl RecordFormat {
         match self {
             Self::Idx24 => 24,
             Self::Ticker22 => 22,
+            Self::PackedV2 => 100,
         }
     }
 
@@ -206,6 +214,7 @@ impl RecordFormat {
         match self {
             Self::Idx24 => 0,
             Self::Ticker22 => 8,
+            Self::PackedV2 => 9,
         }
     }
 
@@ -214,6 +223,7 @@ impl RecordFormat {
         match self {
             Self::Idx24 => "idx24",
             Self::Ticker22 => "ticker22",
+            Self::PackedV2 => "packedV2",
         }
     }
 }
@@ -247,6 +257,12 @@ pub struct SignedDomainYml {
     /// never at config load: see [`RecordFormat`].
     #[serde(default)]
     pub record_format: Option<String>,
+    /// V2 (`packedV2`) ONLY: the oracle's immutable deciseconds clock origin in
+    /// SECONDS (`sourceTsDs = (sourceSec - epoch) * 10`). Persisted alongside
+    /// BTR's v2 deploy record; Arc (chainId 5042002) = 1735689600 (2025-01-01Z).
+    /// Absent falls back to that Arc default in the signer.
+    #[serde(default)]
+    pub epoch: Option<u32>,
 }
 
 /// `#[serde(default)]` for a bool that must stay on when the YAML is silent.
@@ -503,6 +519,7 @@ impl SignedQuotesYml {
                 // the deployment default, which is where its `record_format`
                 // was already written.
                 record_format: None,
+                epoch: None,
             },
         )])
     }
@@ -729,6 +746,20 @@ pub struct SignedFeedYml {
     /// inversion, so only the mid flips.
     #[serde(default)]
     pub invert: bool,
+    /// V2 (`packedV2`) ONLY: this feed's global lane index on `ExternalOracleV2`
+    /// (`slotId = global_index / 8`, `laneIdx = global_index % 8`). Mirror of
+    /// BTR's `deployments/arc-oracle-v2-lanes.json` `feeds.<SYM>.globalIndex`,
+    /// hand-synced into the signer ConfigMap exactly like [`Self::idx`]. A feed
+    /// under a `packedV2` domain that lacks this is NOT expressible (a wrong or
+    /// unregistered index reverts the whole batch on-chain), so signing refuses
+    /// it with a 400 rather than packing the wrong slot.
+    #[serde(default)]
+    pub global_index: Option<u16>,
+    /// V2 (`packedV2`) ONLY: this feed's per-feed signed `expBias` (int8 on
+    /// chain). Mirror of `arc-oracle-v2-lanes.json` `feeds.<SYM>.expBias`. Sets
+    /// the lane's decode scale: `mark1e18 = mantissa << (exp + expBias)`.
+    #[serde(default)]
+    pub exp_bias: Option<i16>,
 }
 
 impl SignedFeedYml {

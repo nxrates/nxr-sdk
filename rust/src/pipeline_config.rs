@@ -760,6 +760,18 @@ pub struct SignedFeedYml {
     /// the lane's decode scale: `mark1e18 = mantissa << (exp + expBias)`.
     #[serde(default)]
     pub exp_bias: Option<i16>,
+    /// V2 (`packedV2`) ONLY: producer-side mark quantization grid, in basis
+    /// points of relative precision. Before lane encoding the mark's 23-bit
+    /// mantissa has its low n bits zeroed (n derived from this value; see
+    /// `signed_v2::grid_mask_bits`), so cross-replica f64 noise below the grid
+    /// encodes to IDENTICAL lane bits on every replica and the contract's
+    /// lane-diff skips the slot write (calldata + SSTORE savings; measured
+    /// ~0.003 ETH/push mostly full-slot rewrites). Absent = 0.5 bps default
+    /// (`signed_v2::DEFAULT_MARK_GRID_BPS`) — well under any
+    /// `cosign_tolerance_bps`, well over the lane LSB (~0.0012-0.0024 bps).
+    /// Set `0.0` to disable (raw encode).
+    #[serde(default)]
+    pub mark_grid_bps: Option<f64>,
 }
 
 impl SignedFeedYml {

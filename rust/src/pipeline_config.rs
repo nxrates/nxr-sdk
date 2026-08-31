@@ -162,6 +162,14 @@ pub enum RecordFormat {
     /// 8 mids per slot; keyed by a per-feed `global_index` (slotId = gi/8,
     /// laneIdx = gi%8) with a per-feed `exp_bias`. See `server::signed_v2`.
     PackedV2,
+    /// V4 DIFF wire for `ExternalOracleV3`: 12 B header (`version:u8(=4) | seq:u32 |
+    /// sourceTsDs:u32 | nP:u8 | nS:u8 | nC:u8`) then three gi-sorted sparse
+    /// sections — price 4 B (`gi:u8 | lane:u24`, 22-bit lanes, 10/slot),
+    /// σ 5 B (`gi:u8 | σPbps:u32`), conf 3 B (`gi:u8 | confBps:u16`). Only
+    /// CHANGED entries travel, so records are VARIABLE and there is no
+    /// per-record stride. Keyed by `global_index` (u8 on this wire) with a
+    /// per-feed `exp_bias`. See `server::signed_v4`.
+    PackedV4,
 }
 
 impl Default for RecordFormat {
@@ -184,6 +192,7 @@ impl RecordFormat {
             "idx24" => Ok(Self::Idx24),
             "ticker22" => Ok(Self::Ticker22),
             "packedV2" | "packed_v2" => Ok(Self::PackedV2),
+            "packedV4" | "packed_v4" => Ok(Self::PackedV4),
             "ticker30" => Err(
                 "signed_quotes record_format `ticker30` is RETIRED and this build cannot emit \
                  it. Declare `ticker22` if the consumer contract was migrated, `idx24` if it \
@@ -192,17 +201,20 @@ impl RecordFormat {
             ),
             other => Err(format!(
                 "signed_quotes record_format {other:?} is not a layout this build emits; \
-                 accepted: `idx24`, `ticker22`, `packedV2`"
+                 accepted: `idx24`, `ticker22`, `packedV2`, `packedV4`"
             )),
         }
     }
 
-    /// Bytes per packed record.
-    pub fn record_bytes(self) -> usize {
+    /// Bytes per packed record. `None` = VARIABLE: `packedV4` is a diff wire
+    /// of per-section entry sizes (4/5/3 B), so no single stride exists and a
+    /// consumer must frame off the header counts, never off a stride.
+    pub fn record_bytes(self) -> Option<usize> {
         match self {
-            Self::Idx24 => 24,
-            Self::Ticker22 => 22,
-            Self::PackedV2 => 100,
+            Self::Idx24 => Some(24),
+            Self::Ticker22 => Some(22),
+            Self::PackedV2 => Some(100),
+            Self::PackedV4 => None,
         }
     }
 
@@ -215,6 +227,7 @@ impl RecordFormat {
             Self::Idx24 => 0,
             Self::Ticker22 => 8,
             Self::PackedV2 => 9,
+            Self::PackedV4 => 12,
         }
     }
 
@@ -224,6 +237,7 @@ impl RecordFormat {
             Self::Idx24 => "idx24",
             Self::Ticker22 => "ticker22",
             Self::PackedV2 => "packedV2",
+            Self::PackedV4 => "packedV4",
         }
     }
 }
@@ -412,6 +426,14 @@ pub struct SignedQuotesYml {
     /// normalization has to be identical everywhere it is applied.
     #[serde(default)]
     pub blacklisted_assets: Vec<String>,
+    /// Operator ALLOWLIST of session-relay addresses (`0x…`, 20 B) this
+    /// replica may quorum-sign a `SessionGrant` for (`GET /v1/quote/session`
+    /// and its cosign fan-out). Each replica validates a proposed grant's
+    /// relay against ITS OWN list, exactly like the domain allow-list: nothing
+    /// a proposer sends can widen it. Empty (default) = the endpoint refuses
+    /// every relay (grants disabled).
+    #[serde(default)]
+    pub session_relays: Vec<String>,
     /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts the
     /// MATERIALISED universe (`symbol_map`, and the triangulation rules whose
     /// outputs it persists) to the symbols this signer must sign: every

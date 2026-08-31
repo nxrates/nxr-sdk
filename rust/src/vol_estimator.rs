@@ -264,6 +264,28 @@ pub const SIGMA_FLOOR_30M_EQUITY: f64 = 0.0015;
 pub const SIGMA_FLOOR_30M_COMMODITY: f64 = 0.0025;
 pub const SIGMA_FLOOR_30M_CRYPTO: f64 = 0.0040;
 
+/// PEGGED-PAIR floor: both legs redeem against the SAME numeraire, so the
+/// pair's 30-minute sigma is peg noise, not asset volatility.
+///
+/// It is its own class because MITCH wire bits cannot see a peg: a stablecoin
+/// is class `CR` like any other token, so `class_sigma_floor_30m` sends every
+/// USDT/USDC/PYUSD/USDS pair down the crypto arm and floors it at 0.40% per
+/// 30 min — measured live 2026-08-31, every stable on the BTR oracle read
+/// sigmaPbps 4000, the identical number WBTC and BNB read, i.e. ~20x their
+/// realised sigma. On the DEX that floor is a direct vega surcharge on the
+/// tightest pairs we quote.
+///
+/// 2 bps per 30 min is the peg-noise scale the ingest band already assumes:
+/// the widest HEALTHY pegged `ci` observed is 6.53 bps
+/// (`core/src/aggregator.rs` REJECT_BAND_PCT_PEGGED doc), which is a spread,
+/// not a per-bar move. Still a FLOOR: a genuine depeg walks the measured
+/// Parkinson sigma straight through it.
+pub const SIGMA_FLOOR_30M_STABLE: f64 = 0.0002;
+
+/// The whole point of the split: a stable's prior must be an ORDER OF MAGNITUDE
+/// under the crypto one, or it is still Bitcoin's floor wearing another name.
+const _: () = assert!(SIGMA_FLOOR_30M_STABLE * 10.0 < SIGMA_FLOOR_30M_CRYPTO);
+
 /// Class floor for a MITCH wire class pair. Garbage class bits land on equity,
 /// the same default [`mitch::common::AssetClass`] resolution falls back to.
 pub fn class_sigma_floor_30m(base: AssetClass, quote: AssetClass) -> f64 {
@@ -282,6 +304,22 @@ pub fn class_sigma_floor_30m(base: AssetClass, quote: AssetClass) -> f64 {
 pub fn class_sigma_floor_30m_for_ticker(ticker_id: u64) -> f64 {
     let t = TickerId::from_raw(ticker_id);
     class_sigma_floor_30m(t.base_asset_class(), t.quote_asset_class())
+}
+
+/// Sigma floor for a ticker whose PEG class the caller has already resolved.
+///
+/// `pegged` is NOT derived here on purpose: the peg class lives in the
+/// operator lists (`cexs.pegged` ∪ `cexs.usd_aliases`) and the one resolution
+/// of it is `server::signed::pegged_ticker`, which also drives the agreement
+/// ceiling. Deriving a second answer from the wire bits is what would let a
+/// pair be pegged for the ceiling and volatile for the floor.
+#[inline]
+pub fn sigma_floor_30m_for_ticker(ticker_id: u64, pegged: bool) -> f64 {
+    if pegged {
+        SIGMA_FLOOR_30M_STABLE
+    } else {
+        class_sigma_floor_30m_for_ticker(ticker_id)
+    }
 }
 
 #[cfg(test)]
@@ -506,5 +544,32 @@ mod tests {
             class_sigma_floor_30m(AssetClass::EQ, AssetClass::EQ),
             SIGMA_FLOOR_30M_EQUITY
         );
+    }
+
+    /// FIX (2026-08-31): a stablecoin PAIR is class `CR` on the wire, so the
+    /// crypto arm floored USDT-USDC at Bitcoin's 0.40%/30 min. The peg class
+    /// must win, and it must not touch the volatile floors.
+    #[test]
+    fn pegged_pair_escapes_the_crypto_class_floor() {
+        let id = crate::resolve_ticker_id("USDT/USDC");
+        assert_eq!(
+            class_sigma_floor_30m_for_ticker(id),
+            SIGMA_FLOOR_30M_CRYPTO,
+            "precondition: the wire bits classify a stable pair as crypto"
+        );
+        assert_eq!(sigma_floor_30m_for_ticker(id, true), SIGMA_FLOOR_30M_STABLE);
+    }
+
+    /// The volatile floors are UNCHANGED: only the pegged branch is new.
+    #[test]
+    fn volatile_floors_are_untouched_by_the_peg_branch() {
+        for sym in ["WBTC/USDC", "BNB/USDT", "ETH/USDC"] {
+            let id = crate::resolve_ticker_id(sym);
+            assert_eq!(
+                sigma_floor_30m_for_ticker(id, false),
+                class_sigma_floor_30m_for_ticker(id),
+                "{sym}"
+            );
+        }
     }
 }

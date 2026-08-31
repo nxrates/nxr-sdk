@@ -159,6 +159,14 @@ pub struct WeightProfile {
     /// Effective venue count `(Σw)² / Σw²`. Equals N for N equal legs and
     /// collapses toward 1 as one leg takes over.
     pub n_eff: f64,
+    /// Weighted cross-venue dispersion of provider mids, as a FRACTION of the
+    /// composite mid (`sigma_disagree / vwap_mid`). The `Index::ci` term that
+    /// measures the market rather than this node's polling — `ci` also carries
+    /// a staleness widening and a half-spread floor, neither of which belongs
+    /// in a published confidence. Paired with `n_eff` it becomes a standard
+    /// error of the mean; alone it is a population std-dev and grows with
+    /// breadth.
+    pub dispersion: f64,
 }
 
 /// Continuous fade to zero at the corpse horizon.
@@ -669,16 +677,28 @@ where
         return None;
     }
 
-    let profile = WeightProfile {
-        top_weight_share: (w_max / w_sum).clamp(0.0, 1.0),
-        n_eff: crate::stats::n_eff_from_sums(w_sum, w_sq_sum),
-    };
-
     let tdwap_bid = w_bid_sum / w_sum;
     let tdwap_ask = w_ask_sum / w_sum;
     let vwap_mid = (tdwap_bid + tdwap_ask) * 0.5;
 
     let sigma_disagree_sq = m2 / w_sum;
+    // DISPERSION ALONE, relative to mid, published on the profile. It is the
+    // one term of `ci` that is a property of the MARKET rather than of this
+    // node's polling: no staleness widening, no half-spread floor. The signed
+    // wire's confidence is built from it (`server::signed`), where it is
+    // divided by sqrt(n_eff) into a standard ERROR of the mean, so breadth
+    // TIGHTENS the published number instead of inflating it. `ci` itself is
+    // deliberately left alone: it is the ingest AGREEMENT gate, and a
+    // population dispersion is the right tool there.
+    let profile = WeightProfile {
+        top_weight_share: (w_max / w_sum).clamp(0.0, 1.0),
+        n_eff: crate::stats::n_eff_from_sums(w_sum, w_sq_sum),
+        dispersion: if vwap_mid > 0.0 {
+            sigma_disagree_sq.max(0.0).sqrt() / vwap_mid
+        } else {
+            0.0
+        },
+    };
     let sigma_stale_sq = w_stale_sq_sum / w_sum;
     // NOT `stats::ci::rss`: both terms are already variances, not sigmas.
     let raw_ci = (sigma_disagree_sq + sigma_stale_sq).sqrt();
@@ -1155,6 +1175,86 @@ mod injected_leg_liveness_tests {
             ProviderFingerprint::from_entry(7, &e),
             "injected->real must break the fingerprint or the throttle replays stale liveness"
         );
+    }
+}
+
+#[cfg(test)]
+mod conf_input_tests {
+    use super::*;
+
+    fn leg(mid: f64) -> Index {
+        let half = mid * 0.0001;
+        Index::new(
+            448509915440349184,
+            mid - half,
+            mid + half,
+            16,
+            1_000,
+            1_000,
+            10,
+            1,
+            1,
+            0,
+        )
+    }
+
+    /// `WeightProfile::dispersion` is the input the SIGNED WIRE confidence is
+    /// built from, so it must measure the MARKET's disagreement and nothing
+    /// else. A leg that has merely not printed lately still widens `ci` — that
+    /// is deliberate, `ci` is the ingest agreement gate — but it must not move
+    /// dispersion by one bit, or age is back in the DEX spread through the side
+    /// door.
+    #[test]
+    fn a_stale_leg_widens_ci_but_never_the_published_dispersion() {
+        let now = Instant::now();
+        let profile_and_ci = |age_ms: u64| {
+            let at = now - Duration::from_millis(age_ms);
+            let entries = [
+                ProviderEntry::new_at(leg(100.0), 1.0, at),
+                ProviderEntry::new_at(leg(100.0), 1.0, at),
+            ];
+            let (idx, p) = compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, now)
+                .expect("legs blend");
+            (p, decode_ci_ubp(idx.ci))
+        };
+        let (fresh, ci_fresh) = profile_and_ci(0);
+        let (stale, ci_stale) = profile_and_ci(8_000);
+        assert_eq!(fresh.dispersion, 0.0, "identical mids ⇒ zero dispersion");
+        assert_eq!(
+            stale.dispersion, 0.0,
+            "age must not manufacture cross-venue disagreement"
+        );
+        assert!(
+            ci_stale > ci_fresh,
+            "ci itself is UNCHANGED and still widens with age: {ci_stale} vs {ci_fresh}"
+        );
+    }
+
+    /// Dispersion is the population spread of venue mids, relative to mid, and
+    /// `n_eff` is what turns it into a standard error downstream.
+    #[test]
+    fn dispersion_measures_venue_disagreement_relative_to_mid() {
+        let now = Instant::now();
+        let of = |mids: &[f64]| {
+            let entries: Vec<ProviderEntry> = mids
+                .iter()
+                .map(|m| ProviderEntry::new_at(leg(*m), 1.0, now))
+                .collect();
+            compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, now)
+                .expect("legs blend")
+                .1
+        };
+        let one = of(&[100.0]);
+        assert_eq!(one.dispersion, 0.0);
+        assert!((one.n_eff - 1.0).abs() < 1e-9);
+        // ±0.1 around 100 ⇒ population sigma 0.1 ⇒ 10 bps of mid.
+        let two = of(&[99.9, 100.1]);
+        assert!(
+            (two.dispersion - 0.001).abs() < 1e-6,
+            "dispersion {}",
+            two.dispersion
+        );
+        assert!((two.n_eff - 2.0).abs() < 1e-9);
     }
 }
 

@@ -1401,6 +1401,23 @@ pub struct CexsYml {
     /// `triangulation.stablecoins`, which selects auto-cross leg eligibility.
     #[serde(default)]
     pub pegged: Vec<String>,
+    /// Tokens pegged to a NON-USD fiat, as `TOKEN: ISO4217`. Deliberately NOT
+    /// part of `pegged`, which means USD-pegged specifically and carries an
+    /// absolute $1 anchor: EURC trades ~1.14, and its 2026-08-02 membership in
+    /// `pegged` rejected every quote for 56.6 h on the ingest peg band.
+    ///
+    /// What it IS for: a token whose MITCH wire class is `CR` but whose price
+    /// process is a fiat cross. `EURC-USDC` decodes CR/CR, so the wire class
+    /// alone hands a EUR/USD pair Bitcoin's volatility prior — measured on the
+    /// BTR oracle 2026-09-01, EURC read sigmaPbps 4000. A leg carried here is
+    /// pegged to SOMETHING, which with a USD-pegged other leg makes the PAIR an
+    /// FX cross (`vol_estimator::PegClass::CrossFiat`).
+    ///
+    /// Only tokens are needed: a genuine fiat leg (`EUR`, `CAD`) already
+    /// decodes `AssetClass::FX` and is its own peg currency, so it needs no
+    /// entry. Values are compared case-insensitively.
+    #[serde(default)]
+    pub fiat_pegged: BTreeMap<String, String>,
     /// Bridge-quoted stables (subset of `pegged` used for synth-USD
     /// derivation). If empty, callers fall back to `pegged`.
     #[serde(default)]

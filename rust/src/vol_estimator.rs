@@ -306,19 +306,40 @@ pub fn class_sigma_floor_30m_for_ticker(ticker_id: u64) -> f64 {
     class_sigma_floor_30m(t.base_asset_class(), t.quote_asset_class())
 }
 
+/// What the two legs of a pair redeem against, which is the thing the MITCH
+/// wire class cannot see. A stablecoin is `CR` like any other token, so the
+/// wire class alone routes EVERY pair with a token leg down the crypto arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PegClass {
+    /// Both legs redeem against the SAME numeraire (USDT/USDC, USDC/USD). The
+    /// pair's move is peg noise.
+    SameNumeraire,
+    /// Both legs are pegged, to DIFFERENT numeraires (EURC/USDC, USDC/EUR).
+    /// The pair IS a fiat cross whatever the wire says its legs are, so it
+    /// takes the FX prior — measured on the BTR oracle 2026-09-01, EURC-USDC
+    /// read sigmaPbps 4000, the identical number WBTC read, for a EUR/USD rate.
+    CrossFiat,
+    /// At least one leg has no peg: the wire class is then the honest answer.
+    Unpegged,
+}
+
 /// Sigma floor for a ticker whose PEG class the caller has already resolved.
 ///
-/// `pegged` is NOT derived here on purpose: the peg class lives in the
-/// operator lists (`cexs.pegged` ∪ `cexs.usd_aliases`) and the one resolution
-/// of it is `server::signed::pegged_ticker`, which also drives the agreement
-/// ceiling. Deriving a second answer from the wire bits is what would let a
-/// pair be pegged for the ceiling and volatile for the floor.
+/// [`PegClass`] is NOT derived here on purpose: the peg lists are the
+/// operator's (`cexs.pegged` ∪ `cexs.usd_aliases` ∪ `cexs.fiat_pegged`) and the
+/// one resolution of them is `server::signed::peg_class_of_ticker`, whose
+/// USD-peg arm also drives the agreement ceiling. Deriving a second answer from
+/// the wire bits is what would let a pair be pegged for the ceiling and
+/// volatile for the floor.
 #[inline]
-pub fn sigma_floor_30m_for_ticker(ticker_id: u64, pegged: bool) -> f64 {
-    if pegged {
-        SIGMA_FLOOR_30M_STABLE
-    } else {
-        class_sigma_floor_30m_for_ticker(ticker_id)
+pub fn sigma_floor_30m_for_ticker(ticker_id: u64, peg: PegClass) -> f64 {
+    match peg {
+        PegClass::SameNumeraire => SIGMA_FLOOR_30M_STABLE,
+        // NOT `min` with the wire class: an FX cross whose legs are tokens
+        // decodes CR and would keep 0.40 %, which is the defect. The peg
+        // classification is strictly better information than the class bits.
+        PegClass::CrossFiat => SIGMA_FLOOR_30M_FX,
+        PegClass::Unpegged => class_sigma_floor_30m_for_ticker(ticker_id),
     }
 }
 
@@ -557,7 +578,36 @@ mod tests {
             SIGMA_FLOOR_30M_CRYPTO,
             "precondition: the wire bits classify a stable pair as crypto"
         );
-        assert_eq!(sigma_floor_30m_for_ticker(id, true), SIGMA_FLOOR_30M_STABLE);
+        assert_eq!(
+            sigma_floor_30m_for_ticker(id, PegClass::SameNumeraire),
+            SIGMA_FLOOR_30M_STABLE
+        );
+    }
+
+    /// FIX (2026-09-01): a token pegged to a NON-USD fiat is still `CR` on the
+    /// wire, so `EURC-USDC` — a EUR/USD rate — inherited Bitcoin's prior and
+    /// read sigmaPbps 4000 on chain. A cross of two pegs is FX.
+    #[test]
+    fn a_cross_fiat_pair_takes_the_fx_prior_not_the_crypto_one() {
+        for sym in ["EURC/USDC", "USDC/EUR"] {
+            let id = crate::resolve_ticker_id(sym);
+            assert_eq!(
+                sigma_floor_30m_for_ticker(id, PegClass::CrossFiat),
+                SIGMA_FLOOR_30M_FX,
+                "{sym}"
+            );
+            assert!(
+                sigma_floor_30m_for_ticker(id, PegClass::CrossFiat) < SIGMA_FLOOR_30M_CRYPTO,
+                "{sym}: the whole point is escaping the crypto prior"
+            );
+        }
+        // A pegged CROSS is not a pegged PAIR: EUR/USD moves, so it must not
+        // collapse onto the 2 bps peg-noise prior either.
+        let id = crate::resolve_ticker_id("EURC/USDC");
+        assert!(sigma_floor_30m_for_ticker(id, PegClass::CrossFiat) > SIGMA_FLOOR_30M_STABLE);
+        // The three arms are distinct, in the order their volatility implies.
+        assert!(SIGMA_FLOOR_30M_STABLE < SIGMA_FLOOR_30M_FX);
+        assert!(SIGMA_FLOOR_30M_FX < SIGMA_FLOOR_30M_CRYPTO);
     }
 
     /// The volatile floors are UNCHANGED: only the pegged branch is new.
@@ -566,7 +616,7 @@ mod tests {
         for sym in ["WBTC/USDC", "BNB/USDT", "ETH/USDC"] {
             let id = crate::resolve_ticker_id(sym);
             assert_eq!(
-                sigma_floor_30m_for_ticker(id, false),
+                sigma_floor_30m_for_ticker(id, PegClass::Unpegged),
                 class_sigma_floor_30m_for_ticker(id),
                 "{sym}"
             );

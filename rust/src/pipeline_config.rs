@@ -261,9 +261,9 @@ impl std::fmt::Display for RecordFormat {
     }
 }
 
-/// One feed's lane assignment on ONE consumer, inside
-/// [`SignedDomainYml::lane_map`]. Both fields are REQUIRED: a half-specified
-/// lane is how a feed lands in the wrong slot.
+/// One feed's lane assignment on ONE consumer, the value of a
+/// [`SignedDomainYml::lane_map`] entry. Both fields are REQUIRED: a
+/// half-specified lane is how a feed lands in the wrong slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaneYml {
@@ -310,7 +310,8 @@ pub struct SignedDomainYml {
     /// who set it believes it is doing something.
     #[serde(default)]
     pub epoch: Option<u32>,
-    /// OPTIONAL per-domain lane map, `symbol -> {global_index, exp_bias}`.
+    /// OPTIONAL per-domain lane map,
+    /// `idx -> {global_index, exp_bias}`.
     ///
     /// ABSENT (the default, and every domain in the live ConfigMap today) =
     /// unchanged behaviour: lanes come from the per-feed
@@ -319,17 +320,43 @@ pub struct SignedDomainYml {
     /// PRESENT = it OVERRIDES those fields for this domain alone. This exists
     /// because a lane map is a property of the CONSUMER, not of the feed, and
     /// two consumers genuinely disagree: `ExternalOracleV3` packs 10 lanes per
-    /// slot and `ExternalOracleV4` packs 8, so the same 26 feeds sit at
-    /// different indices with different biases on the two oracles. Without this
-    /// one signer tier cannot serve both wires, and a migration becomes a tight
+    /// slot and `ExternalOracleV4` packs 8, so the same feeds sit at different
+    /// indices with different biases on the two oracles. Without this one
+    /// signer tier cannot serve both wires, and a migration becomes a tight
     /// producer flip with a fail-closed gap on the volatiles.
     ///
-    /// A present map is validated STRICTLY at boot and must be TOTAL over the
-    /// catalog: every `feeds` entry named, no extras, no duplicate
-    /// `global_index`. A half-specified map silently encodes a feed into the
-    /// wrong lane, which is worse than refusing to boot.
+    /// ⚠ KEYED BY [`SignedFeedYml::idx`], **NEVER BY SYMBOL**, and do not
+    /// "simplify" it back. A SYMBOL IS A PRICE SOURCE; AN IDX IS A FEED, AND
+    /// THE ORACLE HAS MORE FEEDS THAN SOURCES. Symbols are not unique across
+    /// `feeds`: the live arc-primary catalog carries
+    ///
+    /// ```yaml
+    /// - { idx: 10, symbol: BTC-USDC, global_index: 21, exp_bias: 47 }  # WBTC
+    /// - { idx: 11, symbol: BTC-USDC, global_index: 22, exp_bias: 47 }  # CBBTC
+    /// ```
+    ///
+    /// — two distinct on-chain feeds, at two distinct lanes, both priced off
+    /// the one NXR symbol `BTC-USDC`. Under a symbol-keyed map those collide:
+    /// either the YAML carries a duplicate key or one entry silently wins and
+    /// both feeds encode into the SAME lane — the exact wrong-lane write the
+    /// lane-map commitment exists to prevent, arriving through the front door.
+    /// `idx` is already the unique per-feed key and is what the keeper matches
+    /// on.
+    ///
+    /// A present map is validated STRICTLY at boot and must be TOTAL over
+    /// `feeds` BY IDX: every feed's `idx` named, no entry for an `idx` the
+    /// catalog lacks, no duplicate `global_index`. A half-specified map
+    /// silently encodes a feed into the wrong lane, which is worse than
+    /// refusing to boot.
+    ///
+    /// ```yaml
+    /// lane_map:
+    ///   0:  { global_index: 0,  exp_bias: 28 }   # USDT
+    ///   10: { global_index: 17, exp_bias: 45 }   # WBTC
+    ///   11: { global_index: 18, exp_bias: 45 }   # CBBTC
+    /// ```
     #[serde(default)]
-    pub lane_map: Option<BTreeMap<String, LaneYml>>,
+    pub lane_map: Option<BTreeMap<u16, LaneYml>>,
 }
 
 /// `#[serde(default)]` for a bool that must stay on when the YAML is silent.
@@ -735,18 +762,22 @@ pub struct SignedPeerYml {
 pub struct SignedFeedYml {
     /// NXR symbol whose mark/σ/CI back the feed (e.g. `BTC-USDC`).
     pub symbol: String,
-    /// LEGACY consumer ordinal: this feed's position in the deployed
-    /// `ExternalOracle.feedIds[]` array. OPTIONAL, and read ONLY by
-    /// [`RecordFormat::Idx24`], which has no other way to name a feed.
+    /// This feed's ordinal, and the UNIQUE KEY of a row in
+    /// [`SignedQuotesYml::feeds`]. Two roles, both real:
     ///
-    /// IDENTITY IS THE MITCH TICKER ID. This ordinal is not identity and is not
-    /// a return to slot-keyed configuration: it is a compatibility shim for
-    /// oracles deployed before the ticker-keyed record existed. NXR holding a
-    /// copy of BTR's ordinal table is precisely what drifted and crashlooped
-    /// the signers, so nothing under `ticker22` may read it, no default may be
-    /// invented for it, and an `idx24` domain whose feeds lack it is a BOOT
-    /// ERROR rather than a guess (`signed.rs::validate_idx24_ordinals`).
-    /// Delete the field with the last legacy oracle.
+    /// 1. LEGACY consumer ordinal — this feed's position in the deployed
+    ///    `ExternalOracle.feedIds[]` array, read by [`RecordFormat::Idx24`],
+    ///    which has no other way to name a feed. NXR holding a copy of BTR's
+    ///    ordinal table is precisely what drifted and crashlooped the signers,
+    ///    so nothing under `ticker22` may read it for identity, no default may
+    ///    be invented for it, and an `idx24` domain whose feeds lack it is a
+    ///    BOOT ERROR rather than a guess (`signed.rs::validate_idx24_ordinals`).
+    /// 2. The key of a per-domain [`SignedDomainYml::lane_map`] entry, because
+    ///    it is the only per-feed value that is unique. See that field.
+    ///
+    /// IDENTITY IS THE MITCH TICKER ID, and role 1 is still a compatibility
+    /// shim that goes away with the last legacy oracle. Role 2 does not: a
+    /// packed oracle addresses more FEEDS than NXR has price SOURCES.
     #[serde(default)]
     pub idx: Option<u16>,
     /// Required maximum deviation, in basis points, between a proposed mark
@@ -2404,16 +2435,21 @@ chain_id: 5042002
 oracle: "0x842c2736F072A8A7b523D23bd3Ef21F21AC24d5C"
 record_format: packedV5
 lane_map:
-  USDT-USDC: { global_index: 0, exp_bias: 28 }
-  EURC-USDC: { global_index: 8, exp_bias: 29 }
+  0:  { global_index: 0,  exp_bias: 28 }
+  10: { global_index: 17, exp_bias: 45 }
+  11: { global_index: 18, exp_bias: 45 }
 "#,
         )
         .expect("lane_map parses");
         assert_eq!(d.epoch, None, "packedV5 carries no epoch");
         let m = d.lane_map.expect("present");
-        assert_eq!(m["USDT-USDC"], LaneYml { global_index: 0, exp_bias: 28 });
-        assert_eq!(m["EURC-USDC"], LaneYml { global_index: 8, exp_bias: 29 });
-        assert_eq!(m.len(), 2);
+        assert_eq!(m[&0], LaneYml { global_index: 0, exp_bias: 28 });
+        // KEYED BY IDX: idx 10 (WBTC) and idx 11 (CBBTC) are two feeds off the
+        // ONE symbol BTC-USDC, and they must reach two distinct lanes. A
+        // symbol-keyed map cannot express this at all.
+        assert_eq!(m[&10], LaneYml { global_index: 17, exp_bias: 45 });
+        assert_eq!(m[&11], LaneYml { global_index: 18, exp_bias: 45 });
+        assert_eq!(m.len(), 3);
 
         // ABSENT is the default and the unchanged path — every live domain.
         let plain: SignedDomainYml =
@@ -2425,7 +2461,7 @@ lane_map:
         // silently-zero global_index would encode a feed into lane 0.
         assert!(
             serde_yml::from_str::<SignedDomainYml>(
-                "name: n\nchain_id: 1\noracle: \"0x11\"\nlane_map:\n  A-B: { global_index: 1 }\n"
+                "name: n\nchain_id: 1\noracle: \"0x11\"\nlane_map:\n  7: { global_index: 1 }\n"
             )
             .is_err(),
             "a lane without exp_bias must be a parse error"
@@ -2433,7 +2469,10 @@ lane_map:
         // …and an unknown key inside a lane is refused rather than ignored.
         assert!(
             serde_yml::from_str::<SignedDomainYml>(
-                "name: n\nchain_id: 1\noracle: \"0x11\"\nlane_map:\n  A-B: { global_index: 1, exp_bias: 2, slot: 0 }\n"
+                concat!(
+                    "name: n\nchain_id: 1\noracle: \"0x11\"\n",
+                    "lane_map:\n  7: { global_index: 1, exp_bias: 2, slot: 0 }\n"
+                )
             )
             .is_err(),
             "deny_unknown_fields must catch a typo'd lane key"

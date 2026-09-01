@@ -816,6 +816,17 @@ pub struct SignedFeedYml {
     /// the lane's decode scale: `mark1e18 = mantissa << (exp + expBias)`.
     #[serde(default)]
     pub exp_bias: Option<i16>,
+    /// `packedV5` ONLY: this feed's `ExternalOracleV4` **feedId** (0x-hex, 32
+    /// bytes) — the contract's own opaque key, mirrored from BTR's deployment
+    /// record exactly like [`Self::global_index`].
+    ///
+    /// Required only to quorum-sign a `BiasUpdate` for this feed. A bias write
+    /// IS a price write (`mark = mant << (exp + expBias)`), so the same rule the
+    /// cosign path already applies to a `globalIndex` applies here: a replica
+    /// must never attest a feedId it cannot name. Absent ⇒ this replica refuses
+    /// to sign a rebias for the feed, which is a legitimate answer.
+    #[serde(default)]
+    pub feed_id: Option<String>,
     /// EXPLICIT per-feed override of the producer-side mark quantization grid,
     /// in basis points of relative precision. Applies to `packedV2` and
     /// `packedV4`. When absent the grid is DERIVED from the feed's measured σ

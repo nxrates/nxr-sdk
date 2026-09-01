@@ -586,6 +586,30 @@ pub struct SignedQuotesYml {
     /// rebias. Default 30000.
     #[serde(default)]
     pub bias_stale_ms: Option<u32>,
+    /// FAIL CLOSED on a bias the chain has not vouched for. When `true`, a feed
+    /// on an RPC-BACKED domain is held OUT of the blob (and refused on the
+    /// cosign path) unless a chain read confirmed its `expBias` within
+    /// `bias_stale_ms`. Default `false`.
+    ///
+    /// THIS IS THE INTERLOCK FOR THE KEEPER'S `rebias_autosend`, and the two
+    /// must be armed together. `expBias` is HALF THE PRICE
+    /// (`mark = mant << (exp + bias)`), so encoding under a scale the chain has
+    /// left behind publishes a 2x-wrong mark. Without this gate a signer that
+    /// restarts while the RPC is unreachable falls back to the value in THIS
+    /// FILE — correct only until the first rebias lands, and silently wrong
+    /// forever after. Arming automatic rebias with the gate off is arming a
+    /// fleet that mis-scales after any restart.
+    ///
+    /// The COST is real, and is why it is opt-in rather than the default: with
+    /// the RPC unreachable, fail-closed means the domain publishes NOTHING.
+    /// Dark beats wrong, but an outage is still an outage. A domain with no
+    /// `rpc_urls` entry is therefore EXEMPT — that configuration is config-only
+    /// by explicit choice (and already warns at boot), so darkening it forever
+    /// would be an outage with no safety gained, there being no chain read
+    /// coming either way. Turn this on for a domain once its RPC is reliably
+    /// reachable, then arm the keeper.
+    #[serde(default)]
+    pub require_chain_bias: bool,
     /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts the
     /// MATERIALISED universe (`symbol_map`, and the triangulation rules whose
     /// outputs it persists) to the symbols this signer must sign: every

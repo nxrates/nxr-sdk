@@ -326,6 +326,27 @@ pub struct SignedQuotesYml {
     /// Required blob rebuild/cache floor in milliseconds. Must be in 1..=10
     /// so a newly observed provider tick is not hidden behind a stale cache.
     pub min_interval_ms: u64,
+    /// Divisor `K` turning a feed's MEASURED 30-minute σ into its mark
+    /// quantization grid: `grid_bps = clamp(σ_30m_bps / K, 0, mark_grid_ceil_bps)`.
+    /// Absent = `signed::DEFAULT_MARK_GRID_SIGMA_DIVISOR`.
+    ///
+    /// The grid must be a fixed fraction of the asset's own move, not a flat
+    /// number, because `grid_mask_bits` is RELATIVE: one flat 0.5 bps masks 2
+    /// mantissa bits at an 18-bit mantissa and 9 at 25, so it eats every bit a
+    /// wider lane adds. Measured on a 26-minute tape (1905 snapshots, all 26 Arc
+    /// feeds): entries-per-push was 19.01 at EVERY mantissa width.
+    ///
+    /// K = 100 puts the grid two orders of magnitude under a 30-minute move,
+    /// i.e. far inside the noise the diff exists to elide and far outside
+    /// anything a taker prices against.
+    #[serde(default)]
+    pub mark_grid_sigma_divisor: Option<f64>,
+    /// Ceiling on the derived mark grid, in bps. Absent =
+    /// `signed::DEFAULT_MARK_GRID_CEIL_BPS`. A backstop for a σ spike — a depeg
+    /// or a flash move — blowing the grid open at exactly the moment precision
+    /// matters most.
+    #[serde(default)]
+    pub mark_grid_ceil_bps: Option<f64>,
     /// Multi-timeframe σ legs, in MINUTES, with optional per-leg weights.
     /// Default 1 h / 24 h / 7 d, INVERSE-VARIANCE-weighted (weights = bar
     /// counts).
@@ -782,8 +803,11 @@ pub struct SignedFeedYml {
     /// the lane's decode scale: `mark1e18 = mantissa << (exp + expBias)`.
     #[serde(default)]
     pub exp_bias: Option<i16>,
-    /// V2 (`packedV2`) ONLY: producer-side mark quantization grid, in basis
-    /// points of relative precision. Before lane encoding the mark's 23-bit
+    /// EXPLICIT per-feed override of the producer-side mark quantization grid,
+    /// in basis points of relative precision. Applies to `packedV2` and
+    /// `packedV4`. When absent the grid is DERIVED from the feed's measured σ
+    /// (`mark_grid_sigma_divisor`), which is the normal path; set this only to
+    /// pin one feed. Before lane encoding the mark's 23-bit
     /// mantissa has its low n bits zeroed (n derived from this value; see
     /// `signed_v2::grid_mask_bits`), so cross-replica f64 noise below the grid
     /// encodes to IDENTICAL lane bits on every replica and the contract's

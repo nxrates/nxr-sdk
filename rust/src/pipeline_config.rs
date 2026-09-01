@@ -535,6 +535,38 @@ pub struct SignedQuotesYml {
     /// every relay (grants disabled).
     #[serde(default)]
     pub session_relays: Vec<String>,
+    /// JSON-RPC endpoint per DOMAIN LABEL, for reading each oracle's live
+    /// `expBias`. REQUIRED before automatic rebias may be armed on a domain:
+    /// the decode scale is chain state, and a producer that learns it from
+    /// this file alone keeps encoding under the old scale after a landed
+    /// rebias — every subsequent mark for that feed a factor of two wrong.
+    ///
+    /// One BATCHED `eth_call` per poll carries the whole catalog, so the cost
+    /// is one request per `bias_poll_ms` (0.2 rps at the 5 s default),
+    /// independent of feed count.
+    ///
+    /// ```yaml
+    /// rpc_urls:
+    ///   arc-v4: https://rpc.arc.network
+    /// ```
+    #[serde(default)]
+    pub rpc_urls: BTreeMap<String, String>,
+    /// `expBias` poll cadence in ms. Default 5000.
+    #[serde(default)]
+    pub bias_poll_ms: Option<u64>,
+    /// How long a NEWLY OBSERVED chain bias is held before this replica encodes
+    /// under it, in ms. Default 15000, and boot-checked to be at least two poll
+    /// intervals: the window exists so every replica has READ the new value
+    /// before any replica ENCODES under it. The feed is held out of the blob
+    /// meanwhile (its on-chain lane is zeroed by the rebias anyway).
+    #[serde(default)]
+    pub bias_settle_ms: Option<u32>,
+    /// A held (unrefreshed) chain bias older than this ms is reported stale via
+    /// `nxr_signed_bias_chain_stale`. It is still USED — the alternative,
+    /// dropping back to the config value, is the silent revert of a landed
+    /// rebias. Default 30000.
+    #[serde(default)]
+    pub bias_stale_ms: Option<u32>,
     /// LIGHT NODE MODE (opt-in). When `true`, the aggregator restricts the
     /// MATERIALISED universe (`symbol_map`, and the triangulation rules whose
     /// outputs it persists) to the symbols this signer must sign: every

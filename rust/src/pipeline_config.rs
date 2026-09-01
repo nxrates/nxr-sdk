@@ -561,6 +561,25 @@ pub struct SignedQuotesYml {
     /// meanwhile (its on-chain lane is zeroed by the rebias anyway).
     #[serde(default)]
     pub bias_settle_ms: Option<u32>,
+    /// First block of the `FeedExpBiasUpdated` / `FeedRegistered` backfill, per
+    /// DOMAIN LABEL. Set it to the oracle's deploy block; 0 (the default) walks
+    /// the whole chain, which is correct but slow.
+    ///
+    /// A partial window is still SOUND: the value that matters is the LAST
+    /// event for a feed at or below the confirmed head, and the scan always
+    /// runs up to that head. This only decides whether a feed that has NEVER
+    /// been rebiased is served by the log source or by the getter/derivation.
+    #[serde(default)]
+    pub bias_log_from_block: BTreeMap<String, u64>,
+    /// How many blocks a `FeedExpBiasUpdated` log must be behind the head
+    /// before its bias is ADOPTED. Default 12.
+    ///
+    /// A rebias is a 2^n price move, so a REORGED one that stuck would be a
+    /// silently wrong mark; the cost of waiting is latency on an event that
+    /// happens a few times a year. A reorg deeper than this is not handled —
+    /// the per-gi `lane_bias` cosign check is the backstop.
+    #[serde(default)]
+    pub bias_log_confirmations: Option<u64>,
     /// A held (unrefreshed) chain bias older than this ms is reported stale via
     /// `nxr_signed_bias_chain_stale`. It is still USED — the alternative,
     /// dropping back to the config value, is the silent revert of a landed

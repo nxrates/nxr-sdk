@@ -251,18 +251,103 @@ impl SigmaEstimator {
 
 /// Per-class floor on the 30-minute sigma (fraction), shared by the ingest
 /// band (`core/src/aggregator.rs`) and the signed-sigma path (`signed.rs`).
-/// Each is the 30-min Rogers-Satchell sigma implied by the class's typical
-/// daily move over a 24 h market's 48 bins (an equity session is ~13 bins, so
-/// its implied daily is the smaller 54 bps). FX is the EM-cross number, not
-/// the major.
 ///
 /// Priors as FLOORS, never the driver: a quiet window may not pull sigma below
 /// the operator's class prior, but the estimate itself is never replaced by
-/// one.
-pub const SIGMA_FLOOR_30M_FX: f64 = 0.0020;
+/// one. A floor that BINDS is a published value, not a backstop, so each one
+/// must sit under roughly the 5th percentile of its class's realised sigma.
+///
+/// ## Calibration (2026-09-01)
+///
+/// The originals were the 30-min sigma IMPLIED by a guessed typical daily move
+/// over 48 bins. Measured on chain, they bound almost everywhere: every FX feed
+/// on Arc published exactly 2000 pbps and every CR feed exactly 4000, i.e. five
+/// different currencies shared one volatility. Replaced with percentiles of the
+/// PRODUCER'S OWN sigma over a real tape.
+///
+/// - Window: 2026-08-14T22:00Z .. 2026-09-01T13:00Z (17.6 d), NXR
+///   `/v1/ohlc/{sym}?tf=1800` and `?tf=300`, `tick_count > 0` bars only.
+/// - Statistic: the BLENDED signed-quote sigma, not a per-bar kernel value —
+///   [`crate::mtf::DEFAULT_SIGMA_LEGS`] (1 h @ 5 m Yang-Zhang, 24 h @ 30 m
+///   Garman-Klass, 7 d @ 30 m Garman-Klass), each leg rescaled by
+///   `SigmaLeg::to_per_30m_scale`, weighted by the inverse-variance weights
+///   12/48/336 times the runtime taper quality, combined by
+///   `MtfWindows::blend`, evaluated once per 30 m bar rolling forward. The
+///   replication reads 285 pbps at USDT-USDC's median against the 288 the
+///   deployed signer published, so it is the same quantity.
+/// - A tick-to-tick realised vol is NOT this quantity: bid-ask bounce inflates
+///   it ~5x on a thin stable. Recalibrate with the range kernels above or not
+///   at all.
+///
+/// Pooled distribution per class, in pbps (1 pbps = 1e-6 of price):
+///
+/// ```text
+/// class      feeds     n     p1    p5   p25   p50   p95  old floor  bound
+/// stable         5  4502     51   118   301   518  1624        200    7.8%
+/// equity        10  8050   1396  2010  2734  3320  5467       1500    1.2%
+/// fx            14 11938    281   340   418   591  1521       2000   99.7%
+/// commodity      4  3500   1491  1718  2349  3217  4171       2500   26.6%
+/// crypto         5  4206    375   814  1277  1797  5192       4000   84.5%
+/// ```
+///
+/// `stable` and `equity` already sat between their p1 and p5 and are UNCHANGED:
+/// they were the two behaving as backstops. The other three are re-derived
+/// below, each at a stated percentile of that sample.
+///
+/// COMMODITY now exceeds CRYPTO. That is not an inversion: a floor tracks a
+/// class's LEFT TAIL, not its median (crypto's p50 is the higher of the two).
+/// The metals tape is tight around a high floor, while the CR class carries the
+/// gold-backed tokens, whose left tail is far below Bitcoin's.
+
+/// FX: p1 of the 14-pair FX sample EXCLUDING USD-TRY, rounded down (281 -> 250).
+///
+/// Sample: the 5 tokenized fiat crosses on Arc (EURC/QCAD/AUDF/JPYC/KRW1-USDC)
+/// plus 9 native majors and EM crosses (EUR-USD, GBP-USD, USD-JPY, USD-CAD,
+/// AUD-USD, USD-CHF, USD-ZAR, USD-MXN, USD-KRW). 250 pbps sits under the p1 of
+/// every one of them; class-wide it binds 6.7%, and 0.4% once USD-TRY is set
+/// aside.
+///
+/// USD-TRY is deliberately excluded from the derivation and deliberately left
+/// floored: its whole distribution (n=829, p1 17, p5 45, p50 131) is an order
+/// of magnitude under every other pair, so ANY FX-wide floor either binds on it
+/// permanently or drops under 50 pbps for the majors too. A managed float that
+/// quiet needs its own class, not a weaker floor for everything else.
+pub const SIGMA_FLOOR_30M_FX: f64 = 0.00025;
+
+/// EQUITY: UNCHANGED, and confirmed by the same tape. n=8050 over 10 US names,
+/// p1 1396 / p5 2010, so 1500 sits between p1 and p5 and binds 1.2% — already a
+/// backstop. Do not move it without a wider name set.
 pub const SIGMA_FLOOR_30M_EQUITY: f64 = 0.0015;
-pub const SIGMA_FLOOR_30M_COMMODITY: f64 = 0.0025;
-pub const SIGMA_FLOOR_30M_CRYPTO: f64 = 0.0040;
+
+/// COMMODITY: p1 of the 4-metal CM/PM sample (1491 -> 1500).
+///
+/// Sample: XAU-USD, XAG-USD, XPT-USD, XPD-USD, n=3500; pooled p1 = 1491,
+/// rounded DOWN to 1400 rather than up, because the equity floor is already
+/// 1500 and `aggregator::placeholder_sigma_is_per_asset_class` requires the
+/// class priors to stay DISTINCT (a cold ticker's class must be readable off
+/// its placeholder). 1400 pbps sits under the LOWEST per-feed p5 in the set
+/// (XAU-USD, 1540), so no metal is floored in a normal session; it binds ~1%
+/// against 26.6% at the old 2500.
+///
+/// Only the four metals are in scope — the class also nominally covers energy
+/// (WTI), which this window had no tape for, so this is a METALS number and a
+/// WTI-bearing recalibration may well move it.
+pub const SIGMA_FLOOR_30M_COMMODITY: f64 = 0.0014;
+
+/// CRYPTO: p5 of the CR-class sample (814 -> 800).
+///
+/// Sample: BTC-USDC, ETH-USDC, BNB-USDC (n=2526, p1 744 / p5 982) PLUS
+/// XAUT-USDC and PAXG-USDC (n=1680, p1 312 / p5 493), which decode `CR` on the
+/// wire and therefore receive THIS floor. Pooled p5 = 814; 800 pbps binds 4.6%
+/// of the class against 84.5% at the old 4000.
+///
+/// The gold-backed tokens are the reason this is not simply the volatile-token
+/// p5 (982): they were floored 100% of the time and are still floored ~25%.
+/// The real fix for them is a peg class of their own (they are metals wearing a
+/// token's wire bits, exactly the way a stablecoin is), not a crypto floor low
+/// enough to cover gold — see [`PegClass`], which already does this for the two
+/// fiat-peg cases.
+pub const SIGMA_FLOOR_30M_CRYPTO: f64 = 0.0008;
 
 /// PEGGED-PAIR floor: both legs redeem against the SAME numeraire, so the
 /// pair's 30-minute sigma is peg noise, not asset volatility.
@@ -282,9 +367,14 @@ pub const SIGMA_FLOOR_30M_CRYPTO: f64 = 0.0040;
 /// Parkinson sigma straight through it.
 pub const SIGMA_FLOOR_30M_STABLE: f64 = 0.0002;
 
-/// The whole point of the split: a stable's prior must be an ORDER OF MAGNITUDE
-/// under the crypto one, or it is still Bitcoin's floor wearing another name.
-const _: () = assert!(SIGMA_FLOOR_30M_STABLE * 10.0 < SIGMA_FLOOR_30M_CRYPTO);
+/// The whole point of the split: a stable's prior must stay clear of the crypto
+/// one, or it is still Bitcoin's floor wearing another name.
+///
+/// The bound was `STABLE * 10 < CRYPTO`, which held only because both sides
+/// were guesses. On the 2026-09-01 tape the classes are 7x apart at their p5
+/// (118 vs 814) and the floors sit under those, so 4x is the honest separation
+/// and 10x is unreachable without pushing the stable floor into peg noise.
+const _: () = assert!(SIGMA_FLOOR_30M_STABLE * 4.0 <= SIGMA_FLOOR_30M_CRYPTO);
 
 /// Class floor for a MITCH wire class pair. Garbage class bits land on equity,
 /// the same default [`mitch::common::AssetClass`] resolution falls back to.

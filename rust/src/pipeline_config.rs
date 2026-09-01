@@ -170,6 +170,15 @@ pub enum RecordFormat {
     /// per-record stride. Keyed by `global_index` (u8 on this wire) with a
     /// per-feed `exp_bias`. See `server::signed_v4`.
     PackedV4,
+    /// V5 DIFF wire for `ExternalOracleV4`: 11 B header (`version:u8(=5) |
+    /// seq:u32 | sourceTsDs:u24 | nP:u8 | nS:u8 | nC:u8`) then three gi-sorted
+    /// sparse sections — price 5 B (`gi:u8 | lane:u32`, 29-bit lanes, 8/slot),
+    /// σ 5 B and conf 3 B unchanged from V4. `sourceTsDs` is DECISECONDS SINCE
+    /// MIDNIGHT UTC (cyclic, no epoch), which is what removes V4's 2038 wrap;
+    /// the domain NAME is `BTR ExternalOracleV4` and the struct typehash
+    /// `BatchQuoteV4`, so a V5 signature can never verify as a V4 one.
+    /// See `server::signed_v5`.
+    PackedV5,
 }
 
 impl Default for RecordFormat {
@@ -193,6 +202,7 @@ impl RecordFormat {
             "ticker22" => Ok(Self::Ticker22),
             "packedV2" | "packed_v2" => Ok(Self::PackedV2),
             "packedV4" | "packed_v4" => Ok(Self::PackedV4),
+            "packedV5" | "packed_v5" => Ok(Self::PackedV5),
             "ticker30" => Err(
                 "signed_quotes record_format `ticker30` is RETIRED and this build cannot emit \
                  it. Declare `ticker22` if the consumer contract was migrated, `idx24` if it \
@@ -201,20 +211,21 @@ impl RecordFormat {
             ),
             other => Err(format!(
                 "signed_quotes record_format {other:?} is not a layout this build emits; \
-                 accepted: `idx24`, `ticker22`, `packedV2`, `packedV4`"
+                 accepted: `idx24`, `ticker22`, `packedV2`, `packedV4`, `packedV5`"
             )),
         }
     }
 
-    /// Bytes per packed record. `None` = VARIABLE: `packedV4` is a diff wire
-    /// of per-section entry sizes (4/5/3 B), so no single stride exists and a
-    /// consumer must frame off the header counts, never off a stride.
+    /// Bytes per packed record. `None` = VARIABLE: `packedV4`/`packedV5` are
+    /// diff wires of per-section entry sizes (4/5/3 B and 5/5/3 B), so no
+    /// single stride exists and a consumer must frame off the header counts,
+    /// never off a stride.
     pub fn record_bytes(self) -> Option<usize> {
         match self {
             Self::Idx24 => Some(24),
             Self::Ticker22 => Some(22),
             Self::PackedV2 => Some(100),
-            Self::PackedV4 => None,
+            Self::PackedV4 | Self::PackedV5 => None,
         }
     }
 
@@ -228,6 +239,7 @@ impl RecordFormat {
             Self::Ticker22 => 8,
             Self::PackedV2 => 9,
             Self::PackedV4 => 12,
+            Self::PackedV5 => 11,
         }
     }
 
@@ -238,6 +250,7 @@ impl RecordFormat {
             Self::Ticker22 => "ticker22",
             Self::PackedV2 => "packedV2",
             Self::PackedV4 => "packedV4",
+            Self::PackedV5 => "packedV5",
         }
     }
 }

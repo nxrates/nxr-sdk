@@ -261,6 +261,20 @@ impl std::fmt::Display for RecordFormat {
     }
 }
 
+/// One feed's lane assignment on ONE consumer, inside
+/// [`SignedDomainYml::lane_map`]. Both fields are REQUIRED: a half-specified
+/// lane is how a feed lands in the wrong slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneYml {
+    /// This feed's global lane index on THIS oracle
+    /// (`slotId = global_index / lanes_per_slot`).
+    pub global_index: u16,
+    /// This feed's signed `expBias` on THIS oracle:
+    /// `mark1e18 = mantissa << (exp + expBias)`.
+    pub exp_bias: i16,
+}
+
 /// One allow-listed EIP-712 domain. Signers are CONSUMER AGNOSTIC: the domain
 /// is a per-REQUEST parameter validated against this allow-list, never pod
 /// identity, so one replica set serves every consumer.
@@ -284,12 +298,38 @@ pub struct SignedDomainYml {
     /// never at config load: see [`RecordFormat`].
     #[serde(default)]
     pub record_format: Option<String>,
-    /// V2 (`packedV2`) ONLY: the oracle's immutable deciseconds clock origin in
-    /// SECONDS (`sourceTsDs = (sourceSec - epoch) * 10`). Persisted alongside
-    /// BTR's v2 deploy record; Arc (chainId 5042002) = 1735689600 (2025-01-01Z).
-    /// Absent falls back to that Arc default in the signer.
+    /// `packedV2`/`packedV4` ONLY: the oracle's immutable deciseconds clock
+    /// origin in SECONDS (`sourceTsDs = (sourceSec - epoch) * 10`). Persisted
+    /// alongside BTR's deploy record; Arc (chainId 5042002) = 1735689600
+    /// (2025-01-01Z). Absent falls back to that Arc default in the signer.
+    ///
+    /// `packedV5` has NO epoch — the V4 wire's clock is cyclic
+    /// deciseconds-since-midnight, which is the change that removed the 2038
+    /// wrap, and its `seq` is epoch-free too. Declaring one on a `packedV5`
+    /// domain is a BOOT ERROR rather than a silently ignored key: an operator
+    /// who set it believes it is doing something.
     #[serde(default)]
     pub epoch: Option<u32>,
+    /// OPTIONAL per-domain lane map, `symbol -> {global_index, exp_bias}`.
+    ///
+    /// ABSENT (the default, and every domain in the live ConfigMap today) =
+    /// unchanged behaviour: lanes come from the per-feed
+    /// [`SignedFeedYml::global_index`] / [`SignedFeedYml::exp_bias`].
+    ///
+    /// PRESENT = it OVERRIDES those fields for this domain alone. This exists
+    /// because a lane map is a property of the CONSUMER, not of the feed, and
+    /// two consumers genuinely disagree: `ExternalOracleV3` packs 10 lanes per
+    /// slot and `ExternalOracleV4` packs 8, so the same 26 feeds sit at
+    /// different indices with different biases on the two oracles. Without this
+    /// one signer tier cannot serve both wires, and a migration becomes a tight
+    /// producer flip with a fail-closed gap on the volatiles.
+    ///
+    /// A present map is validated STRICTLY at boot and must be TOTAL over the
+    /// catalog: every `feeds` entry named, no extras, no duplicate
+    /// `global_index`. A half-specified map silently encodes a feed into the
+    /// wrong lane, which is worse than refusing to boot.
+    #[serde(default)]
+    pub lane_map: Option<BTreeMap<String, LaneYml>>,
 }
 
 /// `#[serde(default)]` for a bool that must stay on when the YAML is silent.
@@ -576,6 +616,9 @@ impl SignedQuotesYml {
                 // was already written.
                 record_format: None,
                 epoch: None,
+                // The singleton alias predates per-domain lane maps too: it
+                // takes the per-feed catalog fields, as it always has.
+                lane_map: None,
             },
         )])
     }
@@ -2347,4 +2390,54 @@ mod tests {
         );
         assert!(!feeds[0].invert, "invert defaults false");
     }
+    /// The per-domain `lane_map` YAML shape an operator actually writes.
+    ///
+    /// It exists because a lane map is a property of the CONSUMER: V3 packs 10
+    /// lanes per slot and V4 packs 8, so one signer tier cannot serve both
+    /// wires off a single per-feed assignment during a migration.
+    #[test]
+    fn a_domain_lane_map_parses_and_is_optional() {
+        let d: SignedDomainYml = serde_yml::from_str(
+            r#"
+name: "BTR ExternalOracleV4"
+chain_id: 5042002
+oracle: "0x842c2736F072A8A7b523D23bd3Ef21F21AC24d5C"
+record_format: packedV5
+lane_map:
+  USDT-USDC: { global_index: 0, exp_bias: 28 }
+  EURC-USDC: { global_index: 8, exp_bias: 29 }
+"#,
+        )
+        .expect("lane_map parses");
+        assert_eq!(d.epoch, None, "packedV5 carries no epoch");
+        let m = d.lane_map.expect("present");
+        assert_eq!(m["USDT-USDC"], LaneYml { global_index: 0, exp_bias: 28 });
+        assert_eq!(m["EURC-USDC"], LaneYml { global_index: 8, exp_bias: 29 });
+        assert_eq!(m.len(), 2);
+
+        // ABSENT is the default and the unchanged path — every live domain.
+        let plain: SignedDomainYml =
+            serde_yml::from_str("name: n\nchain_id: 1\noracle: \"0x11\"\n").expect("parses");
+        assert!(plain.lane_map.is_none());
+        assert_eq!(plain.record_format, None);
+
+        // A HALF-WRITTEN lane must not default: both fields are required, and a
+        // silently-zero global_index would encode a feed into lane 0.
+        assert!(
+            serde_yml::from_str::<SignedDomainYml>(
+                "name: n\nchain_id: 1\noracle: \"0x11\"\nlane_map:\n  A-B: { global_index: 1 }\n"
+            )
+            .is_err(),
+            "a lane without exp_bias must be a parse error"
+        );
+        // …and an unknown key inside a lane is refused rather than ignored.
+        assert!(
+            serde_yml::from_str::<SignedDomainYml>(
+                "name: n\nchain_id: 1\noracle: \"0x11\"\nlane_map:\n  A-B: { global_index: 1, exp_bias: 2, slot: 0 }\n"
+            )
+            .is_err(),
+            "deny_unknown_fields must catch a typo'd lane key"
+        );
+    }
+
 }

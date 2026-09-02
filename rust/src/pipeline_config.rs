@@ -1949,7 +1949,7 @@ mod tests {
     fn signed_yml(sigma_keys: &str) -> SignedQuotesYml {
         let y = format!(
             "oracle: \"0x0000000000000000000000000000000000000000\"\n\
-             chain_id: 11155111\n\
+             chain_id: 5042002\n\
              min_interval_ms: 5\n\
              mark_max_age_ms: 500\n\
              min_accepted_providers: 2\n\
@@ -2007,7 +2007,7 @@ mod tests {
         let parse = |feeds: &str| -> SignedQuotesYml {
             let y = format!(
                 "oracle: \"0x0000000000000000000000000000000000000000\"\n\
-                 chain_id: 11155111\n\
+                 chain_id: 5042002\n\
                  min_interval_ms: 5\n\
                  mark_max_age_ms: 500\n\
                  min_accepted_providers: 2\n\
@@ -2117,7 +2117,7 @@ mod tests {
         );
     }
 
-    /// Sepolia 24-asset set (2026-07-21): SYRUPUSDC (Maple's yield-bearing
+    /// Anchor 24-asset set (2026-07-21): SYRUPUSDC (Maple's yield-bearing
     /// vault share, NAV ≈1.174) deliberately is NOT in `cexs.pegged` (same
     /// reasoning as EURC/SUSDE), so classify_ticker would bucket its /USDT and
     /// /USDC crosses `crypto_alt` (no class default, flat 300bpd) without the
@@ -2275,7 +2275,7 @@ mod tests {
     fn sign_only_defaults_false_and_signed_symbols_covers_bridge_legs() {
         let sq: SignedQuotesYml = serde_yml::from_str(
             "oracle: '0x1111111111111111111111111111111111111111'\n\
-             chain_id: 11155111\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
+             chain_id: 5042002\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
              min_composite_freshness_bps: 500\nquorum: 2\npeers:\n\
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
              feeds:\n\

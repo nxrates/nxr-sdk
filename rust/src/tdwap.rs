@@ -22,7 +22,12 @@
 // `coarsetime::Duration` is API-compatible with the subset we use
 // (`from_millis`, `as_f64`, `as_secs`). We import both unqualified so the
 // rest of the file reads identically to the pre-Δ1.C version.
-use coarsetime::{Duration, Instant};
+use coarsetime::Duration;
+/// The clock [`ProviderEntry::last_update`] is stamped in. Re-exported so a
+/// caller outside this crate can carry an observation instant around without a
+/// direct `coarsetime` dependency: `coarse_now` alone is half the API, since a
+/// struct field or a return type has to name the type.
+pub use coarsetime::Instant;
 
 use mitch::Index;
 

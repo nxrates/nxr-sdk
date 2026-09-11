@@ -86,7 +86,9 @@ pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     // ── USDT/USDC = USDT/USD × (USDC/USD)⁻¹ ──
     // Only STABLE/USDC cross with both legs live. The NATIVE deep-book ticker
     // is USDC/USDT (kept untouched); this inverse form gives the BTR Stable
-    // Core keeper a uniform X/USDC universe. Distinct ticker id, no overwrite.
+    // Core keeper a uniform X/USDC universe. USDT/USDC also has its own venue
+    // book (NXR_SYMBOLS since 2026-07-24); core drops that composite for every
+    // rule output id, so this synth is the one record written.
     SynthesisRuleSpec { out_sym: "USDT/USDC",  leg1_sym: "USDT/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
 
 ];

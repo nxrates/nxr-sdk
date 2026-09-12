@@ -132,6 +132,9 @@ impl<S: FrameSink + 'static> Publisher<S> {
             (0..self.sinks.len()).map(|_| Instant::now()).collect();
         let lagged = AtomicU64::new(0);
         let mut last_lag_report = Instant::now();
+        // The warn is throttled to 1/s, so it cannot size a loss; the counter can.
+        let sink_label = self.sinks.iter().map(|s| s.label()).collect::<Vec<_>>().join("+");
+        let lagged_total = metrics::counter!("nxr_publisher_lagged_total", "sink" => sink_label);
 
         loop {
             match rx.recv().await {
@@ -174,6 +177,7 @@ impl<S: FrameSink + 'static> Publisher<S> {
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
+                    lagged_total.increment(n);
                     let total = lagged.fetch_add(n, Ordering::Relaxed) + n;
                     if last_lag_report.elapsed() >= Duration::from_secs(1) {
                         warn!(skipped = total, "publisher lagged: broadcast overflow");
@@ -185,5 +189,41 @@ impl<S: FrameSink + 'static> Publisher<S> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NullSink;
+
+    impl FrameSink for NullSink {
+        async fn send(&self, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn label(&self) -> &'static str {
+            "A"
+        }
+    }
+
+    /// Every record the ring skipped is counted under the sink label, not only
+    /// logged: the warn is throttled to 1/s and cannot size a loss.
+    #[test]
+    fn lagged_records_are_counted_per_sink() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let (tx, rx) = broadcast::channel::<Vec<u8>>(2);
+            for i in 0..6u8 {
+                tx.send(vec![i]).unwrap();
+            }
+            drop(tx);
+            rt.block_on(Publisher::new(vec![NullSink]).run(rx)).unwrap();
+        });
+        let out = handle.render();
+        assert!(out.contains("nxr_publisher_lagged_total{sink=\"A\"} 4"), "{out}");
     }
 }

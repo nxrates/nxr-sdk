@@ -10,7 +10,7 @@ keywords = ["finance", "market-data", "mitch", "hft"]
 [features]
 default = []
 # UDP multicast + publisher traits (nxr core aggregator / bar multicast).
-transport = ["dep:socket2", "tokio/net"]
+transport = ["dep:socket2", "dep:metrics", "tokio/net"]
 # REST + binary WS consumer client.
 client = ["transport", "dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util"]
 # Shared axum `/metrics` server (crypto/fx forwarder bins).
@@ -58,6 +58,7 @@ axum = { version = "0.8", optional = true }
 [dev-dependencies]
 ureq = { version = "2.10", features = ["json"] }
 wiremock = "0.6"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
 [[example]]

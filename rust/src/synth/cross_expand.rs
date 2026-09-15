@@ -89,9 +89,7 @@ pub fn all_crypto_crosses(assets: &[String]) -> Vec<String> {
 }
 
 fn normalize_cross(sym: &str) -> String {
-    sym.trim()
-        .to_uppercase()
-        .replace('-', "/")
+    sym.trim().to_uppercase().replace('-', "/")
 }
 
 fn legs_for_cross(base: &str, quote: &str, storage_quote: &str) -> Option<(String, String)> {
@@ -114,7 +112,10 @@ mod tests {
 
     #[test]
     fn all_crypto_crosses_is_directed_nxn_minus_diag() {
-        let assets: Vec<String> = ["BTC", "ETH", "SOL"].iter().map(|s| s.to_string()).collect();
+        let assets: Vec<String> = ["BTC", "ETH", "SOL"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let out = all_crypto_crosses(&assets);
         assert_eq!(out.len(), 3 * 2); // N×(N-1), both directions, no A/A
         let set: HashSet<_> = out.iter().map(String::as_str).collect();
@@ -122,7 +123,11 @@ mod tests {
         assert!(!set.contains("BTC/BTC"));
         // Feeds expand_cross_pairs cleanly (legs resolve for real majors).
         let expanded = expand_cross_pairs(&out, &["BTC".into(), "ETH".into(), "SOL".into()], "USD");
-        assert!(expanded.iter().any(|p| p.synth_sym == "ETH/BTC" && p.base_sym == "ETH/USD"));
+        assert!(
+            expanded
+                .iter()
+                .any(|p| p.synth_sym == "ETH/BTC" && p.base_sym == "ETH/USD")
+        );
     }
 
     #[test]

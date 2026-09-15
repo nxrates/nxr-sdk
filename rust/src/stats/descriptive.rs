@@ -20,7 +20,9 @@ pub fn round_to_sig_digits(v: f64, sig: i32) -> f64 {
 /// Arithmetic mean of a slice. Returns 0.0 for an empty slice.
 #[inline]
 pub fn mean(data: &[f64]) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     data.iter().sum::<f64>() / data.len() as f64
 }
 
@@ -29,7 +31,9 @@ pub fn mean(data: &[f64]) -> f64 {
 #[inline]
 pub fn std_dev(data: &[f64]) -> f64 {
     let n = data.len() as f64;
-    if n < 2.0 { return 0.0; }
+    if n < 2.0 {
+        return 0.0;
+    }
     let m = data.iter().sum::<f64>() / n;
     let var = data.iter().map(|&x| (x - m) * (x - m)).sum::<f64>() / (n - 1.0);
     var.sqrt()
@@ -43,11 +47,17 @@ pub fn std_dev(data: &[f64]) -> f64 {
 /// Even length averages the two middles. That is the whole-tree convention:
 /// call sites taking the upper middle instead are drift, not policy.
 pub fn median_by<T>(data: &[T], f: impl Fn(&T) -> f64) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     let mut s: Vec<f64> = data.iter().map(&f).collect();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = s.len();
-    if n % 2 == 0 { (s[n / 2 - 1] + s[n / 2]) / 2.0 } else { s[n / 2] }
+    if n % 2 == 0 {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    } else {
+        s[n / 2]
+    }
 }
 
 /// Median of an f64 sample. See [`median_by`].
@@ -60,12 +70,16 @@ pub fn median(data: &[f64]) -> f64 {
 /// numpy's default `linear` interpolation, so `percentile(x, 0.5)` equals
 /// [`median`] on both parities. Returns 0.0 for an empty slice.
 pub fn percentile(data: &[f64], q: f64) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     let mut s = data.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let pos = q.clamp(0.0, 1.0) * (s.len() - 1) as f64;
     let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
-    if lo == hi { return s[lo]; }
+    if lo == hi {
+        return s[lo];
+    }
     s[lo] + (s[hi] - s[lo]) * (pos - lo as f64)
 }
 
@@ -75,7 +89,9 @@ pub fn percentile(data: &[f64], q: f64) -> f64 {
 /// (`data_quality_audit.rs` + `renko_continuity_check.rs`). Phase
 /// 59.R3.C5.C2/C3 (2026-05-30).
 pub fn mad(data: &[f64]) -> f64 {
-    if data.is_empty() { return 0.0; }
+    if data.is_empty() {
+        return 0.0;
+    }
     let med = median(data);
     let devs: Vec<f64> = data.iter().map(|x| (x - med).abs()).collect();
     median(&devs)
@@ -84,7 +100,9 @@ pub fn mad(data: &[f64]) -> f64 {
 /// Convenience variant of [`mad`] that returns `(median, mad)` in a single
 /// pass through the sort step. Same defaults as `mad(&[])` ⇒ `(0.0, 0.0)`.
 pub fn median_and_mad(data: &[f64]) -> (f64, f64) {
-    if data.is_empty() { return (0.0, 0.0); }
+    if data.is_empty() {
+        return (0.0, 0.0);
+    }
     let med = median(data);
     let devs: Vec<f64> = data.iter().map(|x| (x - med).abs()).collect();
     (med, median(&devs))

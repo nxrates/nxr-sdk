@@ -6,7 +6,7 @@ use mitch::index::Index;
 use mitch::timestamp;
 
 use nxr_sdk::ipc::record::IndexRecord;
-use nxr_sdk::ohlc::{idx_to_ohlc, idx_to_ohlc_stream, ohlc_ci_ubp, rollup, Ohlc};
+use nxr_sdk::ohlc::{Ohlc, idx_to_ohlc, idx_to_ohlc_stream, ohlc_ci_ubp, rollup};
 use nxr_sdk::tdwap::encode_ci_ubp;
 
 // ── Test helpers ────────────────────────────────────────────────────────
@@ -24,10 +24,10 @@ fn make_rec(ts_ms: i64, bid: f64, ask: f64, vbid: u32, vask: u32, ci_ubp: f64) -
         ci,
         vbid,
         vask,
-        1,         // tick_count
-        1,         // confidence
-        1,         // accepted
-        0,         // rejected
+        1, // tick_count
+        1, // confidence
+        1, // accepted
+        0, // rejected
     );
     IndexRecord::new(header, index)
 }
@@ -100,10 +100,24 @@ fn multi_bucket_60s_records_split() {
     let base_ms = 1_700_000_000_000i64 - 1_700_000_000_000i64 % TF_60S;
     let mut recs = Vec::with_capacity(12);
     for i in 0..6 {
-        recs.push(make_rec(base_ms + (i as i64) * 10_000, 100.0 + i as f64, 101.0 + i as f64, 1, 1, 0.0));
+        recs.push(make_rec(
+            base_ms + (i as i64) * 10_000,
+            100.0 + i as f64,
+            101.0 + i as f64,
+            1,
+            1,
+            0.0,
+        ));
     }
     for i in 0..6 {
-        recs.push(make_rec(base_ms + 60_000 + (i as i64) * 10_000, 200.0 + i as f64, 201.0 + i as f64, 2, 2, 0.0));
+        recs.push(make_rec(
+            base_ms + 60_000 + (i as i64) * 10_000,
+            200.0 + i as f64,
+            201.0 + i as f64,
+            2,
+            2,
+            0.0,
+        ));
     }
     let out = idx_to_ohlc(&recs, TF_60S);
     assert_eq!(out.len(), 2);
@@ -149,7 +163,10 @@ fn rollup_10s_to_60s() {
     assert_eq!(b.ts, base_ms);
     assert_eq!(b.open, bars[0].open);
     assert_eq!(b.close, bars[5].close);
-    let expected_high = bars.iter().map(|x| x.high).fold(f64::NEG_INFINITY, f64::max);
+    let expected_high = bars
+        .iter()
+        .map(|x| x.high)
+        .fold(f64::NEG_INFINITY, f64::max);
     let expected_low = bars.iter().map(|x| x.low).fold(f64::INFINITY, f64::min);
     assert_eq!(b.high, expected_high);
     assert_eq!(b.low, expected_low);
@@ -166,10 +183,24 @@ fn streaming_matches_batch() {
     let mut recs = Vec::new();
     // 3 buckets: 4 records, 3 records, 1 record.
     for i in 0..4 {
-        recs.push(make_rec(base_ms + (i as i64) * 5_000, 100.0 + i as f64, 101.0 + i as f64, 1, 1, 100.0));
+        recs.push(make_rec(
+            base_ms + (i as i64) * 5_000,
+            100.0 + i as f64,
+            101.0 + i as f64,
+            1,
+            1,
+            100.0,
+        ));
     }
     for i in 0..3 {
-        recs.push(make_rec(base_ms + 60_000 + (i as i64) * 10_000, 110.0 + i as f64, 111.0 + i as f64, 2, 2, 200.0));
+        recs.push(make_rec(
+            base_ms + 60_000 + (i as i64) * 10_000,
+            110.0 + i as f64,
+            111.0 + i as f64,
+            2,
+            2,
+            200.0,
+        ));
     }
     recs.push(make_rec(base_ms + 120_000, 130.0, 131.0, 3, 3, 300.0));
 
@@ -204,7 +235,13 @@ fn avg_ci_ubp_encodes_mean() {
     // Allow ~1% relative slack: the sqrt-then-square round-trip plus the
     // final mean re-encode introduces small quantization error.
     let rel = (got_mean - want_mean).abs() / want_mean.max(1.0);
-    assert!(rel < 0.01, "decoded mean {} vs want {} (rel {})", got_mean, want_mean, rel);
+    assert!(
+        rel < 0.01,
+        "decoded mean {} vs want {} (rel {})",
+        got_mean,
+        want_mean,
+        rel
+    );
 }
 
 #[test]

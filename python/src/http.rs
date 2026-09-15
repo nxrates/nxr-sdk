@@ -73,22 +73,23 @@ impl Client {
                 ("limit", limit.map(|v| v.to_string())),
             ],
         );
-        let bytes = py.allow_threads(|| -> Result<Vec<u8>, String> {
-            let mut req = self
-                .inner
-                .get(&url)
-                .header(reqwest::header::ACCEPT, "application/octet-stream");
-            if let Some(k) = &self.api_key {
-                req = req.header("X-NXR-Key", k);
-            }
-            let resp = req.send().map_err(|e| e.to_string())?;
-            if !resp.status().is_success() {
-                return Err(format!("{} -> {}", url, resp.status()));
-            }
-            let b = resp.bytes().map_err(|e| e.to_string())?;
-            Ok(b.to_vec())
-        })
-        .map_err(PyRuntimeError::new_err)?;
+        let bytes = py
+            .allow_threads(|| -> Result<Vec<u8>, String> {
+                let mut req = self
+                    .inner
+                    .get(&url)
+                    .header(reqwest::header::ACCEPT, "application/octet-stream");
+                if let Some(k) = &self.api_key {
+                    req = req.header("X-NXR-Key", k);
+                }
+                let resp = req.send().map_err(|e| e.to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("{} -> {}", url, resp.status()));
+                }
+                let b = resp.bytes().map_err(|e| e.to_string())?;
+                Ok(b.to_vec())
+            })
+            .map_err(PyRuntimeError::new_err)?;
         let buf = PyBytes::new_bound(py, &bytes);
         crate::decoders::decode_idx_bytes(py, &buf)
     }
@@ -119,29 +120,37 @@ impl Client {
             ],
         );
 
-        let body = py.allow_threads(|| -> Result<String, String> {
-            let resp = self.inner.get(&url).send().map_err(|e| e.to_string())?;
-            if !resp.status().is_success() {
-                return Err(format!("{} -> {}", url, resp.status()));
-            }
-            resp.text().map_err(|e| e.to_string())
-        })
-        .map_err(PyRuntimeError::new_err)?;
+        let body = py
+            .allow_threads(|| -> Result<String, String> {
+                let resp = self.inner.get(&url).send().map_err(|e| e.to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("{} -> {}", url, resp.status()));
+                }
+                resp.text().map_err(|e| e.to_string())
+            })
+            .map_err(PyRuntimeError::new_err)?;
 
         // Parse as a JSON array of objects with keys: ts/o/h/l/c/vbid/vask/n
         // (accept several common spellings).
         let parsed: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| PyRuntimeError::new_err(format!("json parse: {e}")))?;
-        let arr = parsed.as_array()
+        let arr = parsed
+            .as_array()
             .ok_or_else(|| PyRuntimeError::new_err("/v1/ohlc response is not an array"))?;
 
         let numpy = py.import_bound("numpy")?;
         let dtype_def = PyList::empty_bound(py);
-        for (n, f) in &[("ts","<i8"),("open","<f8"),("high","<f8"),("low","<f8"),("close","<f8"),("vbid","<u8"),("vask","<u8"),("n","<u4")] {
-            let t = pyo3::types::PyTuple::new_bound(py, &[
-                (*n).to_object(py),
-                (*f).to_object(py),
-            ]);
+        for (n, f) in &[
+            ("ts", "<i8"),
+            ("open", "<f8"),
+            ("high", "<f8"),
+            ("low", "<f8"),
+            ("close", "<f8"),
+            ("vbid", "<u8"),
+            ("vask", "<u8"),
+            ("n", "<u4"),
+        ] {
+            let t = pyo3::types::PyTuple::new_bound(py, &[(*n).to_object(py), (*f).to_object(py)]);
             dtype_def.append(t)?;
         }
         let dtype = numpy.getattr("dtype")?.call1((dtype_def,))?;
@@ -150,10 +159,10 @@ impl Client {
         let zeros = numpy.getattr("zeros")?.call((arr.len(),), Some(&kwargs))?;
         for (i, row) in arr.iter().enumerate() {
             let ts = row.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
-            let o = num_f(row, &["open","o"]);
-            let h = num_f(row, &["high","h"]);
-            let l = num_f(row, &["low","l"]);
-            let c = num_f(row, &["close","c"]);
+            let o = num_f(row, &["open", "o"]);
+            let h = num_f(row, &["high", "h"]);
+            let l = num_f(row, &["low", "l"]);
+            let c = num_f(row, &["close", "c"]);
             let vbid = row.get("vbid").and_then(|v| v.as_u64()).unwrap_or(0);
             let vask = row.get("vask").and_then(|v| v.as_u64()).unwrap_or(0);
             let nticks = row.get("n").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
@@ -192,22 +201,23 @@ impl Client {
                 ("limit", limit.map(|v| v.to_string())),
             ],
         );
-        let bytes = py.allow_threads(|| -> Result<Vec<u8>, String> {
-            let mut req = self
-                .inner
-                .get(&url)
-                .header(reqwest::header::ACCEPT, "application/octet-stream");
-            if let Some(k) = &self.api_key {
-                req = req.header("X-NXR-Key", k);
-            }
-            let resp = req.send().map_err(|e| e.to_string())?;
-            if !resp.status().is_success() {
-                return Err(format!("{} -> {}", url, resp.status()));
-            }
-            let b = resp.bytes().map_err(|e| e.to_string())?;
-            Ok(b.to_vec())
-        })
-        .map_err(PyRuntimeError::new_err)?;
+        let bytes = py
+            .allow_threads(|| -> Result<Vec<u8>, String> {
+                let mut req = self
+                    .inner
+                    .get(&url)
+                    .header(reqwest::header::ACCEPT, "application/octet-stream");
+                if let Some(k) = &self.api_key {
+                    req = req.header("X-NXR-Key", k);
+                }
+                let resp = req.send().map_err(|e| e.to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("{} -> {}", url, resp.status()));
+                }
+                let b = resp.bytes().map_err(|e| e.to_string())?;
+                Ok(b.to_vec())
+            })
+            .map_err(PyRuntimeError::new_err)?;
         let buf = PyBytes::new_bound(py, &bytes);
         crate::decoders::decode_bar_bytes(py, &buf)
     }
@@ -230,18 +240,19 @@ impl Client {
 impl Client {
     fn get_json(&self, py: Python<'_>, path: &str) -> PyResult<PyObject> {
         let url = format!("{}{}", self.base, path);
-        let body = py.allow_threads(|| -> Result<String, String> {
-            let mut req = self.inner.get(&url);
-            if let Some(k) = &self.api_key {
-                req = req.header("X-NXR-Key", k);
-            }
-            let resp = req.send().map_err(|e| e.to_string())?;
-            if !resp.status().is_success() {
-                return Err(format!("{} -> {}", url, resp.status()));
-            }
-            resp.text().map_err(|e| e.to_string())
-        })
-        .map_err(PyRuntimeError::new_err)?;
+        let body = py
+            .allow_threads(|| -> Result<String, String> {
+                let mut req = self.inner.get(&url);
+                if let Some(k) = &self.api_key {
+                    req = req.header("X-NXR-Key", k);
+                }
+                let resp = req.send().map_err(|e| e.to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("{} -> {}", url, resp.status()));
+                }
+                resp.text().map_err(|e| e.to_string())
+            })
+            .map_err(PyRuntimeError::new_err)?;
         let json_mod = py.import_bound("json")?;
         Ok(json_mod.getattr("loads")?.call1((body,))?.unbind())
     }
@@ -271,8 +282,12 @@ fn append_query(url: &mut String, params: &[(&str, Option<String>)]) {
 fn num_f(row: &serde_json::Value, keys: &[&str]) -> f64 {
     for k in keys {
         if let Some(v) = row.get(*k) {
-            if let Some(f) = v.as_f64() { return f; }
-            if let Some(i) = v.as_i64() { return i as f64; }
+            if let Some(f) = v.as_f64() {
+                return f;
+            }
+            if let Some(i) = v.as_i64() {
+                return i as f64;
+            }
         }
     }
     f64::NAN

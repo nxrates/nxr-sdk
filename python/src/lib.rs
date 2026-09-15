@@ -14,9 +14,9 @@
 #![allow(unsafe_op_in_unsafe_fn)] // pyo3 macros expand to unsafe blocks already gated by the harness
 
 mod decoders;
-mod resolve;
-mod multicast;
 mod http;
+mod multicast;
+mod resolve;
 mod synth_py;
 mod types;
 

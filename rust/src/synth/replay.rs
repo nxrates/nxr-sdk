@@ -31,8 +31,8 @@
 //! `rejected` is reset to 0 on the synth (the synth tick itself was not
 //! rejected — both inputs passed the sanity gate).
 
-use crate::tdwap::{decode_ci_ubp, encode_ci_ubp};
 use crate::IndexRecord;
+use crate::tdwap::{decode_ci_ubp, encode_ci_ubp};
 use mitch::header::MitchHeader;
 use mitch::index::Index;
 use mitch::timestamp;
@@ -69,9 +69,7 @@ pub fn compute_synth_index(
 ) -> Option<IndexRecord> {
     // TTL gate.
     let ref_ts = now_ms.max(base_ts_ms).max(quote_ts_ms);
-    if (ref_ts - base_ts_ms) > LEG_STALE_TTL_MS
-        || (ref_ts - quote_ts_ms) > LEG_STALE_TTL_MS
-    {
+    if (ref_ts - base_ts_ms) > LEG_STALE_TTL_MS || (ref_ts - quote_ts_ms) > LEG_STALE_TTL_MS {
         return None;
     }
 
@@ -228,14 +226,21 @@ impl SynthReplayState {
         // live kernel + offline replay). The compute helper folds TTL + sanity
         // drops together; any `None` is counted as a stale-drop here (matches
         // the live kernel's semantics).
-        let synth_rec =
-            match compute_synth_index(&base, &quote, base_ts, quote_ts, now_ms, self.synth_id, self.seq) {
-                Some(r) => r,
-                None => {
-                    self.stale_drop_count += 1;
-                    return None;
-                }
-            };
+        let synth_rec = match compute_synth_index(
+            &base,
+            &quote,
+            base_ts,
+            quote_ts,
+            now_ms,
+            self.synth_id,
+            self.seq,
+        ) {
+            Some(r) => r,
+            None => {
+                self.stale_drop_count += 1;
+                return None;
+            }
+        };
         self.seq = self.seq.wrapping_add(1);
         self.emit_count += 1;
         Some(synth_rec)

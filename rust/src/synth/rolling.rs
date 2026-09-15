@@ -27,7 +27,10 @@ impl RollingCorrelation {
     /// New accumulator with window of `window_size` paired samples.
     /// Panics if `window_size < 2`.
     pub fn new(window_size: usize) -> Self {
-        assert!(window_size >= 2, "window_size must be ≥ 2, got {window_size}");
+        assert!(
+            window_size >= 2,
+            "window_size must be ≥ 2, got {window_size}"
+        );
         Self {
             n: window_size,
             buf_x: vec![0.0; window_size],

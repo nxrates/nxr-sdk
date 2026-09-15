@@ -51,7 +51,9 @@ pub fn resolve_ticker(ticker_id: u64) -> (String, String, String) {
 /// `id` and `name` keys, or None if unknown.
 #[pyfunction]
 pub fn get_market_provider(py: Python<'_>, id: u16) -> PyResult<Option<PyObject>> {
-    let Some(mp) = nxr_sdk::get_market_provider_by_id(id) else { return Ok(None); };
+    let Some(mp) = nxr_sdk::get_market_provider_by_id(id) else {
+        return Ok(None);
+    };
     let d = PyDict::new_bound(py);
     d.set_item("id", id)?;
     d.set_item("name", mp.name)?;

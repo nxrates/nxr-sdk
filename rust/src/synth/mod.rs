@@ -72,11 +72,11 @@ pub use bar::{
     reconstruct_synth_bar_series_at_base_tf_then_rollup, reconstruct_synth_bar_series_rolling_rho,
     rho_cache_callback,
 };
+pub use cross::{AssetId, Composed, CrossGraph, LegQuote, Route, RouteLeg, ticker_assets};
 pub use ohlc::{
     OhlcLite, OhlcWithRange, TimedOhlc, TimedOhlcCount, VarianceEstimator, reconstruct_synth_ohlc,
     reconstruct_synth_series, reconstruct_synth_series_at_base_tf_then_rollup,
 };
-pub use cross::{AssetId, Composed, CrossGraph, LegQuote, Route, RouteLeg, ticker_assets};
 pub use paths::{Leg, SynthPath, normalize_to_slash};
 pub use rolling::RollingCorrelation;
 pub use tick::{LegTick, SynthTick, compose_legs, compute_synth_tick};

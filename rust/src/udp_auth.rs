@@ -1002,5 +1002,4 @@ mod tests {
         // documented remedy.
         assert!(max_drain_grace_ms(1024, 100) > max_drain_grace_ms(512, 100));
     }
-
 }

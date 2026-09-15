@@ -24,7 +24,11 @@ const IDX_REC_SIZE: usize = 56;
 // dtype factories — invoked once, cached on Python side
 // ──────────────────────────────────────────────────────────────────────
 
-fn np_dtype<'py>(py: Python<'py>, fields: &[(&str, &str, usize)], itemsize: usize) -> PyResult<Bound<'py, PyAny>> {
+fn np_dtype<'py>(
+    py: Python<'py>,
+    fields: &[(&str, &str, usize)],
+    itemsize: usize,
+) -> PyResult<Bound<'py, PyAny>> {
     // Build a dtype dict per numpy's documented protocol:
     //   {'names': [...], 'formats': [...], 'offsets': [...], 'itemsize': N}
     let names = PyList::empty_bound(py);
@@ -132,7 +136,12 @@ pub fn tick_dtype(py: Python<'_>) -> PyResult<PyObject> {
 // Bulk decoders — np.frombuffer over the supplied bytes buffer
 // ──────────────────────────────────────────────────────────────────────
 
-fn frombuffer<'py>(py: Python<'py>, buf: &Bound<'py, PyBytes>, dtype_fn: fn(Python<'_>) -> PyResult<PyObject>, stride: usize) -> PyResult<PyObject> {
+fn frombuffer<'py>(
+    py: Python<'py>,
+    buf: &Bound<'py, PyBytes>,
+    dtype_fn: fn(Python<'_>) -> PyResult<PyObject>,
+    stride: usize,
+) -> PyResult<PyObject> {
     let n = buf.as_bytes().len();
     if n % stride != 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -183,20 +192,28 @@ pub fn decode_tick_bytes(py: Python<'_>, buf: &Bound<'_, PyBytes>) -> PyResult<P
 /// default 0/1); `confidence`, `accepted`, `rejected` (u8, default 1/1/0);
 /// `sequence` (u16, default 0).
 #[pyfunction]
-pub fn encode_idx_record<'py>(py: Python<'py>, rec: &Bound<'py, PyDict>) -> PyResult<Bound<'py, PyBytes>> {
-    let ts_ms: i64 = rec.get_item("ts_ms")?
+pub fn encode_idx_record<'py>(
+    py: Python<'py>,
+    rec: &Bound<'py, PyDict>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let ts_ms: i64 = rec
+        .get_item("ts_ms")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("ts_ms"))?
         .extract()?;
-    let provider: u16 = rec.get_item("provider")?
+    let provider: u16 = rec
+        .get_item("provider")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("provider"))?
         .extract()?;
-    let ticker: u64 = rec.get_item("ticker")?
+    let ticker: u64 = rec
+        .get_item("ticker")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("ticker"))?
         .extract()?;
-    let bid: f64 = rec.get_item("bid")?
+    let bid: f64 = rec
+        .get_item("bid")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("bid"))?
         .extract()?;
-    let ask: f64 = rec.get_item("ask")?
+    let ask: f64 = rec
+        .get_item("ask")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("ask"))?
         .extract()?;
     let vbid: u32 = opt_u32(rec, "vbid")?.unwrap_or(0);
@@ -211,7 +228,9 @@ pub fn encode_idx_record<'py>(py: Python<'py>, rec: &Bound<'py, PyDict>) -> PyRe
     let mts = timestamp::from_epoch_ms(ts_ms);
     let mut header = MitchHeader::new(b'i', provider, mts, 1);
     header.set_sequence(sequence);
-    let index = MIndex::new(ticker, bid, ask, ci, vbid, vask, tick_count, confidence, accepted, rejected);
+    let index = MIndex::new(
+        ticker, bid, ask, ci, vbid, vask, tick_count, confidence, accepted, rejected,
+    );
     let record = NIndexRecord::new(header, index);
     Ok(PyBytes::new_bound(py, bytemuck::bytes_of(&record)))
 }
@@ -220,22 +239,28 @@ pub fn encode_idx_record<'py>(py: Python<'py>, rec: &Bound<'py, PyDict>) -> PyRe
 /// low, close (required); vbid, vask, tick_count (optional u32, default 0).
 #[pyfunction]
 pub fn encode_bar<'py>(py: Python<'py>, bar: &Bound<'py, PyDict>) -> PyResult<Bound<'py, PyBytes>> {
-    let open_ms: i64 = bar.get_item("open_ms")?
+    let open_ms: i64 = bar
+        .get_item("open_ms")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("open_ms"))?
         .extract()?;
-    let close_ms: i64 = bar.get_item("close_ms")?
+    let close_ms: i64 = bar
+        .get_item("close_ms")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("close_ms"))?
         .extract()?;
-    let open: f64 = bar.get_item("open")?
+    let open: f64 = bar
+        .get_item("open")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("open"))?
         .extract()?;
-    let high: f64 = bar.get_item("high")?
+    let high: f64 = bar
+        .get_item("high")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("high"))?
         .extract()?;
-    let low: f64 = bar.get_item("low")?
+    let low: f64 = bar
+        .get_item("low")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("low"))?
         .extract()?;
-    let close: f64 = bar.get_item("close")?
+    let close: f64 = bar
+        .get_item("close")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("close"))?
         .extract()?;
     let vbid: u32 = opt_u32(bar, "vbid")?.unwrap_or(0);
@@ -244,7 +269,9 @@ pub fn encode_bar<'py>(py: Python<'py>, bar: &Bound<'py, PyDict>) -> PyResult<Bo
 
     let open_mts = timestamp::from_epoch_ms(open_ms);
     let close_mts = timestamp::from_epoch_ms(close_ms);
-    let bar = MBar::new_ohlcv(open_mts, close_mts, open, high, low, close, vbid, vask, tick_count);
+    let bar = MBar::new_ohlcv(
+        open_mts, close_mts, open, high, low, close, vbid, vask, tick_count,
+    );
     Ok(PyBytes::new_bound(py, bytemuck::bytes_of(&bar)))
 }
 
@@ -253,13 +280,22 @@ pub fn encode_bar<'py>(py: Python<'py>, bar: &Bound<'py, PyDict>) -> PyResult<Bo
 // ──────────────────────────────────────────────────────────────────────
 
 fn opt_u32(d: &Bound<'_, PyDict>, k: &str) -> PyResult<Option<u32>> {
-    match d.get_item(k)? { Some(v) => Ok(Some(v.extract()?)), None => Ok(None) }
+    match d.get_item(k)? {
+        Some(v) => Ok(Some(v.extract()?)),
+        None => Ok(None),
+    }
 }
 fn opt_u16(d: &Bound<'_, PyDict>, k: &str) -> PyResult<Option<u16>> {
-    match d.get_item(k)? { Some(v) => Ok(Some(v.extract()?)), None => Ok(None) }
+    match d.get_item(k)? {
+        Some(v) => Ok(Some(v.extract()?)),
+        None => Ok(None),
+    }
 }
 fn opt_u8(d: &Bound<'_, PyDict>, k: &str) -> PyResult<Option<u8>> {
-    match d.get_item(k)? { Some(v) => Ok(Some(v.extract()?)), None => Ok(None) }
+    match d.get_item(k)? {
+        Some(v) => Ok(Some(v.extract()?)),
+        None => Ok(None),
+    }
 }
 
 // Silence unused warnings for items kept for crate-level docs / re-export plans.

@@ -3,7 +3,7 @@
 //! Wraps the generated constants in mitch with convenient lookup APIs.
 //! Types (MarketProvider, ProviderMatch) remain defined in mitch.
 
-use mitch::constants::{resolve_market_providers, market_providers_by_id};
+use mitch::constants::{market_providers_by_id, resolve_market_providers};
 use mitch::market_providers::MarketProvider;
 
 /// Get market provider by numeric ID.

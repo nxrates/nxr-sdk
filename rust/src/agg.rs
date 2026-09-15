@@ -86,7 +86,11 @@ const EMA_ALPHA: f64 = 0.01;
 
 impl Default for RunningStats {
     fn default() -> Self {
-        Self { ema_mean: 0.0, ema_var: 0.0, count: 0 }
+        Self {
+            ema_mean: 0.0,
+            ema_var: 0.0,
+            count: 0,
+        }
     }
 }
 
@@ -106,7 +110,11 @@ impl RunningStats {
             0.0
         } else {
             let stddev = self.ema_var.sqrt();
-            if stddev < 1e-12 { 0.0 } else { delta.abs() / stddev }
+            if stddev < 1e-12 {
+                0.0
+            } else {
+                delta.abs() / stddev
+            }
         };
 
         self.ema_mean += EMA_ALPHA * delta;

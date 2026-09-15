@@ -22,8 +22,8 @@ use pyo3::exceptions::{PyRuntimeError, PyStopIteration};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use mitch::header::MitchHeader;
 use mitch::common::{message_sizes, message_type};
+use mitch::header::MitchHeader;
 use mitch::timestamp;
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -69,9 +69,11 @@ impl MulticastSubscriber {
         max_frame: usize,
         queue_depth: usize,
     ) -> PyResult<Self> {
-        let group_ip: Ipv4Addr = group.parse()
+        let group_ip: Ipv4Addr = group
+            .parse()
             .map_err(|e| PyRuntimeError::new_err(format!("bad group ip {group:?}: {e}")))?;
-        let iface_ip: Ipv4Addr = iface.parse()
+        let iface_ip: Ipv4Addr = iface
+            .parse()
             .map_err(|e| PyRuntimeError::new_err(format!("bad iface ip {iface:?}: {e}")))?;
 
         let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
@@ -91,7 +93,11 @@ impl MulticastSubscriber {
         let (tx, rx) = stdmpsc::channel::<Vec<u8>>();
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let shutdown_t = shutdown.clone();
-        let queue_cap = if queue_depth == 0 { usize::MAX } else { queue_depth };
+        let queue_cap = if queue_depth == 0 {
+            usize::MAX
+        } else {
+            queue_depth
+        };
 
         let join = thread::Builder::new()
             .name(format!("nxr-mc-{group}:{port}"))
@@ -114,8 +120,10 @@ impl MulticastSubscriber {
                             depth = depth.saturating_add(1);
                         }
                         Ok(_) => { /* short frame; skip */ }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut => {
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
                             // timeout — loop and re-check shutdown
                         }
                         Err(_e) => {
@@ -138,7 +146,9 @@ impl MulticastSubscriber {
 
     /// Blocking iterator: yields one decoded `IndexRecord` per call. Frames
     /// whose message type ≠ 'i' (Index) are skipped silently.
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> { slf }
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
 
     fn __next__(&self, py: Python<'_>) -> PyResult<PyObject> {
         loop {
@@ -199,7 +209,8 @@ impl MulticastSubscriber {
 
     /// Stop background reader and release the socket. Idempotent.
     fn close(&self) {
-        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         // Drop receiver so the thread's tx.send fails on next iter and exits.
         if let Ok(mut g) = self.rx.lock() {
             g.take();
@@ -211,7 +222,9 @@ impl MulticastSubscriber {
         }
     }
 
-    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> { slf }
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
 
     #[pyo3(signature = (_exc_type=None, _exc=None, _tb=None))]
     fn __exit__(&self, _exc_type: Option<PyObject>, _exc: Option<PyObject>, _tb: Option<PyObject>) {
@@ -219,7 +232,10 @@ impl MulticastSubscriber {
     }
 
     fn __repr__(&self) -> String {
-        format!("MulticastSubscriber(group={:?}, port={})", self.group, self.port)
+        format!(
+            "MulticastSubscriber(group={:?}, port={})",
+            self.group, self.port
+        )
     }
 }
 
@@ -240,7 +256,9 @@ fn recv_once(rx: &Mutex<Option<stdmpsc::Receiver<Vec<u8>>>>, to: Option<Duration
         Ok(g) => g,
         Err(_) => return RecvOnce::Closed,
     };
-    let Some(rx) = guard.as_ref() else { return RecvOnce::Closed; };
+    let Some(rx) = guard.as_ref() else {
+        return RecvOnce::Closed;
+    };
     match to {
         Some(d) => match rx.recv_timeout(d) {
             Ok(buf) => RecvOnce::Frame(buf),
@@ -255,9 +273,13 @@ fn recv_once(rx: &Mutex<Option<stdmpsc::Receiver<Vec<u8>>>>, to: Option<Duration
 }
 
 fn decode_index_record(buf: &[u8]) -> Option<NIndexRecord> {
-    if buf.len() < 56 { return None; }
+    if buf.len() < 56 {
+        return None;
+    }
     let header = MitchHeader::unpack(&buf[..16]).ok()?;
-    if header.message_type() != message_type::INDEX { return None; }
+    if header.message_type() != message_type::INDEX {
+        return None;
+    }
     // Body is 40 bytes at offset 16. Construct via bytemuck cast over the
     // first 56 bytes (header + body) — IndexRecord is repr(C, packed).
     let bytes: &[u8; 56] = buf[..56].try_into().ok()?;

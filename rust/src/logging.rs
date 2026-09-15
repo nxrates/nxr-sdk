@@ -9,18 +9,16 @@
 //! The log level filter honours `RUST_LOG` first, falling back to the `level`
 //! arg passed to [`init`].
 
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// Initialize structured logging with the given level filter.
 ///
 /// Respects `RUST_LOG` for per-target filtering and `NXR_LOG_FORMAT=json` to
 /// switch to JSON output for multi-node log aggregation.
 pub fn init(level: &str) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
-    let format = std::env::var("NXR_LOG_FORMAT")
-        .unwrap_or_else(|_| "compact".to_string());
+    let format = std::env::var("NXR_LOG_FORMAT").unwrap_or_else(|_| "compact".to_string());
 
     match format.as_str() {
         "json" => {

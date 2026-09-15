@@ -49,10 +49,10 @@ pub struct BarAccumulator {
 
     // Return-based accumulators
     prev_mid: f64,
-    rv_sum: f64,           // Σ r² (realized variance)
-    prev_abs_r: f64,       // sentinel < 0 until first return computed
-    bipower_sum: f64,      // Σ |r_t|·|r_{t-1}| for t ≥ 2
-    max_abs_r: f64,        // max |r_t|
+    rv_sum: f64,      // Σ r² (realized variance)
+    prev_abs_r: f64,  // sentinel < 0 until first return computed
+    bipower_sum: f64, // Σ |r_t|·|r_{t-1}| for t ≥ 2
+    max_abs_r: f64,   // max |r_t|
 
     // Signed order-flow imbalance: Σ sign(r_t) · (vbid+vask)_t.
     // OFI numerator + denominator share scope (tick 2 onward).
@@ -73,14 +73,33 @@ pub struct BarAccumulator {
 impl BarAccumulator {
     pub fn new() -> Self {
         Self {
-            open: 0.0, high: f64::NEG_INFINITY, low: f64::INFINITY, close: 0.0,
-            vbid: 0, vask: 0, tick_count: 0, open_mts: 0, close_mts: 0,
-            first_ms: 0.0, sum_x: 0.0, sum_y: 0.0, sum_xy: 0.0, sum_xx: 0.0, last_x: 0.0,
-            prev_mid: 0.0, rv_sum: 0.0,
-            prev_abs_r: -1.0, bipower_sum: 0.0, max_abs_r: 0.0,
-            ofi_sum: 0.0, ofi_total_vol: 0.0,
-            sum_spread_bps: 0.0, n_spread_samples: 0,
-            sum_ci_ubp: 0.0, sum_accepted: 0, sum_rejected: 0,
+            open: 0.0,
+            high: f64::NEG_INFINITY,
+            low: f64::INFINITY,
+            close: 0.0,
+            vbid: 0,
+            vask: 0,
+            tick_count: 0,
+            open_mts: 0,
+            close_mts: 0,
+            first_ms: 0.0,
+            sum_x: 0.0,
+            sum_y: 0.0,
+            sum_xy: 0.0,
+            sum_xx: 0.0,
+            last_x: 0.0,
+            prev_mid: 0.0,
+            rv_sum: 0.0,
+            prev_abs_r: -1.0,
+            bipower_sum: 0.0,
+            max_abs_r: 0.0,
+            ofi_sum: 0.0,
+            ofi_total_vol: 0.0,
+            sum_spread_bps: 0.0,
+            n_spread_samples: 0,
+            sum_ci_ubp: 0.0,
+            sum_accepted: 0,
+            sum_rejected: 0,
         }
     }
 
@@ -113,8 +132,12 @@ impl BarAccumulator {
             self.open_mts = mts;
             self.first_ms = epoch_ms as f64;
         }
-        if mid > self.high { self.high = mid; }
-        if mid < self.low { self.low = mid; }
+        if mid > self.high {
+            self.high = mid;
+        }
+        if mid < self.low {
+            self.low = mid;
+        }
         self.close = mid;
         self.close_mts = mts;
         self.vbid += vbid as u64;
@@ -154,7 +177,13 @@ impl BarAccumulator {
             self.prev_abs_r = abs_r;
             // Signed OFI: attribute this observation's volume to the sign of r_t.
             // OFI numerator + denominator share scope (tick 2 onward).
-            let sign = if r > 0.0 { 1.0 } else if r < 0.0 { -1.0 } else { 0.0 };
+            let sign = if r > 0.0 {
+                1.0
+            } else if r < 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
             let tick_vol = vbid as f64 + vask as f64;
             self.ofi_sum += sign * tick_vol;
             self.ofi_total_vol += tick_vol;
@@ -230,9 +259,15 @@ impl BarAccumulator {
         };
 
         let mut bar = Bar::new_ohlcv(
-            self.open_mts, self.close_mts,
-            self.open, self.high, self.low, self.close,
-            vbid, vask, self.tick_count,
+            self.open_mts,
+            self.close_mts,
+            self.open,
+            self.high,
+            self.low,
+            self.close,
+            vbid,
+            vask,
+            self.tick_count,
         );
         bar.realized_var = realized_var;
         bar.bipower_var = bipower_var;
@@ -251,7 +286,9 @@ impl BarAccumulator {
 
     /// Number of observations ingested since last flush.
     #[inline]
-    pub fn count(&self) -> u32 { self.tick_count }
+    pub fn count(&self) -> u32 {
+        self.tick_count
+    }
 
     fn reset(&mut self) {
         *self = Self::new();
@@ -259,7 +296,9 @@ impl BarAccumulator {
 }
 
 impl Default for BarAccumulator {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Create a flat (zero-tick) bar for gap filling.
@@ -269,15 +308,7 @@ pub fn flat_bar(bucket_open_ms: i64, ref_price: f64) -> Bar {
     let open_mts = timestamp::from_epoch_ms(bucket_open_ms);
     let close_mts = timestamp::from_epoch_ms(bucket_open_ms + BAR_MS - 1);
     let mut b = Bar::new_ohlcv(
-        open_mts,
-        close_mts,
-        ref_price,
-        ref_price,
-        ref_price,
-        ref_price,
-        0,
-        0,
-        0,
+        open_mts, close_mts, ref_price, ref_price, ref_price, ref_price, 0, 0, 0,
     );
     // Provenance (GATE-3): mark gap-fill so consumers can render (doji) or
     // exempt (certifier) instead of guessing from tick_count == 0.

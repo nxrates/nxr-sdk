@@ -50,7 +50,7 @@ impl ParamsLock {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
                         format!("lock {} after {:?}: {}", lock_path.display(), TIMEOUT, e),
-                    ))
+                    ));
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
             }

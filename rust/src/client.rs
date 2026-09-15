@@ -480,12 +480,13 @@ impl NxrClient {
                 tickers: vec![],
             });
         }
-        let csv = syms.iter().map(|s| url_sym(s)).collect::<Vec<_>>().join(",");
-        self.json_get(&format!(
-            "/v1/tickers/detail?symbols={}",
-            urlencoding(&csv)
-        ))
-        .await
+        let csv = syms
+            .iter()
+            .map(|s| url_sym(s))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.json_get(&format!("/v1/tickers/detail?symbols={}", urlencoding(&csv)))
+            .await
     }
 
     /// `GET /v1/tickers/ids`: the FULL servable universe as MITCH ticker ids,

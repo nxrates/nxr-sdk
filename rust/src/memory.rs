@@ -105,7 +105,8 @@ pub(crate) fn available_memory_bytes() -> Option<u64> {
         let mut inactive: u64 = 0;
         let mut speculative: u64 = 0;
         for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("Mach Virtual Memory Statistics: (page size of ") {
+            if let Some(rest) = line.strip_prefix("Mach Virtual Memory Statistics: (page size of ")
+            {
                 if let Some(num) = rest.split_whitespace().next() {
                     if let Ok(n) = num.parse::<u64>() {
                         page_size = n;
@@ -120,7 +121,11 @@ pub(crate) fn available_memory_bytes() -> Option<u64> {
             }
         }
         let pages = free.saturating_add(inactive).saturating_add(speculative);
-        if pages == 0 { None } else { Some(pages.saturating_mul(page_size)) }
+        if pages == 0 {
+            None
+        } else {
+            Some(pages.saturating_mul(page_size))
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -198,20 +203,21 @@ pub fn default_cap_bytes() -> u64 {
     // load 337 / NodeNotReady (2026-07-25). The env var may only ever LOWER the
     // computed cap; if it asks for more than the host or cgroup can safely give,
     // it is clamped and we say so loudly.
-    let requested = std::env::var("NXR_MAX_MEM_GB").ok().and_then(|s| {
-        match s.trim().parse::<u64>() {
-            Ok(gb) if gb > 0 => Some(gb * GIB),
-            _ => {
-                warn!("NXR_MAX_MEM_GB={:?} is not a positive integer, ignoring", s);
-                None
-            }
-        }
-    });
+    let requested =
+        std::env::var("NXR_MAX_MEM_GB")
+            .ok()
+            .and_then(|s| match s.trim().parse::<u64>() {
+                Ok(gb) if gb > 0 => Some(gb * GIB),
+                _ => {
+                    warn!("NXR_MAX_MEM_GB={:?} is not a positive integer, ignoring", s);
+                    None
+                }
+            });
     let physical_cap = physical_memory_bytes()
         .map(|total| (total as f64 * DEFAULT_PHYSICAL_FRACTION) as u64)
         .unwrap_or(FALLBACK_CAP_BYTES);
-    let available_cap = available_memory_bytes()
-        .map(|avail| (avail as f64 * DEFAULT_AVAILABLE_FRACTION) as u64);
+    let available_cap =
+        available_memory_bytes().map(|avail| (avail as f64 * DEFAULT_AVAILABLE_FRACTION) as u64);
     // Container cgroup limit (k8s memory.max). 0.90 leaves headroom for the
     // allocator/stacks below the hard cgroup ceiling so our guard aborts
     // before the kernel OOM-killer does.
@@ -325,16 +331,18 @@ fn spawn_rss_watchdog(cap_bytes: u64) {
     let poll = std::time::Duration::from_millis(1000);
     let res = std::thread::Builder::new()
         .name("nxr-memguard".into())
-        .spawn(move || loop {
-            std::thread::sleep(poll);
-            if let Some(rss) = process_rss_bytes(pid) {
-                if rss > threshold {
-                    error!(
-                        rss_gib = rss / GIB,
-                        cap_gib = cap_bytes / GIB,
-                        "process RSS exceeded 80% of cap; aborting to protect host"
-                    );
-                    std::process::abort();
+        .spawn(move || {
+            loop {
+                std::thread::sleep(poll);
+                if let Some(rss) = process_rss_bytes(pid) {
+                    if rss > threshold {
+                        error!(
+                            rss_gib = rss / GIB,
+                            cap_gib = cap_bytes / GIB,
+                            "process RSS exceeded 80% of cap; aborting to protect host"
+                        );
+                        std::process::abort();
+                    }
                 }
             }
         });

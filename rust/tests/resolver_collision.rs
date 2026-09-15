@@ -411,8 +411,17 @@ fn crypto_quoted_bases_never_lose_to_an_equity() {
     // and INF now resolves to the Informa equity, which is the correct answer
     // once no crypto INF is served.
     for sym in [
-        "CFG/USDT", "MET/USDT", "FF/USDT", "BARD/USDT", "ENS/USDT", "GNO/USDT",
-        "GRT/USDT", "KMNO/USDT", "RENDER/USDT", "RNDR/USDT", "XVS/USDT",
+        "CFG/USDT",
+        "MET/USDT",
+        "FF/USDT",
+        "BARD/USDT",
+        "ENS/USDT",
+        "GNO/USDT",
+        "GRT/USDT",
+        "KMNO/USDT",
+        "RENDER/USDT",
+        "RNDR/USDT",
+        "XVS/USDT",
     ] {
         let id = nxr_sdk::try_resolve_ticker_id(sym)
             .unwrap_or_else(|| panic!("{sym} unresolvable: would shard under an FNV phantom id"));

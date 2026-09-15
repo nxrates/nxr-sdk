@@ -37,7 +37,10 @@ impl Health {
     /// for an idle-but-connected transport (no market data during off-hours is
     /// not a fault).
     pub fn ok() -> Self {
-        Health { ok: true, reason: None }
+        Health {
+            ok: true,
+            reason: None,
+        }
     }
 
     /// The pod must be restarted. `reason` is surfaced on `/health` so a
@@ -107,7 +110,6 @@ impl TransportHealth {
         }
     }
 }
-
 
 /// Process-global health probe. Default (nothing registered) = healthy.
 /// Registered once at startup by a transport-owning binary.
@@ -227,4 +229,3 @@ mod tests {
         assert!(h.health(1, 60 * 60 * 1000).is_ok());
     }
 }
-

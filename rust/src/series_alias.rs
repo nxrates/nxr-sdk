@@ -142,7 +142,13 @@ mod tests {
     #[test]
     fn cat2_wraps_share_btc_series_but_keep_distinct_id() {
         let btc_usdt = id_of("BTC/USDT");
-        for w in ["WBTC/USDT", "CBBTC/USDT", "TBTC/USDT", "BTCB/USDT", "BBTC/USDT"] {
+        for w in [
+            "WBTC/USDT",
+            "CBBTC/USDT",
+            "TBTC/USDT",
+            "BTCB/USDT",
+            "BBTC/USDT",
+        ] {
             let wid = id_of(w);
             assert_ne!(wid, btc_usdt, "{w} must keep a DISTINCT exposed ticker_id");
             assert_eq!(
@@ -187,7 +193,11 @@ mod tests {
         ] {
             let (w, u) = (id_of(wrap), id_of(under));
             assert_ne!(w, u, "{wrap} must keep a DISTINCT exposed ticker_id");
-            assert_eq!(series_canonical_ticker_id(w), u, "{wrap} series-shares {under}");
+            assert_eq!(
+                series_canonical_ticker_id(w),
+                u,
+                "{wrap} series-shares {under}"
+            );
             assert_eq!(peg_asset(base_asset(w)), base_asset(u), "{wrap} pegs 1:1");
         }
     }
@@ -199,8 +209,14 @@ mod tests {
         let root = std::path::Path::new("/data");
         for (wrap, under) in [("EURC/USD", "EUR/USD"), ("WBTC/USDT", "BTC/USDT")] {
             let (w, u) = (id_of(wrap), id_of(under));
-            assert_eq!(crate::shard::idx_dir(root, w), crate::shard::idx_dir(root, u));
-            assert_eq!(crate::shard::bars_dir(root, w), crate::shard::bars_dir(root, u));
+            assert_eq!(
+                crate::shard::idx_dir(root, w),
+                crate::shard::idx_dir(root, u)
+            );
+            assert_eq!(
+                crate::shard::bars_dir(root, w),
+                crate::shard::bars_dir(root, u)
+            );
             assert!(
                 !crate::shard::idx_dir(root, w).ends_with(w.to_string()),
                 "{wrap} must not name its own idx dir"
@@ -215,6 +231,10 @@ mod tests {
         let eth_usdt = id_of("ETH/USDT");
         assert_eq!(series_canonical_ticker_id(eth_usdt), eth_usdt);
         let cbeth = id_of("cbETH/USDT");
-        assert_eq!(series_canonical_ticker_id(cbeth), cbeth, "cbETH not series-shared");
+        assert_eq!(
+            series_canonical_ticker_id(cbeth),
+            cbeth,
+            "cbETH not series-shared"
+        );
     }
 }

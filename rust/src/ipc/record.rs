@@ -39,7 +39,10 @@ pub struct IndexRecord {
 }
 
 // Compile-time size assertion: 16 + 40 = 56.
-const _: () = assert!(core::mem::size_of::<IndexRecord>() == 56, "IndexRecord must be exactly 56 bytes");
+const _: () = assert!(
+    core::mem::size_of::<IndexRecord>() == 56,
+    "IndexRecord must be exactly 56 bytes"
+);
 
 // SAFETY: Both MitchHeader and Index are bytemuck::Pod under the `bytemuck`
 // feature (enabled in this crate). IndexRecord is `#[repr(C, packed)]` with

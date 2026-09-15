@@ -46,7 +46,9 @@ impl IndexRecord {
         let index = MIndex::new(
             ticker, bid, ask, ci, vbid, vask, tick_count, confidence, accepted, rejected,
         );
-        Self { inner: NIndexRecord::new(header, index) }
+        Self {
+            inner: NIndexRecord::new(header, index),
+        }
     }
 
     /// Unix-epoch ms decoded from the 16B header's u48 mts.
@@ -58,49 +60,79 @@ impl IndexRecord {
     }
 
     #[getter]
-    fn ticker(&self) -> u64 { self.inner.index.ticker }
+    fn ticker(&self) -> u64 {
+        self.inner.index.ticker
+    }
 
     #[getter]
-    fn provider(&self) -> u16 { self.inner.header.provider_id() }
+    fn provider(&self) -> u16 {
+        self.inner.header.provider_id()
+    }
 
     #[getter]
-    fn sequence(&self) -> u16 { self.inner.header.sequence }
+    fn sequence(&self) -> u16 {
+        self.inner.header.sequence
+    }
 
     #[getter]
-    fn bid(&self) -> f64 { self.inner.index.bid }
+    fn bid(&self) -> f64 {
+        self.inner.index.bid
+    }
 
     #[getter]
-    fn ask(&self) -> f64 { self.inner.index.ask }
+    fn ask(&self) -> f64 {
+        self.inner.index.ask
+    }
 
     #[getter]
-    fn mid(&self) -> f64 { self.inner.index.mid() }
+    fn mid(&self) -> f64 {
+        self.inner.index.mid()
+    }
 
     #[getter]
-    fn spread_bps(&self) -> f64 { self.inner.index.spread_bps() }
+    fn spread_bps(&self) -> f64 {
+        self.inner.index.spread_bps()
+    }
 
     #[getter]
-    fn ci(&self) -> u16 { self.inner.index.ci }
+    fn ci(&self) -> u16 {
+        self.inner.index.ci
+    }
 
     #[getter]
-    fn ci_price(&self) -> f64 { self.inner.index.ci_price() }
+    fn ci_price(&self) -> f64 {
+        self.inner.index.ci_price()
+    }
 
     #[getter]
-    fn vbid(&self) -> u32 { self.inner.index.vbid }
+    fn vbid(&self) -> u32 {
+        self.inner.index.vbid
+    }
 
     #[getter]
-    fn vask(&self) -> u32 { self.inner.index.vask }
+    fn vask(&self) -> u32 {
+        self.inner.index.vask
+    }
 
     #[getter]
-    fn tick_count(&self) -> u16 { self.inner.index.tick_count }
+    fn tick_count(&self) -> u16 {
+        self.inner.index.tick_count
+    }
 
     #[getter]
-    fn confidence(&self) -> u8 { self.inner.index.confidence }
+    fn confidence(&self) -> u8 {
+        self.inner.index.confidence
+    }
 
     #[getter]
-    fn accepted(&self) -> u8 { self.inner.index.accepted }
+    fn accepted(&self) -> u8 {
+        self.inner.index.accepted
+    }
 
     #[getter]
-    fn rejected(&self) -> u8 { self.inner.index.rejected }
+    fn rejected(&self) -> u8 {
+        self.inner.index.rejected
+    }
 
     /// Wire-format bytes (56 B).
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
@@ -110,9 +142,16 @@ impl IndexRecord {
     fn __repr__(&self) -> String {
         format!(
             "IndexRecord(ts_ms={}, provider={}, ticker={}, bid={}, ask={}, mid={}, ci={}, accepted={}, rejected={}, confidence={})",
-            self.ts_ms(), self.provider(), self.ticker(),
-            self.bid(), self.ask(), self.mid(),
-            self.ci(), self.accepted(), self.rejected(), self.confidence(),
+            self.ts_ms(),
+            self.provider(),
+            self.ticker(),
+            self.bid(),
+            self.ask(),
+            self.mid(),
+            self.ci(),
+            self.accepted(),
+            self.rejected(),
+            self.confidence(),
         )
     }
 }
@@ -143,63 +182,101 @@ impl Bar {
         let open_mts = timestamp::from_epoch_ms(open_ms);
         let close_mts = timestamp::from_epoch_ms(close_ms);
         Self {
-            inner: MBar::new_ohlcv(open_mts, close_mts, open, high, low, close, vbid, vask, tick_count),
+            inner: MBar::new_ohlcv(
+                open_mts, close_mts, open, high, low, close, vbid, vask, tick_count,
+            ),
         }
     }
 
     #[getter]
-    fn open_ms(&self) -> i64 { self.inner.open_time_ms() }
+    fn open_ms(&self) -> i64 {
+        self.inner.open_time_ms()
+    }
 
     #[getter]
-    fn close_ms(&self) -> i64 { self.inner.close_time_ms() }
+    fn close_ms(&self) -> i64 {
+        self.inner.close_time_ms()
+    }
 
     #[getter]
-    fn open(&self) -> f64 { self.inner.open }
+    fn open(&self) -> f64 {
+        self.inner.open
+    }
 
     #[getter]
-    fn high(&self) -> f64 { self.inner.high }
+    fn high(&self) -> f64 {
+        self.inner.high
+    }
 
     #[getter]
-    fn low(&self) -> f64 { self.inner.low }
+    fn low(&self) -> f64 {
+        self.inner.low
+    }
 
     #[getter]
-    fn close(&self) -> f64 { self.inner.close }
+    fn close(&self) -> f64 {
+        self.inner.close
+    }
 
     #[getter]
-    fn vbid(&self) -> u32 { self.inner.vbid }
+    fn vbid(&self) -> u32 {
+        self.inner.vbid
+    }
 
     #[getter]
-    fn vask(&self) -> u32 { self.inner.vask }
+    fn vask(&self) -> u32 {
+        self.inner.vask
+    }
 
     #[getter]
-    fn tick_count(&self) -> u32 { self.inner.tick_count }
+    fn tick_count(&self) -> u32 {
+        self.inner.tick_count
+    }
 
     #[getter]
-    fn realized_var(&self) -> f32 { self.inner.realized_var }
+    fn realized_var(&self) -> f32 {
+        self.inner.realized_var
+    }
 
     #[getter]
-    fn bipower_var(&self) -> f32 { self.inner.bipower_var }
+    fn bipower_var(&self) -> f32 {
+        self.inner.bipower_var
+    }
 
     #[getter]
-    fn drift(&self) -> f32 { self.inner.drift }
+    fn drift(&self) -> f32 {
+        self.inner.drift
+    }
 
     #[getter]
-    fn vol_imbalance(&self) -> f32 { self.inner.vol_imbalance }
+    fn vol_imbalance(&self) -> f32 {
+        self.inner.vol_imbalance
+    }
 
     #[getter]
-    fn avg_spread_bps(&self) -> f32 { self.inner.avg_spread_bps }
+    fn avg_spread_bps(&self) -> f32 {
+        self.inner.avg_spread_bps
+    }
 
     #[getter]
-    fn max_abs_return(&self) -> f32 { self.inner.max_abs_return }
+    fn max_abs_return(&self) -> f32 {
+        self.inner.max_abs_return
+    }
 
     #[getter]
-    fn avg_ci_ubp(&self) -> u16 { self.inner.avg_ci_ubp }
+    fn avg_ci_ubp(&self) -> u16 {
+        self.inner.avg_ci_ubp
+    }
 
     #[getter]
-    fn reject_rate(&self) -> u16 { self.inner.reject_rate }
+    fn reject_rate(&self) -> u16 {
+        self.inner.reject_rate
+    }
 
     #[getter]
-    fn kind(&self) -> u8 { self.inner.kind }
+    fn kind(&self) -> u8 {
+        self.inner.kind
+    }
 
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         pyo3::types::PyBytes::new_bound(py, bytemuck::bytes_of(&self.inner))
@@ -208,9 +285,15 @@ impl Bar {
     fn __repr__(&self) -> String {
         format!(
             "Bar(open_ms={}, close_ms={}, o={}, h={}, l={}, c={}, vbid={}, vask={}, n={})",
-            self.open_ms(), self.close_ms(),
-            self.open(), self.high(), self.low(), self.close(),
-            self.vbid(), self.vask(), self.tick_count(),
+            self.open_ms(),
+            self.close_ms(),
+            self.open(),
+            self.high(),
+            self.low(),
+            self.close(),
+            self.vbid(),
+            self.vask(),
+            self.tick_count(),
         )
     }
 }
@@ -226,26 +309,40 @@ pub struct Tick {
 impl Tick {
     #[new]
     fn new(ticker: u64, bid: f64, ask: f64, vbid: u32, vask: u32) -> Self {
-        Self { inner: MTick::new_unchecked(ticker, bid, ask, vbid, vask) }
+        Self {
+            inner: MTick::new_unchecked(ticker, bid, ask, vbid, vask),
+        }
     }
 
     #[getter]
-    fn ticker(&self) -> u64 { self.inner.ticker }
+    fn ticker(&self) -> u64 {
+        self.inner.ticker
+    }
 
     #[getter]
-    fn bid(&self) -> f64 { self.inner.bid }
+    fn bid(&self) -> f64 {
+        self.inner.bid
+    }
 
     #[getter]
-    fn ask(&self) -> f64 { self.inner.ask }
+    fn ask(&self) -> f64 {
+        self.inner.ask
+    }
 
     #[getter]
-    fn vbid(&self) -> u32 { self.inner.vbid }
+    fn vbid(&self) -> u32 {
+        self.inner.vbid
+    }
 
     #[getter]
-    fn vask(&self) -> u32 { self.inner.vask }
+    fn vask(&self) -> u32 {
+        self.inner.vask
+    }
 
     #[getter]
-    fn mid(&self) -> f64 { (self.inner.bid + self.inner.ask) / 2.0 }
+    fn mid(&self) -> f64 {
+        (self.inner.bid + self.inner.ask) / 2.0
+    }
 
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         pyo3::types::PyBytes::new_bound(py, bytemuck::bytes_of(&self.inner))
@@ -254,7 +351,11 @@ impl Tick {
     fn __repr__(&self) -> String {
         format!(
             "Tick(ticker={}, bid={}, ask={}, vbid={}, vask={})",
-            self.ticker(), self.bid(), self.ask(), self.vbid(), self.vask(),
+            self.ticker(),
+            self.bid(),
+            self.ask(),
+            self.vbid(),
+            self.vask(),
         )
     }
 }

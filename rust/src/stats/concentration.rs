@@ -29,7 +29,11 @@ pub fn hhi(weights: &[f64]) -> f64 {
 /// Returns 0.0 when `Σw² <= 0` (nothing accumulated).
 #[inline]
 pub fn n_eff_from_sums(w_sum: f64, w_sq_sum: f64) -> f64 {
-    if w_sq_sum > 0.0 { (w_sum * w_sum) / w_sq_sum } else { 0.0 }
+    if w_sq_sum > 0.0 {
+        (w_sum * w_sum) / w_sq_sum
+    } else {
+        0.0
+    }
 }
 
 /// Effective holder count over a weight vector: `1 / hhi(weights)`.

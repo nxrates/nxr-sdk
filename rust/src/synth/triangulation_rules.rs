@@ -56,39 +56,199 @@ pub struct SynthesisRuleSpec {
 /// 2. USDT/USDC = USDT/USD × (USDC/USD)⁻¹         (1 entry)
 pub const SYNTHESIS_RULES: &[SynthesisRuleSpec] = &[
     // ── USDT/<EM fiat> = USDT/USD × USD/<CCY> ──
-    SynthesisRuleSpec { out_sym: "USDT/JPY", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDJPY", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/MXN", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDMXN", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/SGD", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDSGD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/TRY", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDTRY", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/HKD", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDHKD", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/ZAR", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDZAR", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/CNH", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDCNH", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/INR", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDINR", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/NOK", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDNOK", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/SEK", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDSEK", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/DKK", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDDKK", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/PLN", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDPLN", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/HUF", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDHUF", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/CZK", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDCZK", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/BRL", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDBRL", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/KRW", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDKRW", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/AED", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDAED", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/PHP", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDPHP", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/THB", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDTHB", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/IDR", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDIDR", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/MYR", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDMYR", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/NGN", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDNGN", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/VND", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDVND", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/SAR", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDSAR", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/QAR", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDQAR", leg2_inv: false },
-    SynthesisRuleSpec { out_sym: "USDT/EGP", leg1_sym: "USDT/USD", leg1_inv: false, leg2_sym: "USDEGP", leg2_inv: false },
-
+    SynthesisRuleSpec {
+        out_sym: "USDT/JPY",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDJPY",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/MXN",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDMXN",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/SGD",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDSGD",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/TRY",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDTRY",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/HKD",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDHKD",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/ZAR",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDZAR",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/CNH",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDCNH",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/INR",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDINR",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/NOK",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDNOK",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/SEK",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDSEK",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/DKK",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDDKK",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/PLN",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDPLN",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/HUF",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDHUF",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/CZK",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDCZK",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/BRL",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDBRL",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/KRW",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDKRW",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/AED",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDAED",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/PHP",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDPHP",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/THB",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDTHB",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/IDR",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDIDR",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/MYR",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDMYR",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/NGN",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDNGN",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/VND",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDVND",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/SAR",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDSAR",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/QAR",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDQAR",
+        leg2_inv: false,
+    },
+    SynthesisRuleSpec {
+        out_sym: "USDT/EGP",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDEGP",
+        leg2_inv: false,
+    },
     // ── USDT/USDC = USDT/USD × (USDC/USD)⁻¹ ──
     // Only STABLE/USDC cross with both legs live. The NATIVE deep-book ticker
     // is USDC/USDT (kept untouched); this inverse form gives the BTR Stable
     // Core keeper a uniform X/USDC universe. Distinct ticker id, no overwrite.
-    SynthesisRuleSpec { out_sym: "USDT/USDC",  leg1_sym: "USDT/USD",  leg1_inv: false, leg2_sym: "USDC/USD", leg2_inv: true },
-
+    SynthesisRuleSpec {
+        out_sym: "USDT/USDC",
+        leg1_sym: "USDT/USD",
+        leg1_inv: false,
+        leg2_sym: "USDC/USD",
+        leg2_inv: true,
+    },
 ];
 
 #[cfg(test)]
@@ -99,7 +259,11 @@ mod tests {
     fn synthesis_rules_unique_outputs() {
         let mut seen = std::collections::HashSet::new();
         for r in SYNTHESIS_RULES {
-            assert!(seen.insert(r.out_sym), "duplicate synthesis out_sym: {}", r.out_sym);
+            assert!(
+                seen.insert(r.out_sym),
+                "duplicate synthesis out_sym: {}",
+                r.out_sym
+            );
         }
     }
 
@@ -128,12 +292,14 @@ mod tests {
             assert!(
                 !outs.contains(r.leg1_sym),
                 "{} leg1 {} chains off another synthesis output (compose-on-read can't recurse)",
-                r.out_sym, r.leg1_sym
+                r.out_sym,
+                r.leg1_sym
             );
             assert!(
                 !outs.contains(r.leg2_sym),
                 "{} leg2 {} chains off another synthesis output (compose-on-read can't recurse)",
-                r.out_sym, r.leg2_sym
+                r.out_sym,
+                r.leg2_sym
             );
         }
     }

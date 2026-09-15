@@ -668,8 +668,8 @@ pub fn resolve_ticker(
                         AssetClass::IP,
                         AssetClass::EQ,
                     ]
-                        .into_iter()
-                        .find_map(|c| RESOLVER.find(&remaining, base_threshold, Some(c)))
+                    .into_iter()
+                    .find_map(|c| RESOLVER.find(&remaining, base_threshold, Some(c)))
                 })
             });
         if let Some(base) = base_match {
@@ -943,7 +943,10 @@ mod admissibility_tests {
         .unwrap()
         .raw;
         assert_eq!(ticker_admissible(bad_base, &none), Err(TickerRefusal::Base));
-        assert_eq!(ticker_admissible(bad_quote, &none), Err(TickerRefusal::Quote));
+        assert_eq!(
+            ticker_admissible(bad_quote, &none),
+            Err(TickerRefusal::Quote)
+        );
         // The FNV phantom an unresolvable symbol used to mint decodes to noise.
         assert!(ticker_admissible(crate::phantom_ticker_id("EUR/USDT"), &none).is_err());
     }
@@ -998,7 +1001,11 @@ mod admissibility_tests {
                 Err(TickerRefusal::Base),
                 "{banned} as base"
             );
-            assert_eq!(ticker_admissible(BTC_USDC, &set), Ok(()), "{banned} unrelated");
+            assert_eq!(
+                ticker_admissible(BTC_USDC, &set),
+                Ok(()),
+                "{banned} unrelated"
+            );
         }
         let quote_banned: HashSet<String> = ["USDC".to_string()].into_iter().collect();
         assert_eq!(

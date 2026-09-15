@@ -2518,12 +2518,30 @@ lane_map:
         .expect("lane_map parses");
         assert_eq!(d.epoch, None, "packedV5 carries no epoch");
         let m = d.lane_map.expect("present");
-        assert_eq!(m[&0], LaneYml { global_index: 0, exp_bias: 28 });
+        assert_eq!(
+            m[&0],
+            LaneYml {
+                global_index: 0,
+                exp_bias: 28
+            }
+        );
         // KEYED BY IDX: idx 10 (WBTC) and idx 11 (CBBTC) are two feeds off the
         // ONE symbol BTC-USDC, and they must reach two distinct lanes. A
         // symbol-keyed map cannot express this at all.
-        assert_eq!(m[&10], LaneYml { global_index: 17, exp_bias: 45 });
-        assert_eq!(m[&11], LaneYml { global_index: 18, exp_bias: 45 });
+        assert_eq!(
+            m[&10],
+            LaneYml {
+                global_index: 17,
+                exp_bias: 45
+            }
+        );
+        assert_eq!(
+            m[&11],
+            LaneYml {
+                global_index: 18,
+                exp_bias: 45
+            }
+        );
         assert_eq!(m.len(), 3);
 
         // ABSENT is the default and the unchanged path — every live domain.
@@ -2543,15 +2561,12 @@ lane_map:
         );
         // …and an unknown key inside a lane is refused rather than ignored.
         assert!(
-            serde_yml::from_str::<SignedDomainYml>(
-                concat!(
-                    "name: n\nchain_id: 1\noracle: \"0x11\"\n",
-                    "lane_map:\n  7: { global_index: 1, exp_bias: 2, slot: 0 }\n"
-                )
-            )
+            serde_yml::from_str::<SignedDomainYml>(concat!(
+                "name: n\nchain_id: 1\noracle: \"0x11\"\n",
+                "lane_map:\n  7: { global_index: 1, exp_bias: 2, slot: 0 }\n"
+            ))
             .is_err(),
             "deny_unknown_fields must catch a typo'd lane key"
         );
     }
-
 }

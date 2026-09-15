@@ -163,8 +163,8 @@ impl WsClient {
     async fn send_sub(&mut self, op: &str, ids: &[&str]) -> Result<Vec<String>> {
         // `filter: true` is the OPT-IN into the filtered lane. A `sub` without
         // it is accounting-only and leaves the client on the full broadcast.
-        let env =
-            serde_json::json!({ "type": op, "kind": "idx", "ids": ids, "filter": true }).to_string();
+        let env = serde_json::json!({ "type": op, "kind": "idx", "ids": ids, "filter": true })
+            .to_string();
         self.inner
             .send(Message::Text(env.into()))
             .await

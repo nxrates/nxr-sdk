@@ -121,11 +121,7 @@ impl<T: Pod> AppendLog<T> {
         Self::open_inner(path, DEFAULT_SYNC_INTERVAL, true)
     }
 
-    fn open_inner(
-        path: impl AsRef<Path>,
-        sync_interval: Duration,
-        buffered: bool,
-    ) -> Result<Self> {
+    fn open_inner(path: impl AsRef<Path>, sync_interval: Duration, buffered: bool) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -223,7 +219,8 @@ impl<T: Pod> AppendLog<T> {
     /// syncfs after all dirty logs have flushed their buffers.
     pub fn flush_buffer_only(&mut self) -> Result<()> {
         if let Sink::Buffered(bw) = &mut self.file {
-            bw.flush().with_context(|| format!("buf flush {}", self.path))?;
+            bw.flush()
+                .with_context(|| format!("buf flush {}", self.path))?;
         }
         Ok(())
     }

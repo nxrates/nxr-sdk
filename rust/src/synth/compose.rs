@@ -132,7 +132,17 @@ mod tests {
 
     fn bar(o: f64, h: f64, l: f64, c: f64) -> Bar {
         // Grid-aligned S10 bucket (mts ticks); values are placeholders for the window.
-        let mut b = Bar::new_ohlcv(1_783_382_400_000, 1_783_382_410_000, o, h, l, c, 100, 120, 50);
+        let mut b = Bar::new_ohlcv(
+            1_783_382_400_000,
+            1_783_382_410_000,
+            o,
+            h,
+            l,
+            c,
+            100,
+            120,
+            50,
+        );
         b.avg_ci_ubp = encode_ci_ubp(300.0); // ~3 bps relative CI per leg
         b.avg_spread_bps = 1.5;
         b
@@ -149,8 +159,15 @@ mod tests {
         let btc = bar(60000.0, 60500.0, 59800.0, 60200.0);
         let x = compose_cross_s10(&legs2(), &[eth, btc]).unwrap();
         // Copy out of the packed struct before asserting (E0793).
-        let (open, high, low, close, flags, rv, ofi) =
-            (x.open, x.high, x.low, x.close, x.flags, x.realized_var, x.vol_imbalance);
+        let (open, high, low, close, flags, rv, ofi) = (
+            x.open,
+            x.high,
+            x.low,
+            x.close,
+            x.flags,
+            x.realized_var,
+            x.vol_imbalance,
+        );
         assert!((open - 1800.0 / 60000.0).abs() < 1e-12);
         assert!((close - 1810.0 / 60200.0).abs() < 1e-12);
         // Aligned corners: candidates are ETH.high/BTC.high and ETH.low/BTC.low;
@@ -193,7 +210,8 @@ mod tests {
         b.vbid = 80;
         b.tick_count = 40;
         b.reject_rate = 300;
-        let x = compose_cross_s10(&[Leg::new("A/USDT", 1), Leg::new("B/USDT", 1)], &[a, b]).unwrap();
+        let x =
+            compose_cross_s10(&[Leg::new("A/USDT", 1), Leg::new("B/USDT", 1)], &[a, b]).unwrap();
         let (vbid, tc, rr) = (x.vbid, x.tick_count, x.reject_rate);
         assert_eq!(vbid, 50); // min
         assert_eq!(tc, 40); // max — any leg activity keeps the bucket live

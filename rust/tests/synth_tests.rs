@@ -8,21 +8,31 @@
 
 use std::collections::HashMap;
 
-use nxr_sdk::synth::{
-    OhlcLite, RollingCorrelation, TimedOhlc, VarianceEstimator,
-    compute_synth_tick, reconstruct_synth_ohlc, reconstruct_synth_series_at_base_tf_then_rollup,
-};
-use nxr_sdk::synth::paths::{SynthPath, Leg};
+use nxr_sdk::synth::paths::{Leg, SynthPath};
 use nxr_sdk::synth::tick::LegTick;
+use nxr_sdk::synth::{
+    OhlcLite, RollingCorrelation, TimedOhlc, VarianceEstimator, compute_synth_tick,
+    reconstruct_synth_ohlc, reconstruct_synth_series_at_base_tf_then_rollup,
+};
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 fn tick(bid: f64, ask: f64) -> LegTick {
-    LegTick { bid, ask, mid: (bid + ask) / 2.0, conf: 10_000 }
+    LegTick {
+        bid,
+        ask,
+        mid: (bid + ask) / 2.0,
+        conf: 10_000,
+    }
 }
 
 fn tick_conf(bid: f64, ask: f64, conf: u16) -> LegTick {
-    LegTick { bid, ask, mid: (bid + ask) / 2.0, conf }
+    LegTick {
+        bid,
+        ask,
+        mid: (bid + ask) / 2.0,
+        conf,
+    }
 }
 
 fn close(a: f64, b: f64, abs_eps: f64) -> bool {
@@ -83,7 +93,7 @@ fn one_leg_inversion() {
 fn two_leg_ratio() {
     let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, LegTick> = HashMap::new();
-    legs.insert("ETH/USDT", tick(2_790.0, 2_810.0));    // mid 2800
+    legs.insert("ETH/USDT", tick(2_790.0, 2_810.0)); // mid 2800
     legs.insert("BTC/USDT", tick(99_500.0, 100_500.0)); // mid 100_000
     let out = compute_synth_tick(path, &legs).expect("composable");
     // mid ≈ 2800 / 100_000 = 0.028
@@ -134,7 +144,15 @@ fn missing_leg_returns_none() {
 fn nonpositive_quote_returns_none() {
     let path = mk_path("X", &[("BTC/USDT", 1)]);
     let mut legs: HashMap<&str, LegTick> = HashMap::new();
-    legs.insert("BTC/USDT", LegTick { bid: 0.0, ask: 100_500.0, mid: 50_250.0, conf: 10_000 });
+    legs.insert(
+        "BTC/USDT",
+        LegTick {
+            bid: 0.0,
+            ask: 100_500.0,
+            mid: 50_250.0,
+            conf: 10_000,
+        },
+    );
     assert!(compute_synth_tick(&path, &legs).is_none());
 }
 
@@ -176,8 +194,24 @@ fn bid_mid_ask_invariant() {
 fn ohlc_single_bucket_two_leg_ratio() {
     let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, OhlcLite> = HashMap::new();
-    legs.insert("ETH/USDT", OhlcLite { o: 2800.0, h: 2820.0, l: 2780.0, c: 2810.0 });
-    legs.insert("BTC/USDT", OhlcLite { o: 100_000.0, h: 100_500.0, l: 99_500.0, c: 100_200.0 });
+    legs.insert(
+        "ETH/USDT",
+        OhlcLite {
+            o: 2800.0,
+            h: 2820.0,
+            l: 2780.0,
+            c: 2810.0,
+        },
+    );
+    legs.insert(
+        "BTC/USDT",
+        OhlcLite {
+            o: 100_000.0,
+            h: 100_500.0,
+            l: 99_500.0,
+            c: 100_200.0,
+        },
+    );
     let synth = reconstruct_synth_ohlc(path, &legs, VarianceEstimator::RogersSatchell, |_, _| 0.0)
         .expect("composable");
     assert!(close(synth.o, 2800.0 / 100_000.0, 1e-9));
@@ -193,23 +227,55 @@ fn ohlc_single_bucket_two_leg_ratio() {
 fn parkinson_vs_rs_estimators_diverge() {
     let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, OhlcLite> = HashMap::new();
-    legs.insert("ETH/USDT", OhlcLite { o: 2800.0, h: 2820.0, l: 2780.0, c: 2810.0 });
-    legs.insert("BTC/USDT", OhlcLite { o: 100_000.0, h: 100_500.0, l: 99_500.0, c: 100_200.0 });
-    let park = reconstruct_synth_ohlc(path, &legs, VarianceEstimator::Parkinson, |_, _| 0.0).unwrap();
-    let rs   = reconstruct_synth_ohlc(path, &legs, VarianceEstimator::RogersSatchell, |_, _| 0.0).unwrap();
+    legs.insert(
+        "ETH/USDT",
+        OhlcLite {
+            o: 2800.0,
+            h: 2820.0,
+            l: 2780.0,
+            c: 2810.0,
+        },
+    );
+    legs.insert(
+        "BTC/USDT",
+        OhlcLite {
+            o: 100_000.0,
+            h: 100_500.0,
+            l: 99_500.0,
+            c: 100_200.0,
+        },
+    );
+    let park =
+        reconstruct_synth_ohlc(path, &legs, VarianceEstimator::Parkinson, |_, _| 0.0).unwrap();
+    let rs =
+        reconstruct_synth_ohlc(path, &legs, VarianceEstimator::RogersSatchell, |_, _| 0.0).unwrap();
     assert!(park.log_range > 0.0 && rs.log_range > 0.0);
     // They should not be identical for a non-trivial path; both within a factor of ~3.
     let ratio = park.log_range / rs.log_range;
-    assert!(ratio > 0.3 && ratio < 3.0, "park/rs ratio out of band: {ratio}");
+    assert!(
+        ratio > 0.3 && ratio < 3.0,
+        "park/rs ratio out of band: {ratio}"
+    );
 }
 
 #[test]
 fn ohlc_missing_leg_returns_none() {
     let path = &mk_path("ETH/BTC", &[("ETH/USDT", 1), ("BTC/USDT", -1)]);
     let mut legs: HashMap<&str, OhlcLite> = HashMap::new();
-    legs.insert("ETH/USDT", OhlcLite { o: 2800.0, h: 2820.0, l: 2780.0, c: 2810.0 });
+    legs.insert(
+        "ETH/USDT",
+        OhlcLite {
+            o: 2800.0,
+            h: 2820.0,
+            l: 2780.0,
+            c: 2810.0,
+        },
+    );
     // BTC/USDT missing.
-    assert!(reconstruct_synth_ohlc(path, &legs, VarianceEstimator::RogersSatchell, |_, _| 0.0).is_none());
+    assert!(
+        reconstruct_synth_ohlc(path, &legs, VarianceEstimator::RogersSatchell, |_, _| 0.0)
+            .is_none()
+    );
 }
 
 #[test]
@@ -273,7 +339,12 @@ fn rolling_correlation_tracks_pearson() {
         rc.add(z1, rho_true * z1 + c2 * z2);
     }
     let est = rc.value();
-    assert!((est - rho_true).abs() < 0.1, "estimate {} differs from true {}", est, rho_true);
+    assert!(
+        (est - rho_true).abs() < 0.1,
+        "estimate {} differs from true {}",
+        est,
+        rho_true
+    );
 }
 
 #[test]
@@ -373,8 +444,12 @@ fn to_ohlc(prices: &[f64], dt_sec: f64, base_tf_ms: i64) -> Vec<TimedOhlc> {
         let mut h = slice[0];
         let mut l = slice[0];
         for &p in slice {
-            if p > h { h = p; }
-            if p < l { l = p; }
+            if p > h {
+                h = p;
+            }
+            if p < l {
+                l = p;
+            }
         }
         out.push(TimedOhlc {
             ts: (i as f64 * dt_sec * 1000.0) as i64,
@@ -438,8 +513,12 @@ fn gbm_rs_rho_bias_under_3pct_across_tfs() {
             leg_series.insert("A", &a_ohlc);
             leg_series.insert("B", &b_ohlc);
             let est = reconstruct_synth_series_at_base_tf_then_rollup(
-                &path, &leg_series, base_tf_ms, tf_ms,
-                VarianceEstimator::RogersSatchell, |_, _| rho_true,
+                &path,
+                &leg_series,
+                base_tf_ms,
+                tf_ms,
+                VarianceEstimator::RogersSatchell,
+                |_, _| rho_true,
             );
             let truth = true_synth_ohlc(&a, &b, dt_sec, tf_ms);
             let bias = mean_log_range_bias(&est, &truth);
@@ -479,8 +558,12 @@ fn gbm_rho_zero_bias_under_20pct() {
         leg_series.insert("A", &a_ohlc);
         leg_series.insert("B", &b_ohlc);
         let est = reconstruct_synth_series_at_base_tf_then_rollup(
-            &path, &leg_series, base_tf_ms, tf_ms,
-            VarianceEstimator::RogersSatchell, |_, _| 0.0,
+            &path,
+            &leg_series,
+            base_tf_ms,
+            tf_ms,
+            VarianceEstimator::RogersSatchell,
+            |_, _| 0.0,
         );
         let truth = true_synth_ohlc(&a, &b, dt_sec, tf_ms);
         let bias = mean_log_range_bias(&est, &truth);

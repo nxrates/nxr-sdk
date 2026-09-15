@@ -43,10 +43,7 @@ pub struct SynthTick {
 ///
 /// A crossed quote in the output (`ask < bid`) collapses `conf` to `0` — caller
 /// can decide whether to treat as stale or surface anyway. This mirrors BTR.
-pub fn compute_synth_tick(
-    path: &SynthPath,
-    legs: &HashMap<&str, LegTick>,
-) -> Option<SynthTick> {
+pub fn compute_synth_tick(path: &SynthPath, legs: &HashMap<&str, LegTick>) -> Option<SynthTick> {
     let signed: Vec<(i8, LegTick)> = path
         .legs
         .iter()
@@ -61,7 +58,12 @@ pub fn compute_synth_tick(
 pub fn compose_legs(legs: &[(i8, LegTick)]) -> Option<SynthTick> {
     // Trivial-identity path (e.g. EUR/EUR with 0 legs) → 1.0 quote, full conf.
     if legs.is_empty() {
-        return Some(SynthTick { bid: 1.0, ask: 1.0, mid: 1.0, conf: 10_000 });
+        return Some(SynthTick {
+            bid: 1.0,
+            ask: 1.0,
+            mid: 1.0,
+            conf: 10_000,
+        });
     }
 
     let mut mid = 1.0_f64;
@@ -100,5 +102,10 @@ pub fn compose_legs(legs: &[(i8, LegTick)]) -> Option<SynthTick> {
         conf = 0;
     }
 
-    Some(SynthTick { bid, ask, mid, conf })
+    Some(SynthTick {
+        bid,
+        ask,
+        mid,
+        conf,
+    })
 }

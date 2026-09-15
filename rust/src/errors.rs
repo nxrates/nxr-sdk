@@ -270,9 +270,17 @@ impl std::fmt::Display for PlanLimitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code.as_str(), self.message)?;
         if let Some(v) = self.limit_value {
-            write!(f, " (plan='{}', limit_name='{}', limit_value={}", self.plan, self.limit_name, v)?;
+            write!(
+                f,
+                " (plan='{}', limit_name='{}', limit_value={}",
+                self.plan, self.limit_name, v
+            )?;
         } else {
-            write!(f, " (plan='{}', limit_name='{}'", self.plan, self.limit_name)?;
+            write!(
+                f,
+                " (plan='{}', limit_name='{}'",
+                self.plan, self.limit_name
+            )?;
         }
         if let Some(r) = self.requested {
             write!(f, ", requested={}", r)?;

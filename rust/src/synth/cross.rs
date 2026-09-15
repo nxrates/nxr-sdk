@@ -793,9 +793,7 @@ mod tests {
         let g = graph(&["USD/CHF", "USD/JPY"]);
         let r = g.route_sym("CHF/JPY", &blind).expect("routes");
         let c = r
-            .compose(|_| {
-                Some(lq(1.0, 1.0, 10_000, None))
-            })
+            .compose(|_| Some(lq(1.0, 1.0, 10_000, None)))
             .expect("composes");
         assert!(c.age_ms.is_none(), "unknown age must not read as fresh");
     }
@@ -807,7 +805,7 @@ mod tests {
         let chf = crate::resolve_ticker_id("USD/CHF");
         assert!(
             r.compose(|id| (id == chf).then_some(lq(0.8, 0.8, 9_000, Some(1))))
-            .is_none(),
+                .is_none(),
             "one leg present must not fabricate a price"
         );
     }
@@ -817,9 +815,7 @@ mod tests {
         let g = graph(&["USD/JPY"]);
         let r = g.route_sym("JPY/USD", &blind).expect("routes");
         let c = r
-            .compose(|_| {
-                Some(lq(150.0, 150.3, 9_000, Some(10)))
-            })
+            .compose(|_| Some(lq(150.0, 150.3, 9_000, Some(10))))
             .expect("composes");
         assert!(c.bid <= c.ask);
         assert!((c.bid - 1.0 / 150.3).abs() < 1e-12);
@@ -837,8 +833,16 @@ mod tests {
         assert_eq!(route(&g, "QCAD/USD"), vec![("USD/CAD".into(), -1)]);
         let q = |_| Some(lq(1.0913, 1.0915, 9_000, Some(70)));
         for (wrap, under) in [("EURC/USD", "EUR/USD"), ("QCAD/USD", "CAD/USD")] {
-            let w = g.route_sym(wrap, &blind).expect("routes").compose(q).expect("composes");
-            let u = g.route_sym(under, &blind).expect("routes").compose(q).expect("composes");
+            let w = g
+                .route_sym(wrap, &blind)
+                .expect("routes")
+                .compose(q)
+                .expect("composes");
+            let u = g
+                .route_sym(under, &blind)
+                .expect("routes")
+                .compose(q)
+                .expect("composes");
             assert_eq!(w.mid, u.mid, "{wrap} mid must equal {under} EXACTLY");
             assert_eq!(w.bid, u.bid);
             assert_eq!(w.ask, u.ask);

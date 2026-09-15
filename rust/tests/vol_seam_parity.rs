@@ -13,7 +13,7 @@
 
 use mitch::bar::Bar;
 use mitch::timestamp;
-use nxr_sdk::ohlc::{bar_to_ohlc, rollup, Ohlc};
+use nxr_sdk::ohlc::{Ohlc, bar_to_ohlc, rollup};
 use nxr_sdk::renko::{RenkoConfig, RenkoGenerator};
 use nxr_sdk::shard::{BAR_MS_S10, MS_PER_30MIN};
 use nxr_sdk::vol::{LiveVolRing, VolConfig, VolSource};
@@ -57,7 +57,17 @@ fn build_s10_stream(n_bins: usize) -> Vec<Bar> {
             let open_mts = timestamp::from_epoch_ms(ts);
             let close_mts = timestamp::from_epoch_ms(ts + BAR_MS_S10);
             // kind defaults to Kline (0) — matches s10 producer output.
-            bars.push(Bar::new_ohlcv(open_mts, close_mts, o, h, l, c, 0, 0, if flat { 0 } else { 1 }));
+            bars.push(Bar::new_ohlcv(
+                open_mts,
+                close_mts,
+                o,
+                h,
+                l,
+                c,
+                0,
+                0,
+                if flat { 0 } else { 1 },
+            ));
             px = c;
             ts += BAR_MS_S10;
         }
@@ -160,7 +170,10 @@ fn offline_vol_rows_match_live_ring_over_cooldown_boundary() {
     // 12h cooldown boundary = bin 24. Confirm σ continuity across it.
     let seam = (12 * 3600 * 1000 / MS_PER_30MIN) as usize; // = 24
     assert!(seam < n_bins);
-    assert!((offline[seam] - live[seam]).abs() < 1e-12, "seam-bin σ mismatch");
+    assert!(
+        (offline[seam] - live[seam]).abs() < 1e-12,
+        "seam-bin σ mismatch"
+    );
 
     // R1 NEGATIVE CONTROL — proves the fixture actually exercises the bug.
     // Feeding the ring by CLOSE time (the pre-fix production wiring) misplaces
@@ -194,7 +207,10 @@ fn brick_stream_continuous_at_seam() {
     let seam = 24usize;
     let sigma = rows[seam].max(1e-6);
 
-    let cfg = RenkoConfig { multiplier: 0.08, min_pct: 0.0001 };
+    let cfg = RenkoConfig {
+        multiplier: 0.08,
+        min_pct: 0.0001,
+    };
     let mut generator = RenkoGenerator::new(cfg).unwrap();
 
     let mut last_close: Option<f64> = None;
@@ -203,20 +219,21 @@ fn brick_stream_continuous_at_seam() {
     for i in 0..20_000i64 {
         // Trend up then down to force bricks both directions across the seam.
         p += if i < 10_000 { 0.02 } else { -0.02 };
-        generator.feed_tick_with_sigma(i, p, sigma, &mut |brick: &Bar| {
-            let b_open = brick.open;
-            let b_close = brick.close;
-            if let Some(lc) = last_close {
-                assert!(
-                    (b_open - lc).abs() < lc.abs() * 1e-9,
-                    "brick {n}: open {b_open} != prior close {lc}"
-                );
-            }
-            last_close = Some(b_close);
-            n += 1;
-            Ok(())
-        })
-        .unwrap();
+        generator
+            .feed_tick_with_sigma(i, p, sigma, &mut |brick: &Bar| {
+                let b_open = brick.open;
+                let b_close = brick.close;
+                if let Some(lc) = last_close {
+                    assert!(
+                        (b_open - lc).abs() < lc.abs() * 1e-9,
+                        "brick {n}: open {b_open} != prior close {lc}"
+                    );
+                }
+                last_close = Some(b_close);
+                n += 1;
+                Ok(())
+            })
+            .unwrap();
     }
     assert!(n > 0, "no bricks emitted across the seam");
 }

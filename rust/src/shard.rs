@@ -260,8 +260,7 @@ pub const ROLLOVER_SHIFT_MS_RENKO: i64 = 4_000;
 /// ladder. Was hardcoded `TF_WHITELIST_S` at `core/src/server/rest.rs:31`
 /// (phase 59.R3.C3.O2, 2026-05-30).
 pub const CANONICAL_TFS_S: &[u32] = &[
-    10, 20, 30, 60, 120, 300, 600, 900, 1800,
-    3600, 7200, 14400, 28800, 43200, 86400, 259200,
+    10, 20, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400, 259200,
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -299,8 +298,7 @@ pub fn day_start_ms(d: NaiveDate) -> i64 {
 /// 5+ duplicate `parse_date` copies that previously lived in the offline bins.
 #[inline]
 pub fn parse_utc_date(s: &str) -> anyhow::Result<NaiveDate> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .with_context(|| format!("parse date `{}`", s))
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").with_context(|| format!("parse date `{}`", s))
 }
 
 /// Parse a UTC date in `YYYY-MM-DD` format OR the literal "today" (current
@@ -434,8 +432,7 @@ pub fn vol_path_for_id(data_root: &Path, ticker_id: u64) -> PathBuf {
 /// directory. The rolling `.vol` is deliberately absent: it has no date, so it
 /// cannot be swept, moved or archived per day. Use [`ticker_artifacts`] to see
 /// everything, this table only when a per-day cutoff is the whole point.
-pub const DAILY_TREES: [(&str, &str); 3] =
-    [("indexes", "idx"), ("bars", "s10"), ("bars", "renko")];
+pub const DAILY_TREES: [(&str, &str); 3] = [("indexes", "idx"), ("bars", "s10"), ("bars", "renko")];
 
 /// One on-disk artefact owned by a ticker id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,8 +548,8 @@ pub fn list_shards(ticker_dir: &Path, ext: &str) -> Result<Vec<(NaiveDate, PathB
         return Ok(out);
     }
     let suffix = format!(".{}", ext);
-    for entry in fs::read_dir(ticker_dir)
-        .with_context(|| format!("read_dir {}", ticker_dir.display()))?
+    for entry in
+        fs::read_dir(ticker_dir).with_context(|| format!("read_dir {}", ticker_dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -641,7 +638,8 @@ pub fn read_shard_tail<T: Pod>(path: &Path, tail_records: usize) -> Result<Vec<T
     if stride == 0 {
         return Ok(Vec::new());
     }
-    let mut file = fs::File::open(path).with_context(|| format!("open shard {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open shard {}", path.display()))?;
     let raw_len = file
         .metadata()
         .with_context(|| format!("stat shard {}", path.display()))?
@@ -721,8 +719,7 @@ impl<T: Pod> ShardStream<T> {
             let aligned = (self.filled / stride) * stride;
             warn!(
                 dropped_bytes = self.filled - aligned,
-                stride,
-                "ShardStream: torn-trailing write at EOF — truncated"
+                stride, "ShardStream: torn-trailing write at EOF — truncated"
             );
             self.filled = aligned;
         }
@@ -907,10 +904,7 @@ impl Manifest {
     /// `renko_from_idx`.
     pub fn refresh_kind<T: ShardRecord>(&mut self, dir: &Path, kind_ext: &str) -> Result<()> {
         let existing = list_shards(dir, kind_ext)?;
-        let existing_dates: Vec<String> = existing
-            .iter()
-            .map(|(d, _)| date_stem(*d))
-            .collect();
+        let existing_dates: Vec<String> = existing.iter().map(|(d, _)| date_stem(*d)).collect();
         self.shards
             .retain(|s| !existing_dates.iter().any(|d| d == &s.date));
         for (date, path) in existing {
@@ -1094,8 +1088,7 @@ impl IdxShardWriter {
     /// (live aggregator — a second instance starting up means a deploy bug).
     pub fn open_with(data_root: &Path, ticker_id: u64, gate: bool, manifest: bool) -> Result<Self> {
         let dir = idx_dir(data_root, ticker_id);
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("create_dir_all {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("create_dir_all {}", dir.display()))?;
         let lock = try_acquire_writer_lock(&dir)?;
         let mut w = Self {
             dir,
@@ -1458,8 +1451,7 @@ impl BarShardWriter {
         manifest: bool,
     ) -> Result<Self> {
         let dir = bars_dir(data_root, ticker_id);
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("create_dir_all {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("create_dir_all {}", dir.display()))?;
         // R1 H9: per-stream lock — `<bars_dir>/.writer.<ext>.lock`. Separate
         // from .idx lock and per-ext so s10 and renko producers can both run
         // concurrently on the same ticker.
@@ -1593,11 +1585,7 @@ impl BarShardWriter {
     /// `route_ts_ms`. Live producers pass a stagger-shifted route timestamp
     /// (see `ROLLOVER_SHIFT_MS_*`) so midnight fsync lands off the idx hot
     /// path, without mutating the persisted bar's `close_ts`.
-    pub fn append_routed(
-        &mut self,
-        bar: &crate::mitch::bar::Bar,
-        route_ts_ms: i64,
-    ) -> Result<()> {
+    pub fn append_routed(&mut self, bar: &crate::mitch::bar::Bar, route_ts_ms: i64) -> Result<()> {
         let date = ts_ms_to_utc_date(route_ts_ms);
         self.ensure_shard(date)?;
         self.log.as_mut().unwrap().append(bar)?;
@@ -1653,8 +1641,8 @@ impl Drop for BarShardWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mitch::header::MitchHeader;
     use crate::mitch::common::message_type;
+    use crate::mitch::header::MitchHeader;
     use crate::mitch::index::Index;
 
     fn rec(ts_ms: i64, bid: f64, ask: f64) -> IndexRecord {
@@ -1676,10 +1664,7 @@ mod tests {
     fn t_recent_day_start() -> i64 {
         let now = crate::now_ms() as i64;
         let d = ts_ms_to_utc_date(now - MS_PER_DAY);
-        d.and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis()
+        d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis()
     }
 
     #[test]
@@ -1693,14 +1678,27 @@ mod tests {
         {
             let mut w = IdxShardWriter::open(&root, 703, true).unwrap();
             assert!(w.append(&rec_vol(t0, 100.0, 101.0, 5, 5, 10)).unwrap()); // first
-            assert!(w.append(&rec_vol(t0 + 100, 100.0, 101.0, 9, 5, 10)).unwrap()); // vbid Δ → kept
-            assert!(w.append(&rec_vol(t0 + 200, 100.0, 101.0, 9, 9, 10)).unwrap()); // vask Δ → kept
-            assert!(w.append(&rec_vol(t0 + 300, 100.0, 101.0, 9, 9, 22)).unwrap()); // ci Δ → kept
-            assert!(!w.append(&rec_vol(t0 + 400, 100.0, 101.0, 9, 9, 22)).unwrap()); // identical → dropped
+            assert!(
+                w.append(&rec_vol(t0 + 100, 100.0, 101.0, 9, 5, 10))
+                    .unwrap()
+            ); // vbid Δ → kept
+            assert!(
+                w.append(&rec_vol(t0 + 200, 100.0, 101.0, 9, 9, 10))
+                    .unwrap()
+            ); // vask Δ → kept
+            assert!(
+                w.append(&rec_vol(t0 + 300, 100.0, 101.0, 9, 9, 22))
+                    .unwrap()
+            ); // ci Δ → kept
+            assert!(
+                !w.append(&rec_vol(t0 + 400, 100.0, 101.0, 9, 9, 22))
+                    .unwrap()
+            ); // identical → dropped
             w.flush().unwrap();
         }
         let dir = idx_dir(&root, 703);
-        let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
+        let recs =
+            read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 4); // 4 distinct observations kept, 1 identical dropped
         let _ = fs::remove_dir_all(&root);
     }
@@ -1711,8 +1709,7 @@ mod tests {
     /// one.
     #[test]
     fn ticker_artifacts_reports_every_kind_including_vol() {
-        let root = std::env::temp_dir()
-            .join(format!("nxr_shard_artifacts_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("nxr_shard_artifacts_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let id = 711u64;
         for (tree, ext) in DAILY_TREES {
@@ -1721,7 +1718,11 @@ mod tests {
             fs::write(dir.join(format!("2026-01-02.{ext}")), b"x").unwrap();
         }
         // Decoys: a manifest and a foreign ticker must not be reported.
-        fs::write(manifest_path(&root.join("bars").join(id.to_string())), b"{}").unwrap();
+        fs::write(
+            manifest_path(&root.join("bars").join(id.to_string())),
+            b"{}",
+        )
+        .unwrap();
         fs::create_dir_all(vol_dir(&root)).unwrap();
         fs::write(vol_path_for_id(&root, id), b"v").unwrap();
         fs::write(vol_path_for_id(&root, 712), b"v").unwrap();
@@ -1735,7 +1736,10 @@ mod tests {
         assert_eq!(found.iter().filter(|a| a.date.is_none()).count(), 1);
 
         assert_eq!(
-            stored_ticker_ids(&root).unwrap().into_iter().collect::<Vec<_>>(),
+            stored_ticker_ids(&root)
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![711, 712],
             "a vol-only ticker still has bytes on disk"
         );
@@ -1807,9 +1811,7 @@ mod tests {
             // day1 mid (fast path in-window) price move → same shard A
             assert!(w.append(&rec(day1 + MS_PER_HOUR, 100.5, 101.5)).unwrap());
             // day1 late edge (fast path, ts = end-1ms) price move → shard A
-            assert!(w
-                .append(&rec(day1 + MS_PER_DAY - 1, 100.6, 101.6))
-                .unwrap());
+            assert!(w.append(&rec(day1 + MS_PER_DAY - 1, 100.6, 101.6)).unwrap());
             // day2 start (out-of-window → chrono path, new_day) → shard B
             assert!(w.append(&rec(day2, 100.6, 101.6)).unwrap());
             // day2 mid (fast path against refreshed window) → shard B
@@ -1844,7 +1846,8 @@ mod tests {
             w.flush().unwrap();
         }
         let dir = idx_dir(&root, 702);
-        let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
+        let recs =
+            read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
@@ -1971,13 +1974,15 @@ mod tests {
             let mut w = IdxShardWriter::open(&root, 704, true).unwrap();
             assert!(w.append(&rec(t0, 100.0, 101.0)).unwrap()); // first: written
             // Half-interval later, unchanged quote → still gated, no sentinel.
-            assert!(!w
-                .append(&rec(t0 + SENTINEL_INTERVAL_MS / 2, 100.0, 101.0))
-                .unwrap());
+            assert!(
+                !w.append(&rec(t0 + SENTINEL_INTERVAL_MS / 2, 100.0, 101.0))
+                    .unwrap()
+            );
             // Full-interval later, unchanged quote → sentinel emitted.
-            assert!(w
-                .append(&rec(t0 + SENTINEL_INTERVAL_MS, 100.0, 101.0))
-                .unwrap());
+            assert!(
+                w.append(&rec(t0 + SENTINEL_INTERVAL_MS, 100.0, 101.0))
+                    .unwrap()
+            );
             w.flush().unwrap();
         }
         let dir = idx_dir(&root, 704);
@@ -2015,7 +2020,11 @@ mod tests {
         let mut all = Vec::new();
         // 8200 records ⇒ exceeds the 4096-record refill page, exercises refill().
         for i in 0..8200i64 {
-            let r = rec(1_716_249_600_000 + i * 1000, 100.0 + (i % 7) as f64, 101.0 + (i % 7) as f64);
+            let r = rec(
+                1_716_249_600_000 + i * 1000,
+                100.0 + (i % 7) as f64,
+                101.0 + (i % 7) as f64,
+            );
             all.extend_from_slice(bytemuck::bytes_of(&r));
         }
         fs::write(&p, &all).unwrap();
@@ -2090,7 +2099,11 @@ mod tests {
         assert_eq!(batch.first_ts, seq.first_ts);
         assert_eq!(batch.last_ts, seq.last_ts);
         // Duplicate date resolved to the LATER entry (n=9) in both.
-        let d21 = batch.shards.iter().find(|s| s.date == "2024-05-21").unwrap();
+        let d21 = batch
+            .shards
+            .iter()
+            .find(|s| s.date == "2024-05-21")
+            .unwrap();
         assert_eq!(d21.n_records, 9);
     }
 
@@ -2110,12 +2123,15 @@ mod tests {
                 let ts = t0 + i * 10_000; // 10 s buckets
                 let mts = crate::mitch::timestamp::from_epoch_ms(ts);
                 let b = Bar::new_ohlcv(
-                    mts, mts,
+                    mts,
+                    mts,
                     100.0 + i as f64,
                     100.5 + i as f64,
                     99.5 + i as f64,
                     100.25 + i as f64,
-                    1, 1, 1,
+                    1,
+                    1,
+                    1,
                 );
                 w.append(&b).unwrap();
                 bars.push(b);

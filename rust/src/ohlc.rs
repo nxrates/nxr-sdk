@@ -37,8 +37,8 @@
 //! first/max/min/last + sum. Bucket alignment of TF-M is preserved because
 //! the input TF-N bars are already wall-clock aligned.
 
-use mitch::common::CI_SCALE;
 use crate::tdwap::decode_ci_ubp;
+use mitch::common::CI_SCALE;
 
 use crate::ipc::record::IndexRecord;
 use std::collections::HashMap;
@@ -300,14 +300,16 @@ where
                         }
                         Some(state) if bs > state.ts => {
                             let closed = state.clone();
-                            self.cur = Some(BucketState::new(bs, self.tf_ms, mid, vbid, vask, ci_ubp));
+                            self.cur =
+                                Some(BucketState::new(bs, self.tf_ms, mid, vbid, vask, ci_ubp));
                             return Some(closed.finalize());
                         }
                         Some(_) => {
                             // Out-of-order; drop.
                         }
                         None => {
-                            self.cur = Some(BucketState::new(bs, self.tf_ms, mid, vbid, vask, ci_ubp));
+                            self.cur =
+                                Some(BucketState::new(bs, self.tf_ms, mid, vbid, vask, ci_ubp));
                         }
                     }
                 }

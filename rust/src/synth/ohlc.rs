@@ -107,7 +107,13 @@ pub fn reconstruct_synth_ohlc<F: Fn(usize, usize) -> f64>(
     let n = path.legs.len();
     if n == 0 {
         // Trivial identity → constant 1 across OHLC, zero range.
-        return Some(OhlcWithRange { o: 1.0, h: 1.0, l: 1.0, c: 1.0, log_range: 0.0 });
+        return Some(OhlcWithRange {
+            o: 1.0,
+            h: 1.0,
+            l: 1.0,
+            c: 1.0,
+            log_range: 0.0,
+        });
     }
 
     let mut v = vec![0.0_f64; n];
@@ -150,13 +156,19 @@ pub fn reconstruct_synth_ohlc<F: Fn(usize, usize) -> f64>(
         var = V_FLOOR;
     }
 
-    let r = (FOUR_LN2 * var).sqrt();          // Parkinson inversion → log-range
-    let m = (o_s * c_s).sqrt();               // geometric mid
+    let r = (FOUR_LN2 * var).sqrt(); // Parkinson inversion → log-range
+    let m = (o_s * c_s).sqrt(); // geometric mid
     let half_r = r * 0.5;
     let h_s = m * half_r.exp();
     let l_s = m * (-half_r).exp();
 
-    Some(OhlcWithRange { o: o_s, h: h_s, l: l_s, c: c_s, log_range: r })
+    Some(OhlcWithRange {
+        o: o_s,
+        h: h_s,
+        l: l_s,
+        c: c_s,
+        log_range: r,
+    })
 }
 
 /// Bucketize-and-reconstruct: group leg OHLC series into common time buckets,
@@ -191,12 +203,24 @@ pub fn reconstruct_synth_series<F: Fn(usize, usize) -> f64 + Copy>(
             let entry = by_bucket.entry(bucket).or_default();
             match entry.get_mut(&leg.sym) {
                 None => {
-                    entry.insert(leg.sym.clone(), OhlcLite { o: row.o, h: row.h, l: row.l, c: row.c });
+                    entry.insert(
+                        leg.sym.clone(),
+                        OhlcLite {
+                            o: row.o,
+                            h: row.h,
+                            l: row.l,
+                            c: row.c,
+                        },
+                    );
                 }
                 Some(prev) => {
                     // OHLC monoid for multiple base rows within a single target bucket.
-                    if row.h > prev.h { prev.h = row.h; }
-                    if row.l < prev.l { prev.l = row.l; }
+                    if row.h > prev.h {
+                        prev.h = row.h;
+                    }
+                    if row.l < prev.l {
+                        prev.l = row.l;
+                    }
                     prev.c = row.c;
                 }
             }
@@ -208,7 +232,13 @@ pub fn reconstruct_synth_series<F: Fn(usize, usize) -> f64 + Copy>(
         // Convert HashMap<String, _> → HashMap<&str, _> for reconstruct call.
         let view: HashMap<&str, OhlcLite> = leg_map.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         if let Some(s) = reconstruct_synth_ohlc(path, &view, estimator, rho) {
-            out.push(TimedOhlc { ts, o: s.o, h: s.h, l: s.l, c: s.c });
+            out.push(TimedOhlc {
+                ts,
+                o: s.o,
+                h: s.h,
+                l: s.l,
+                c: s.c,
+            });
         }
     }
     out
@@ -232,7 +262,14 @@ pub fn reconstruct_synth_series_at_base_tf_then_rollup<F: Fn(usize, usize) -> f6
     if target_tf_ms <= base_tf_ms {
         return base
             .into_iter()
-            .map(|r| TimedOhlcCount { ts: r.ts, o: r.o, h: r.h, l: r.l, c: r.c, count: 1 })
+            .map(|r| TimedOhlcCount {
+                ts: r.ts,
+                o: r.o,
+                h: r.h,
+                l: r.l,
+                c: r.c,
+                count: 1,
+            })
             .collect();
     }
     let tf = target_tf_ms;
@@ -242,8 +279,12 @@ pub fn reconstruct_synth_series_at_base_tf_then_rollup<F: Fn(usize, usize) -> f6
         let bucket = r.ts.div_euclid(tf) * tf;
         match cur.as_mut() {
             Some(c) if c.ts == bucket => {
-                if r.h > c.h { c.h = r.h; }
-                if r.l < c.l { c.l = r.l; }
+                if r.h > c.h {
+                    c.h = r.h;
+                }
+                if r.l < c.l {
+                    c.l = r.l;
+                }
                 c.c = r.c;
                 c.count += 1;
             }
@@ -251,7 +292,14 @@ pub fn reconstruct_synth_series_at_base_tf_then_rollup<F: Fn(usize, usize) -> f6
                 if let Some(c) = cur.take() {
                     out.push(c);
                 }
-                cur = Some(TimedOhlcCount { ts: bucket, o: r.o, h: r.h, l: r.l, c: r.c, count: 1 });
+                cur = Some(TimedOhlcCount {
+                    ts: bucket,
+                    o: r.o,
+                    h: r.h,
+                    l: r.l,
+                    c: r.c,
+                    count: 1,
+                });
             }
         }
     }

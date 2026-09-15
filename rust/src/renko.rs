@@ -67,7 +67,10 @@ pub struct RenkoConfig {
 
 impl Default for RenkoConfig {
     fn default() -> Self {
-        Self { multiplier: 0.075, min_pct: 0.0001 }
+        Self {
+            multiplier: 0.075,
+            min_pct: 0.0001,
+        }
     }
 }
 
@@ -328,7 +331,10 @@ impl RenkoGenerator {
         let have_excursion =
             first_in_seq && self.pending_high.is_finite() && self.pending_low.is_finite();
         if have_excursion {
-            (body_high.max(self.pending_high), body_low.min(self.pending_low))
+            (
+                body_high.max(self.pending_high),
+                body_low.min(self.pending_low),
+            )
         } else {
             (body_high, body_low)
         }
@@ -367,7 +373,9 @@ impl RenkoGenerator {
         } else {
             (0u32, 0u32)
         };
-        let mut bar = Bar::new_ohlcv(open_mts, close_mts, open, high, low, close, vbid, vask, tick_count);
+        let mut bar = Bar::new_ohlcv(
+            open_mts, close_mts, open, high, low, close, vbid, vask, tick_count,
+        );
         if let Some(b) = micros.as_ref() {
             bar.realized_var = b.realized_var;
             bar.bipower_var = b.bipower_var;
@@ -414,7 +422,8 @@ impl RenkoGenerator {
         }
         // Ingest into the accumulator BEFORE brick detection so the closing
         // tick is included in the closing brick's microstructure stats.
-        self.acc.ingest(bid, ask, vbid, vask, ts, ci_ubp, accepted, rejected);
+        self.acc
+            .ingest(bid, ask, vbid, vask, ts, ci_ubp, accepted, rejected);
         self.feed_tick_with_sigma(ts, mid, sigma_pct, write_bar)
     }
 
@@ -480,7 +489,17 @@ impl RenkoGenerator {
             // `emit_brick` (the parity gate).
             let (high, low) = self.brick_high_low(self.last_close, close, first_in_seq);
             let tick_count_for_bar = if first_in_seq { self.tick_count } else { 0 };
-            self.emit_bar(self.bar_start_ts, ts, self.last_close, high, low, close, tick_count_for_bar, first_in_seq, write_bar)?;
+            self.emit_bar(
+                self.bar_start_ts,
+                ts,
+                self.last_close,
+                high,
+                low,
+                close,
+                tick_count_for_bar,
+                first_in_seq,
+                write_bar,
+            )?;
 
             first_in_seq = false;
             self.last_close = close;
@@ -502,7 +521,17 @@ impl RenkoGenerator {
 
             let (high, low) = self.brick_high_low(self.last_close, close, first_in_seq);
             let tick_count_for_bar = if first_in_seq { self.tick_count } else { 0 };
-            self.emit_bar(self.bar_start_ts, ts, self.last_close, high, low, close, tick_count_for_bar, first_in_seq, write_bar)?;
+            self.emit_bar(
+                self.bar_start_ts,
+                ts,
+                self.last_close,
+                high,
+                low,
+                close,
+                tick_count_for_bar,
+                first_in_seq,
+                write_bar,
+            )?;
 
             first_in_seq = false;
             self.last_close = close;
@@ -539,12 +568,21 @@ mod tests {
     #[test]
     fn config_validation() {
         assert!(RenkoConfig::default().validate().is_ok());
-        let bad = RenkoConfig { multiplier: 0.0, ..Default::default() };
+        let bad = RenkoConfig {
+            multiplier: 0.0,
+            ..Default::default()
+        };
         assert!(bad.validate().is_err());
         // min_pct=0 is now allowed (no floor); negative is still rejected.
-        let zero_floor = RenkoConfig { multiplier: 0.075, min_pct: 0.0 };
+        let zero_floor = RenkoConfig {
+            multiplier: 0.075,
+            min_pct: 0.0,
+        };
         assert!(zero_floor.validate().is_ok());
-        let neg = RenkoConfig { multiplier: 0.075, min_pct: -1e-6 };
+        let neg = RenkoConfig {
+            multiplier: 0.075,
+            min_pct: -1e-6,
+        };
         assert!(neg.validate().is_err());
     }
 
@@ -553,15 +591,36 @@ mod tests {
         // Operator directive 2026-06-09: "K should not have a max." A k above the
         // old 4.0 wall is a VALID fit (storming crypto). validate must ACCEPT it
         // — only the numeric safety cap K_MAX_SAFETY and the lower guard remain.
-        let at_old_wall = RenkoConfig { multiplier: MULT_UPPER_BOUND as f32, min_pct: 0.0001 };
+        let at_old_wall = RenkoConfig {
+            multiplier: MULT_UPPER_BOUND as f32,
+            min_pct: 0.0001,
+        };
         assert!(at_old_wall.validate().is_ok());
-        let above_old_wall = RenkoConfig { multiplier: (MULT_UPPER_BOUND as f32) + 0.5, min_pct: 0.0001 };
-        assert!(above_old_wall.validate().is_ok(), "k > old 4.0 ceiling must now VALIDATE (no max)");
-        let way_above = RenkoConfig { multiplier: 50.0, min_pct: 0.0001 };
-        assert!(way_above.validate().is_ok(), "large k (storming crypto) is valid");
+        let above_old_wall = RenkoConfig {
+            multiplier: (MULT_UPPER_BOUND as f32) + 0.5,
+            min_pct: 0.0001,
+        };
+        assert!(
+            above_old_wall.validate().is_ok(),
+            "k > old 4.0 ceiling must now VALIDATE (no max)"
+        );
+        let way_above = RenkoConfig {
+            multiplier: 50.0,
+            min_pct: 0.0001,
+        };
+        assert!(
+            way_above.validate().is_ok(),
+            "large k (storming crypto) is valid"
+        );
         // The ONLY upper guard is the numeric safety cap.
-        let over_safety = RenkoConfig { multiplier: (K_MAX_SAFETY as f32) * 2.0, min_pct: 0.0001 };
-        assert!(over_safety.validate().is_err(), "k > K_MAX_SAFETY rejected (runaway guard)");
+        let over_safety = RenkoConfig {
+            multiplier: (K_MAX_SAFETY as f32) * 2.0,
+            min_pct: 0.0001,
+        };
+        assert!(
+            over_safety.validate().is_err(),
+            "k > K_MAX_SAFETY rejected (runaway guard)"
+        );
     }
 
     #[test]
@@ -570,12 +629,18 @@ mod tests {
         // then RETRACE must carry the overshoot as the wick (high > close on an
         // up brick), and the retrace dip below open as the low. Synthetic bricks
         // (multi-brick fills) stay wickless.
-        let cfg = RenkoConfig { multiplier: 0.075, min_pct: 0.0001 };
+        let cfg = RenkoConfig {
+            multiplier: 0.075,
+            min_pct: 0.0001,
+        };
         let mut r = RenkoGenerator::new(cfg).unwrap();
         let sigma = 0.02; // brick ≈ 100 * 0.075 * 0.02 = 0.15
 
         let mut bars: Vec<Bar> = Vec::new();
-        let mut push = |b: &Bar| { bars.push(*b); Ok(()) };
+        let mut push = |b: &Bar| {
+            bars.push(*b);
+            Ok(())
+        };
         // Genesis at 100.
         r.feed_tick_with_sigma(0, 100.0, sigma, &mut push).unwrap();
         // Spike up well past one brick close, then retrace below it but still
@@ -592,34 +657,63 @@ mod tests {
             high > close,
             "WICK: up-brick high {high} must exceed close {close} (captured the 100.40 spike)"
         );
-        assert!(high <= 100.40 + 1e-9, "high must not exceed the actual spike");
+        assert!(
+            high <= 100.40 + 1e-9,
+            "high must not exceed the actual spike"
+        );
         assert!(low <= open + 1e-12, "low must be ≤ open (body floor)");
-        assert_eq!(b0.flags & FLAG_RENKO_SYNTHETIC_BRICK, 0, "first brick not synthetic");
+        assert_eq!(
+            b0.flags & FLAG_RENKO_SYNTHETIC_BRICK,
+            0,
+            "first brick not synthetic"
+        );
     }
 
     #[test]
     fn synthetic_brick_flag_on_multi_brick_tick() {
         // Construct a generator that will fire multiple bricks on a single
         // tick (brick_size set very small relative to the price jump).
-        let cfg = RenkoConfig { multiplier: 0.075, min_pct: 0.0001 };
+        let cfg = RenkoConfig {
+            multiplier: 0.075,
+            min_pct: 0.0001,
+        };
         let mut r = RenkoGenerator::new(cfg).expect("generator new");
         let sigma_pct = 0.001; // 0.1% σ
 
         let mut bars: Vec<Bar> = Vec::new();
         // Seed at p=100. First tick initialises.
-        r.feed_tick_with_sigma(0, 100.0, sigma_pct, &mut |b| { bars.push(*b); Ok(()) }).unwrap();
+        r.feed_tick_with_sigma(0, 100.0, sigma_pct, &mut |b| {
+            bars.push(*b);
+            Ok(())
+        })
+        .unwrap();
         // Jump to p=110: ~10% move, brick_size ≈ price * 0.075 * 0.001 ≈ 0.0075
         // (floored at min_pct=0.0001 → brick ≈ 0.01). Either way produces many bricks.
-        r.feed_tick_with_sigma(1_000, 110.0, sigma_pct, &mut |b| { bars.push(*b); Ok(()) }).unwrap();
+        r.feed_tick_with_sigma(1_000, 110.0, sigma_pct, &mut |b| {
+            bars.push(*b);
+            Ok(())
+        })
+        .unwrap();
 
-        assert!(bars.len() >= 2, "expected multi-brick emission, got {}", bars.len());
+        assert!(
+            bars.len() >= 2,
+            "expected multi-brick emission, got {}",
+            bars.len()
+        );
         // Brick #1 should not have the synthetic flag set; subsequent bricks
         // emitted within the same tick should.
-        assert_eq!(bars[0].flags & FLAG_RENKO_SYNTHETIC_BRICK, 0,
-            "first brick must not carry synthetic flag");
+        assert_eq!(
+            bars[0].flags & FLAG_RENKO_SYNTHETIC_BRICK,
+            0,
+            "first brick must not carry synthetic flag"
+        );
         for (i, b) in bars.iter().enumerate().skip(1) {
-            assert_ne!(b.flags & FLAG_RENKO_SYNTHETIC_BRICK, 0,
-                "brick #{} (synthetic in multi-brick tick) must carry flag", i);
+            assert_ne!(
+                b.flags & FLAG_RENKO_SYNTHETIC_BRICK,
+                0,
+                "brick #{} (synthetic in multi-brick tick) must carry flag",
+                i
+            );
         }
     }
 }

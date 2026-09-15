@@ -141,16 +141,21 @@ pub fn bucket_for_pair(
     let base_uc = base.to_uppercase();
     let quote_uc = quote.to_uppercase();
     let ticker = TickerId::from_raw(ticker_id);
-    classify_ticker(&ticker, &base_uc, &quote_uc, crypto_majors, stablecoins, fx_majors)
+    classify_ticker(
+        &ticker,
+        &base_uc,
+        &quote_uc,
+        crypto_majors,
+        stablecoins,
+        fx_majors,
+    )
 }
 
 /// Resolve a YAML `Vec<String>` list to `Vec<&str>`, falling back to a
 /// compile-time list only when the YAML field is empty. Callers should
 /// `warn!` on empty YAML so operators notice cfg drift (see
 /// `nxr_calibrate.rs`).
-pub fn effective_list<'a>(yaml: &'a [String], default: &'static [&'static str])
-    -> Vec<&'a str>
-{
+pub fn effective_list<'a>(yaml: &'a [String], default: &'static [&'static str]) -> Vec<&'a str> {
     if yaml.is_empty() {
         default.to_vec()
     } else {
@@ -166,8 +171,7 @@ pub const DEFAULT_CRYPTO_MAJORS: &[&str] = &["BTC", "ETH", "SOL", "BNB", "XRP"];
 /// `config.yml::cexs.pegged`. Used only when YAML empty (warn).
 /// `EURC` intentionally omitted from the fallback — Tier-1 is USD-pegged.
 pub const DEFAULT_STABLECOINS: &[&str] = &[
-    "USDT", "USDC", "FDUSD", "BUSD", "TUSD", "DAI",
-    "PYUSD", "USDD", "USDS", "USD1", "USDe",
+    "USDT", "USDC", "FDUSD", "BUSD", "TUSD", "DAI", "PYUSD", "USDD", "USDS", "USD1", "USDe",
 ];
 
 /// Audit-frozen fallback FX-major list. Used when `cexs.fx_majors`
@@ -186,58 +190,110 @@ mod tests {
 
     fn classify(ticker: &TickerId, base: &str, quote: &str) -> AssetClassBucket {
         classify_ticker(
-            ticker, base, quote,
-            DEFAULT_CRYPTO_MAJORS, DEFAULT_STABLECOINS, DEFAULT_FX_MAJORS,
+            ticker,
+            base,
+            quote,
+            DEFAULT_CRYPTO_MAJORS,
+            DEFAULT_STABLECOINS,
+            DEFAULT_FX_MAJORS,
         )
     }
 
     #[test]
     fn crypto_major_vs_stable_quote() {
         // BTC/USDT — major base, stable quote → crypto_major.
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "BTC", "USDT"), AssetClassBucket::CryptoMajor);
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "BTC", "USDT"),
+            AssetClassBucket::CryptoMajor
+        );
         // ETH/USDC — major base, stable quote.
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "ETH", "USDC"), AssetClassBucket::CryptoMajor);
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "ETH", "USDC"),
+            AssetClassBucket::CryptoMajor
+        );
         // PEPE/USDT — alt base, stable quote.
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "PEPE", "USDT"), AssetClassBucket::CryptoAlt);
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "PEPE", "USDT"),
+            AssetClassBucket::CryptoAlt
+        );
     }
 
     #[test]
     fn stable_stable_pair() {
         // USDC/USDT, USDe/USDT, USDS/USDT, USD1/USDT — both stable.
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "USDC", "USDT"), AssetClassBucket::CryptoStable);
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "USDe", "USDT"), AssetClassBucket::CryptoStable);
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "USDS", "USDT"), AssetClassBucket::CryptoStable);
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "USD1", "USDT"), AssetClassBucket::CryptoStable);
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "USDC", "USDT"),
+            AssetClassBucket::CryptoStable
+        );
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "USDe", "USDT"),
+            AssetClassBucket::CryptoStable
+        );
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "USDS", "USDT"),
+            AssetClassBucket::CryptoStable
+        );
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "USD1", "USDT"),
+            AssetClassBucket::CryptoStable
+        );
     }
 
     #[test]
     fn crypto_cross() {
         // ETH/BTC, SOL/ETH, BNB/BTC — crypto/crypto neither side stable.
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "ETH", "BTC"), AssetClassBucket::CryptoCross);
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "SOL", "ETH"), AssetClassBucket::CryptoCross);
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "ETH", "BTC"),
+            AssetClassBucket::CryptoCross
+        );
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "SOL", "ETH"),
+            AssetClassBucket::CryptoCross
+        );
     }
 
     #[test]
     fn fx_major_vs_cross() {
         // EUR/USD, GBP/USD, USD/JPY — both ∈ fx_majors → fx_major.
-        assert_eq!(classify(&t(AssetClass::FX, AssetClass::FX), "EUR", "USD"), AssetClassBucket::FxMajor);
-        assert_eq!(classify(&t(AssetClass::FX, AssetClass::FX), "USD", "JPY"), AssetClassBucket::FxMajor);
+        assert_eq!(
+            classify(&t(AssetClass::FX, AssetClass::FX), "EUR", "USD"),
+            AssetClassBucket::FxMajor
+        );
+        assert_eq!(
+            classify(&t(AssetClass::FX, AssetClass::FX), "USD", "JPY"),
+            AssetClassBucket::FxMajor
+        );
         // USD/TRY, USD/MXN — major + EM → fx_cross.
-        assert_eq!(classify(&t(AssetClass::FX, AssetClass::FX), "USD", "TRY"), AssetClassBucket::FxCross);
-        assert_eq!(classify(&t(AssetClass::FX, AssetClass::FX), "USD", "MXN"), AssetClassBucket::FxCross);
+        assert_eq!(
+            classify(&t(AssetClass::FX, AssetClass::FX), "USD", "TRY"),
+            AssetClassBucket::FxCross
+        );
+        assert_eq!(
+            classify(&t(AssetClass::FX, AssetClass::FX), "USD", "MXN"),
+            AssetClassBucket::FxCross
+        );
     }
 
     #[test]
     fn fx_touching_other_class() {
         // EQ/FX e.g. SPY/USD → fx_cross.
-        assert_eq!(classify(&t(AssetClass::EQ, AssetClass::FX), "SPY", "USD"), AssetClassBucket::FxCross);
+        assert_eq!(
+            classify(&t(AssetClass::EQ, AssetClass::FX), "SPY", "USD"),
+            AssetClassBucket::FxCross
+        );
         // CM/FX e.g. XAU/USD → fx_cross.
-        assert_eq!(classify(&t(AssetClass::CM, AssetClass::FX), "XAU", "USD"), AssetClassBucket::FxCross);
+        assert_eq!(
+            classify(&t(AssetClass::CM, AssetClass::FX), "XAU", "USD"),
+            AssetClassBucket::FxCross
+        );
     }
 
     #[test]
     fn case_insensitive_stable_detection() {
         // `USDe` (mixed case in mitch CSV) — detection must be CI.
-        assert_eq!(classify(&t(AssetClass::CR, AssetClass::CR), "usde", "usdt"), AssetClassBucket::CryptoStable);
+        assert_eq!(
+            classify(&t(AssetClass::CR, AssetClass::CR), "usde", "usdt"),
+            AssetClassBucket::CryptoStable
+        );
     }
 }

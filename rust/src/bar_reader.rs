@@ -2,7 +2,7 @@
 //! Each record is a 96-byte mitch::Bar (#[repr(C, packed)], Pod+Zeroable).
 //! File is simply N * 96 bytes with no header - record count = file_size / 96.
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use memmap2::Mmap;
 use std::path::Path;
 

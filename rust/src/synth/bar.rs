@@ -99,7 +99,12 @@ pub fn reconstruct_synth_bar_series<F: Fn(usize, usize) -> f64 + Copy>(
         for (leg, b) in path.legs.iter().zip(leg_bars_at_bucket.iter()) {
             ohlc_map.insert(
                 leg.sym.as_str(),
-                OhlcLite { o: b.open, h: b.high, l: b.low, c: b.close },
+                OhlcLite {
+                    o: b.open,
+                    h: b.high,
+                    l: b.low,
+                    c: b.close,
+                },
             );
         }
         let Some(synth) = reconstruct_synth_ohlc(path, &ohlc_map, estimator, rho) else {
@@ -110,7 +115,10 @@ pub fn reconstruct_synth_bar_series<F: Fn(usize, usize) -> f64 + Copy>(
         // rv_i ≥ 0, e_i ∈ {+1,-1} ⇒ e_i² = 1, so diagonal is Σ rv_i.
         // Off-diagonal: 2·e_i·e_j·ρ_ij·√(rv_i·rv_j).
         let n = path.legs.len();
-        let rv: Vec<f64> = leg_bars_at_bucket.iter().map(|b| b.realized_var as f64).collect();
+        let rv: Vec<f64> = leg_bars_at_bucket
+            .iter()
+            .map(|b| b.realized_var as f64)
+            .collect();
         let e: Vec<i32> = path.legs.iter().map(|l| l.exp as i32).collect();
         let mut rv_synth = 0.0_f64;
         for i in 0..n {
@@ -122,7 +130,11 @@ pub fn reconstruct_synth_bar_series<F: Fn(usize, usize) -> f64 + Copy>(
                 if rij == 0.0 {
                     continue;
                 }
-                rv_synth += 2.0 * (e[i] as f64) * (e[j] as f64) * rij * (rv[i].max(0.0) * rv[j].max(0.0)).sqrt();
+                rv_synth += 2.0
+                    * (e[i] as f64)
+                    * (e[j] as f64)
+                    * rij
+                    * (rv[i].max(0.0) * rv[j].max(0.0)).sqrt();
             }
         }
         if !(rv_synth >= 0.0) {
@@ -204,8 +216,12 @@ pub fn reconstruct_synth_bar_series_at_base_tf_then_rollup<F: Fn(usize, usize) -
         let bucket = (b.close_mts() / tf) * tf;
         match cur.as_mut() {
             Some(c) if cur_bucket == bucket => {
-                if b.high > c.high { c.high = b.high; }
-                if b.low < c.low { c.low = b.low; }
+                if b.high > c.high {
+                    c.high = b.high;
+                }
+                if b.low < c.low {
+                    c.low = b.low;
+                }
                 c.close = b.close;
                 c.set_close_mts(b.close_mts());
                 c.vbid = c.vbid.saturating_add(b.vbid);
@@ -283,7 +299,12 @@ pub fn build_rolling_rho_cache(
     let mut per_leg_close: Vec<HashMap<u64, f64>> = Vec::with_capacity(n_legs);
     for leg in &path.legs {
         let series = *leg_bars.get(leg.sym.as_str()).unwrap();
-        per_leg_close.push(series.iter().map(|b| (b.close_mts(), b.close as f64)).collect());
+        per_leg_close.push(
+            series
+                .iter()
+                .map(|b| (b.close_mts(), b.close as f64))
+                .collect(),
+        );
     }
     // Ordered-pair accumulators (i, j) with i < j.
     let win = window_buckets.max(2);
@@ -414,7 +435,12 @@ pub fn reconstruct_synth_bar_series_rolling_rho(
         for (leg, b) in path.legs.iter().zip(leg_bars_at_bucket.iter()) {
             ohlc_map.insert(
                 leg.sym.as_str(),
-                OhlcLite { o: b.open, h: b.high, l: b.low, c: b.close },
+                OhlcLite {
+                    o: b.open,
+                    h: b.high,
+                    l: b.low,
+                    c: b.close,
+                },
             );
         }
         let rho_cb = rho_cache_callback(&cache, bucket);
@@ -423,7 +449,10 @@ pub fn reconstruct_synth_bar_series_rolling_rho(
         };
         // realized_var via same quadratic form (use rolling ρ).
         let n = path.legs.len();
-        let rv: Vec<f64> = leg_bars_at_bucket.iter().map(|b| b.realized_var as f64).collect();
+        let rv: Vec<f64> = leg_bars_at_bucket
+            .iter()
+            .map(|b| b.realized_var as f64)
+            .collect();
         let e: Vec<i32> = path.legs.iter().map(|l| l.exp as i32).collect();
         let mut rv_synth = 0.0_f64;
         for i in 0..n {
@@ -485,9 +514,9 @@ pub fn reconstruct_synth_bar_series_rolling_rho(
 
 #[cfg(test)]
 mod rho_cache_tests {
+    use super::super::paths::{Leg, SynthPath};
     use super::*;
     use mitch::bar::Bar;
-    use super::super::paths::{Leg, SynthPath};
 
     fn mk_bar(close_mts_ms: i64, close: f64) -> Bar {
         let mts = mitch::timestamp::from_epoch_ms(close_mts_ms);
@@ -503,8 +532,14 @@ mod rho_cache_tests {
         let path = SynthPath {
             sym: "A/B".to_string(),
             legs: vec![
-                Leg { sym: "X/USDT".to_string(), exp: 1 },
-                Leg { sym: "Y/USDT".to_string(), exp: 1 },
+                Leg {
+                    sym: "X/USDT".to_string(),
+                    exp: 1,
+                },
+                Leg {
+                    sym: "Y/USDT".to_string(),
+                    exp: 1,
+                },
             ],
         };
         let mut a_bars: Vec<Bar> = Vec::new();

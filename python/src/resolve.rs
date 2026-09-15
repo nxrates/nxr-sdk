@@ -50,7 +50,10 @@ pub fn resolve_ticker(ticker_id: u64) -> (String, String, String) {
 /// Look up market provider metadata by numeric id. Returns a dict with
 /// `id` and `name` keys, or None if unknown.
 #[pyfunction]
-pub fn get_market_provider(py: Python<'_>, id: u16) -> PyResult<Option<PyObject>> {
+pub fn get_market_provider(
+    py: Python<'_>,
+    id: u16,
+) -> Result<Option<PyObject>, crate::types::PyErr2> {
     let Some(mp) = nxr_sdk::get_market_provider_by_id(id) else {
         return Ok(None);
     };

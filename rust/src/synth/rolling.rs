@@ -83,7 +83,7 @@ impl RollingCorrelation {
         let num = n * self.sxy - self.sx * self.sy;
         let dx = n * self.sxx - self.sx * self.sx;
         let dy = n * self.syy - self.sy * self.sy;
-        if !(dx > 0.0) || !(dy > 0.0) {
+        if dx.is_nan() || dx <= 0.0 || dy.is_nan() || dy <= 0.0 {
             return 0.0;
         }
         let rho = num / (dx * dy).sqrt();

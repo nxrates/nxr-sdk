@@ -229,7 +229,7 @@ mod tests {
     fn zero_and_nonfinite_rejected() {
         let good = bar(1800.0, 1820.0, 1790.0, 1810.0);
         let zero = bar(0.0, 1.0, 0.0, 0.0);
-        assert!(compose_cross_s10(&legs2(), &[good.clone(), zero]).is_none());
+        assert!(compose_cross_s10(&legs2(), &[good, zero]).is_none());
         let nan = bar(f64::NAN, 1.0, 1.0, 1.0);
         assert!(compose_cross_s10(&legs2(), &[good, nan]).is_none());
     }

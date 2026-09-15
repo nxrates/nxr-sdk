@@ -5,7 +5,7 @@
 //!
 //! - `realized_var`   : Σ r² (HF canonical variance)
 //! - `bipower_var`    : (π/2) · Σ |r_t|·|r_{t-1}| (Barndorff-Nielsen & Shephard
-//!                      jump-robust variance; RV - BV ≈ jump variation)
+//!   jump-robust variance; RV - BV ≈ jump variation)
 //! - `drift`          : OLS slope · duration / close (dimensionless)
 //! - `vol_imbalance`  : Σ sign(r_t) · (vbid+vask)_t / total_vol (signed OFI)
 //! - `avg_spread_bps` : mean((ask - bid) / mid) × 1e4
@@ -112,6 +112,7 @@ impl BarAccumulator {
     /// tick-only inputs, so each tick is treated as one accepted observation).
     /// The caller is responsible for outlier filtering before this call.
     #[inline]
+    #[allow(clippy::too_many_arguments)] // flat bid/ask/vol/timestamp tuple; struct param out of scope
     pub fn ingest(
         &mut self,
         bid: f64,

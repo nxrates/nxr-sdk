@@ -341,6 +341,7 @@ impl RenkoGenerator {
     }
 
     #[inline]
+    #[allow(clippy::too_many_arguments)] // flat bar fields + write callback; struct param out of scope
     fn emit_bar<F>(
         &mut self,
         open_ts: i64,
@@ -400,6 +401,7 @@ impl RenkoGenerator {
     /// Feed one IndexRecord-derived observation. Drives brick detection AND
     /// accumulates microstructure (RV/BV/drift/OFI/spread/quality) so the
     /// emitted Bar carries the enrichment block.
+    #[allow(clippy::too_many_arguments)] // flat index-record fields + write callback; struct param out of scope
     pub fn feed_index_record<F>(
         &mut self,
         ts: i64,

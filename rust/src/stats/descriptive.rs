@@ -53,7 +53,7 @@ pub fn median_by<T>(data: &[T], f: impl Fn(&T) -> f64) -> f64 {
     let mut s: Vec<f64> = data.iter().map(&f).collect();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = s.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (s[n / 2 - 1] + s[n / 2]) / 2.0
     } else {
         s[n / 2]

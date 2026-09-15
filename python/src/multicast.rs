@@ -180,19 +180,27 @@ impl MulticastSubscriber {
     /// Receive one raw frame (bytes) with optional timeout in seconds.
     /// Returns None on timeout.
     #[pyo3(signature = (timeout=None))]
-    fn recv_raw(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Option<PyObject>> {
+    fn recv_raw(
+        &self,
+        py: Python<'_>,
+        timeout: Option<f64>,
+    ) -> Result<Option<PyObject>, crate::types::PyErr2> {
         let to = timeout.map(|s| Duration::from_secs_f64(s.max(0.0)));
         let result = py.allow_threads(|| recv_once(&self.rx, to));
         match result {
             RecvOnce::Frame(buf) => Ok(Some(PyBytes::new_bound(py, &buf).unbind().into_any())),
-            RecvOnce::Closed => Err(PyRuntimeError::new_err("subscriber closed")),
+            RecvOnce::Closed => Err(PyRuntimeError::new_err("subscriber closed").into()),
             RecvOnce::Timeout => Ok(None),
         }
     }
 
     /// Receive one decoded IndexRecord (or None on timeout).
     #[pyo3(signature = (timeout=None))]
-    fn recv(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Option<PyObject>> {
+    fn recv(
+        &self,
+        py: Python<'_>,
+        timeout: Option<f64>,
+    ) -> Result<Option<PyObject>, crate::types::PyErr2> {
         let to = timeout.map(|s| Duration::from_secs_f64(s.max(0.0)));
         loop {
             let result = py.allow_threads(|| recv_once(&self.rx, to));
@@ -201,7 +209,7 @@ impl MulticastSubscriber {
                     Some(rec) => return Ok(Some(PyIndexRecord { inner: rec }.into_py(py))),
                     None => continue,
                 },
-                RecvOnce::Closed => return Err(PyRuntimeError::new_err("subscriber closed")),
+                RecvOnce::Closed => return Err(PyRuntimeError::new_err("subscriber closed").into()),
                 RecvOnce::Timeout => return Ok(None),
             }
         }
@@ -215,10 +223,10 @@ impl MulticastSubscriber {
         if let Ok(mut g) = self.rx.lock() {
             g.take();
         }
-        if let Ok(mut g) = self.join.lock() {
-            if let Some(j) = g.take() {
-                let _ = j.join();
-            }
+        if let Ok(mut g) = self.join.lock()
+            && let Some(j) = g.take()
+        {
+            let _ = j.join();
         }
     }
 

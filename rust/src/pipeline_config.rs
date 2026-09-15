@@ -1840,7 +1840,10 @@ impl CalibrationYml {
                 self.mult_bounds[0], MULT_LOWER_BOUND
             ));
         }
-        if !(self.mult_bounds[1] > self.mult_bounds[0]) {
+        if self.mult_bounds[0].is_nan()
+            || self.mult_bounds[1].is_nan()
+            || self.mult_bounds[1] <= self.mult_bounds[0]
+        {
             return Err(format!(
                 "calibration.mult_bounds[1]={} must be > mult_bounds[0]={} (it seeds the \
                  bisection's INITIAL upper bracket; the search auto-expands it upward as needed)",
@@ -1943,6 +1946,37 @@ mod tests {
             target_bpd_by_class: BTreeMap::from([("crypto_stable".to_string(), 50.0)]),
             renko_k_overrides: BTreeMap::new(),
         }
+    }
+
+    /// `assert_bounds_consistent` is the startup gate on `mult_bounds`. A prior
+    /// clippy rewrite dropped the `mult_bounds[0].is_nan()` arm, so a YAML
+    /// `[.nan, 2.0]` loaded and seeded the calibrator with NaN. Every malformed
+    /// shape must be refused; the `.nan` floor is that regression.
+    #[test]
+    fn assert_bounds_consistent_refuses_nan_and_inverted_bounds() {
+        // The shared fixture is ascending and floor-consistent: the Ok pair.
+        assert!(cal().assert_bounds_consistent().is_ok());
+
+        let mut nan_floor = cal();
+        nan_floor.mult_bounds = [f64::NAN, 2.0];
+        assert!(
+            nan_floor.assert_bounds_consistent().is_err(),
+            "[NaN, 2.0] must be refused: NaN compares false against the K_FLOOR guard"
+        );
+
+        let mut nan_ceiling = cal();
+        nan_ceiling.mult_bounds = [1.0, f64::NAN];
+        assert!(
+            nan_ceiling.assert_bounds_consistent().is_err(),
+            "[1.0, NaN] must be refused"
+        );
+
+        let mut inverted = cal();
+        inverted.mult_bounds = [2.0, 1.0];
+        assert!(
+            inverted.assert_bounds_consistent().is_err(),
+            "[2.0, 1.0] inverted must be refused"
+        );
     }
 
     /// Minimal `signed_quotes:` yaml with whatever σ keys the case needs.
@@ -2342,7 +2376,7 @@ mod tests {
         );
 
         // Absent pair ⇒ no override ⇒ normal fit path.
-        assert!(y.renko_k_overrides.get("ETH/USDT").is_none());
+        assert!(!y.renko_k_overrides.contains_key("ETH/USDT"));
 
         // Default (field omitted) ⇒ empty map.
         let c = cal();

@@ -146,7 +146,7 @@ impl<T: Pod> AppendLog<T> {
                 .metadata()
                 .with_context(|| format!("stat {:?}", path))?
                 .len();
-            let aligned = (len / stride) * stride;
+            let aligned = len.checked_div(stride).map_or(len, |q| q * stride);
             if len != aligned {
                 warn!(
                     path = %path.display(),
@@ -199,10 +199,10 @@ impl<T: Pod> AppendLog<T> {
             // For the buffered variant, push the userspace buffer to the OS
             // BEFORE fdatasync — otherwise sync_data would only durably flush
             // bytes already in the page cache, leaving buffered records at risk.
-            if let Sink::Buffered(bw) = &mut self.file {
-                if let Err(e) = bw.flush() {
-                    warn!(path = %self.path, err = %e, "AppendLog periodic buf flush failed");
-                }
+            if let Sink::Buffered(bw) = &mut self.file
+                && let Err(e) = bw.flush()
+            {
+                warn!(path = %self.path, err = %e, "AppendLog periodic buf flush failed");
             }
             if let Err(e) = self.file.file().sync_data() {
                 warn!(path = %self.path, err = %e, "AppendLog periodic fdatasync failed");
@@ -251,10 +251,10 @@ impl<T: Pod> Drop for AppendLog<T> {
         // graceful shutdown of a buffered offline builder, the tail of the
         // BufWriter must reach the page cache before fdatasync, else the last
         // <256 KiB of records would be lost on drop.
-        if let Sink::Buffered(bw) = &mut self.file {
-            if let Err(e) = bw.flush() {
-                warn!(path = %self.path, err = %e, "AppendLog drop buf flush failed");
-            }
+        if let Sink::Buffered(bw) = &mut self.file
+            && let Err(e) = bw.flush()
+        {
+            warn!(path = %self.path, err = %e, "AppendLog drop buf flush failed");
         }
         if let Err(e) = self.file.file().sync_data() {
             warn!(path = %self.path, err = %e, "AppendLog drop fdatasync failed");

@@ -333,17 +333,17 @@ fn resolve_aggregation_interval_ms(hint: crate::pipeline_config::ConfigHint) -> 
 /// Extracted so the boot-assertion semantics are unit-testable without env /
 /// filesystem state. PANICS when both sources are present and disagree.
 fn reconcile_aggregation_interval_ms(env_val: Option<u64>, yaml_val: Option<u64>) -> u64 {
-    if let (Some(e), Some(y)) = (env_val, yaml_val) {
-        if e != y {
-            panic!(
-                "aggregation cadence SPLIT-BRAIN: env NXR_AGGREGATION_INTERVAL_MS={e} \
-                 disagrees with YAML network.aggregation_interval_ms={y}. These are TWO \
-                 representations of ONE value (live aggregator vs backfill); a mismatch \
-                 builds backfill .idx at a different density than live and skews renko bpd \
-                 by the cadence ratio. Set them equal (YAML is authoritative) or unset the \
-                 env var.",
-            );
-        }
+    if let (Some(e), Some(y)) = (env_val, yaml_val)
+        && e != y
+    {
+        panic!(
+            "aggregation cadence SPLIT-BRAIN: env NXR_AGGREGATION_INTERVAL_MS={e} \
+             disagrees with YAML network.aggregation_interval_ms={y}. These are TWO \
+             representations of ONE value (live aggregator vs backfill); a mismatch \
+             builds backfill .idx at a different density than live and skews renko bpd \
+             by the cadence ratio. Set them equal (YAML is authoritative) or unset the \
+             env var.",
+        );
     }
 
     // YAML wins (single source); env is the YAML-absent fallback; const last.

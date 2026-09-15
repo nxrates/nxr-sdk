@@ -71,7 +71,7 @@ fn np_dtype<'py>(
 /// 55  flags_body     u8
 /// ```
 #[pyfunction]
-pub fn index_record_dtype(py: Python<'_>) -> PyResult<PyObject> {
+pub fn index_record_dtype(py: Python<'_>) -> Result<PyObject, crate::types::PyErr2> {
     let fields: &[(&str, &str, usize)] = &[
         ("type_provider", "<u2", 0),
         ("mts_raw", "(6,)u1", 2),
@@ -95,7 +95,7 @@ pub fn index_record_dtype(py: Python<'_>) -> PyResult<PyObject> {
 
 /// NumPy structured dtype for the 96-byte `Bar`.
 #[pyfunction]
-pub fn bar_dtype(py: Python<'_>) -> PyResult<PyObject> {
+pub fn bar_dtype(py: Python<'_>) -> Result<PyObject, crate::types::PyErr2> {
     let fields: &[(&str, &str, usize)] = &[
         ("open_ts", "(6,)u1", 0),
         ("close_ts", "(6,)u1", 6),
@@ -121,7 +121,7 @@ pub fn bar_dtype(py: Python<'_>) -> PyResult<PyObject> {
 
 /// NumPy structured dtype for the 32-byte MITCH `Tick` body.
 #[pyfunction]
-pub fn tick_dtype(py: Python<'_>) -> PyResult<PyObject> {
+pub fn tick_dtype(py: Python<'_>) -> Result<PyObject, crate::types::PyErr2> {
     let fields: &[(&str, &str, usize)] = &[
         ("ticker", "<u8", 0),
         ("bid", "<f8", 8),
@@ -139,14 +139,15 @@ pub fn tick_dtype(py: Python<'_>) -> PyResult<PyObject> {
 fn frombuffer<'py>(
     py: Python<'py>,
     buf: &Bound<'py, PyBytes>,
-    dtype_fn: fn(Python<'_>) -> PyResult<PyObject>,
+    dtype_fn: fn(Python<'_>) -> Result<PyObject, crate::types::PyErr2>,
     stride: usize,
-) -> PyResult<PyObject> {
+) -> Result<PyObject, crate::types::PyErr2> {
     let n = buf.as_bytes().len();
     if n % stride != 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "buffer length {n} is not a multiple of record size {stride}"
-        )));
+        ))
+        .into());
     }
     let dtype = dtype_fn(py)?;
     let numpy = py.import_bound("numpy")?;
@@ -162,21 +163,30 @@ fn frombuffer<'py>(
 /// Note: `mts_raw` is the raw u48 little-endian header timestamp. Convert to
 /// unix-ms in pure Python with `EPOCH_MS_2010 + int.from_bytes(mts_raw, 'little') * 16 // 1000`.
 #[pyfunction]
-pub fn decode_idx_bytes(py: Python<'_>, buf: &Bound<'_, PyBytes>) -> PyResult<PyObject> {
+pub fn decode_idx_bytes(
+    py: Python<'_>,
+    buf: &Bound<'_, PyBytes>,
+) -> Result<PyObject, crate::types::PyErr2> {
     frombuffer(py, buf, index_record_dtype, IDX_REC_SIZE)
 }
 
 /// Decode a contiguous buffer of `Bar`s (length % 96 == 0) into a 1-D NumPy
 /// structured array. Zero-copy.
 #[pyfunction]
-pub fn decode_bar_bytes(py: Python<'_>, buf: &Bound<'_, PyBytes>) -> PyResult<PyObject> {
+pub fn decode_bar_bytes(
+    py: Python<'_>,
+    buf: &Bound<'_, PyBytes>,
+) -> Result<PyObject, crate::types::PyErr2> {
     frombuffer(py, buf, bar_dtype, message_sizes::BAR)
 }
 
 /// Decode a contiguous buffer of MITCH `Tick`s (length % 32 == 0) into a 1-D
 /// NumPy structured array.
 #[pyfunction]
-pub fn decode_tick_bytes(py: Python<'_>, buf: &Bound<'_, PyBytes>) -> PyResult<PyObject> {
+pub fn decode_tick_bytes(
+    py: Python<'_>,
+    buf: &Bound<'_, PyBytes>,
+) -> Result<PyObject, crate::types::PyErr2> {
     frombuffer(py, buf, tick_dtype, message_sizes::TICK)
 }
 
@@ -195,7 +205,7 @@ pub fn decode_tick_bytes(py: Python<'_>, buf: &Bound<'_, PyBytes>) -> PyResult<P
 pub fn encode_idx_record<'py>(
     py: Python<'py>,
     rec: &Bound<'py, PyDict>,
-) -> PyResult<Bound<'py, PyBytes>> {
+) -> Result<Bound<'py, PyBytes>, crate::types::PyErr2> {
     let ts_ms: i64 = rec
         .get_item("ts_ms")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("ts_ms"))?
@@ -238,7 +248,10 @@ pub fn encode_idx_record<'py>(
 /// Encode a Bar dict into 96 wire bytes. Keys: open_ms, close_ms, open, high,
 /// low, close (required); vbid, vask, tick_count (optional u32, default 0).
 #[pyfunction]
-pub fn encode_bar<'py>(py: Python<'py>, bar: &Bound<'py, PyDict>) -> PyResult<Bound<'py, PyBytes>> {
+pub fn encode_bar<'py>(
+    py: Python<'py>,
+    bar: &Bound<'py, PyDict>,
+) -> Result<Bound<'py, PyBytes>, crate::types::PyErr2> {
     let open_ms: i64 = bar
         .get_item("open_ms")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("open_ms"))?

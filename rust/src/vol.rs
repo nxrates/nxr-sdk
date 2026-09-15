@@ -36,6 +36,11 @@ pub trait VolSource {
     /// Number of bins stored.
     fn len(&self) -> usize;
 
+    /// True when no bins are stored.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// `sigma_pct` for bin at index `i`. Returns 0.0 if out of range.
     fn sigma_pct(&self, i: usize) -> f64;
 
@@ -479,6 +484,7 @@ impl LiveVolRing {
         finalized
     }
 
+    #[allow(clippy::too_many_arguments)] // flat OHLC + per-endpoint open/close; struct param out of scope
     fn touch_bin(
         &mut self,
         bs: i64,
@@ -749,7 +755,7 @@ mod tests {
         let n_spike = 6usize; // ~3 h of spike bins
 
         let mut sigmas = vec![calm_sigma; n_calm];
-        sigmas.extend(std::iter::repeat(spike_sigma).take(n_spike));
+        sigmas.extend(std::iter::repeat_n(spike_sigma, n_spike));
         let src = VecVolSource(sigmas);
 
         // Short blend windows so the test runs without 180 days of data, but the
@@ -831,8 +837,8 @@ mod tests {
     #[test]
     fn spike_responsive_never_below_blend() {
         let mut sigmas = vec![0.004_f64; 300];
-        sigmas.extend(std::iter::repeat(0.02_f64).take(5)); // spike
-        sigmas.extend(std::iter::repeat(0.004_f64).take(50)); // calm recovery
+        sigmas.extend(std::iter::repeat_n(0.02_f64, 5)); // spike
+        sigmas.extend(std::iter::repeat_n(0.004_f64, 50)); // calm recovery
         let src = VecVolSource(sigmas);
 
         let cfg_off = VolConfig {

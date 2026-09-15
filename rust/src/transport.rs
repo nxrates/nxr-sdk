@@ -225,17 +225,15 @@ impl UdpMulticastSource {
 }
 
 impl FrameSource for UdpMulticastSource {
-    fn recv(&mut self) -> impl Future<Output = Result<Option<Vec<u8>>>> + Send {
-        async move {
-            // tokio's async UdpSocket::recv never surfaces WouldBlock to user
-            // code — the runtime swallows it and reschedules the task. Any
-            // error that actually reaches here is real (socket closed, ICMP
-            // unreachable, interface down) and should propagate so the
-            // supervisor can react instead of being laundered into an empty
-            // frame that silently pollutes the dedup ring.
-            let n = self.socket.recv(&mut self.buf).await?;
-            Ok(Some(self.buf[..n].to_vec()))
-        }
+    async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
+        // tokio's async UdpSocket::recv never surfaces WouldBlock to user
+        // code — the runtime swallows it and reschedules the task. Any
+        // error that actually reaches here is real (socket closed, ICMP
+        // unreachable, interface down) and should propagate so the
+        // supervisor can react instead of being laundered into an empty
+        // frame that silently pollutes the dedup ring.
+        let n = self.socket.recv(&mut self.buf).await?;
+        Ok(Some(self.buf[..n].to_vec()))
     }
 
     fn label(&self) -> &'static str {

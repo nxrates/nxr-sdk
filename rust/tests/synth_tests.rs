@@ -380,6 +380,7 @@ fn rolling_correlation_ignores_non_finite() {
 
 // ─── GBM Monte-Carlo (port of synth-ohlc.gbm.test.ts) ──────────────────
 
+#[allow(clippy::too_many_arguments)] // flat Monte-Carlo parameters; struct param out of scope
 fn gbm_paths(
     mut rng: impl FnMut() -> f64 + 'static,
     n_ticks: usize,
@@ -479,7 +480,7 @@ fn mean_log_range_bias(estimated: &[nxr_sdk::synth::TimedOhlcCount], truth: &[Ti
         let Some(t) = t_map.get(&e.ts) else { continue };
         let rt = (t.h / t.l).ln();
         let re = (e.h / e.l).ln();
-        if !(rt > 0.0) || !re.is_finite() {
+        if rt.is_nan() || rt <= 0.0 || !re.is_finite() {
             continue;
         }
         sum += (re - rt) / rt;

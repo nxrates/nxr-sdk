@@ -137,7 +137,7 @@ pub fn reconstruct_synth_bar_series<F: Fn(usize, usize) -> f64 + Copy>(
                     * (rv[i].max(0.0) * rv[j].max(0.0)).sqrt();
             }
         }
-        if !(rv_synth >= 0.0) {
+        if rv_synth.is_nan() || rv_synth < 0.0 {
             rv_synth = 0.0;
         }
 
@@ -299,12 +299,7 @@ pub fn build_rolling_rho_cache(
     let mut per_leg_close: Vec<HashMap<u64, f64>> = Vec::with_capacity(n_legs);
     for leg in &path.legs {
         let series = *leg_bars.get(leg.sym.as_str()).unwrap();
-        per_leg_close.push(
-            series
-                .iter()
-                .map(|b| (b.close_mts(), b.close as f64))
-                .collect(),
-        );
+        per_leg_close.push(series.iter().map(|b| (b.close_mts(), b.close)).collect());
     }
     // Ordered-pair accumulators (i, j) with i < j.
     let win = window_buckets.max(2);
@@ -337,10 +332,11 @@ pub fn build_rolling_rho_cache(
         // Compute log-returns vs prior bucket.
         let mut rets: Vec<Option<f64>> = vec![None; n_legs];
         for k in 0..n_legs {
-            if let Some(pc) = prev_close[k] {
-                if pc > 0.0 && closes[k] > 0.0 {
-                    rets[k] = Some((closes[k] / pc).ln());
-                }
+            if let Some(pc) = prev_close[k]
+                && pc > 0.0
+                && closes[k] > 0.0
+            {
+                rets[k] = Some((closes[k] / pc).ln());
             }
         }
         // Update each ordered-pair accumulator and snapshot ρ.
@@ -471,7 +467,7 @@ pub fn reconstruct_synth_bar_series_rolling_rho(
                     * (rv[i].max(0.0) * rv[j].max(0.0)).sqrt();
             }
         }
-        if !(rv_synth >= 0.0) {
+        if rv_synth.is_nan() || rv_synth < 0.0 {
             rv_synth = 0.0;
         }
         // Microstructure inheritance — same rule as the identity-ρ path.

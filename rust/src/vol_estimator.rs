@@ -298,7 +298,7 @@ impl SigmaEstimator {
 /// class's LEFT TAIL, not its median (crypto's p50 is the higher of the two).
 /// The metals tape is tight around a high floor, while the CR class carries the
 /// gold-backed tokens, whose left tail is far below Bitcoin's.
-
+///
 /// FX: p1 of the 14-pair FX sample EXCLUDING USD-TRY, rounded down (281 -> 250).
 ///
 /// Sample: the 5 tokenized fiat crosses on Arc (EURC/QCAD/AUDF/JPYC/KRW1-USDC)
@@ -696,8 +696,13 @@ mod tests {
         let id = crate::resolve_ticker_id("EURC/USDC");
         assert!(sigma_floor_30m_for_ticker(id, PegClass::CrossFiat) > SIGMA_FLOOR_30M_STABLE);
         // The three arms are distinct, in the order their volatility implies.
-        assert!(SIGMA_FLOOR_30M_STABLE < SIGMA_FLOOR_30M_FX);
-        assert!(SIGMA_FLOOR_30M_FX < SIGMA_FLOOR_30M_CRYPTO);
+        let (stable, fx, crypto) = (
+            SIGMA_FLOOR_30M_STABLE,
+            SIGMA_FLOOR_30M_FX,
+            SIGMA_FLOOR_30M_CRYPTO,
+        );
+        assert!(stable < fx);
+        assert!(fx < crypto);
     }
 
     /// The volatile floors are UNCHANGED: only the pegged branch is new.

@@ -709,7 +709,7 @@ impl<T: Pod> ShardStream<T> {
             }
         }
         let stride = core::mem::size_of::<T>();
-        if stride > 0 && self.filled % stride != 0 {
+        if stride > 0 && !self.filled.is_multiple_of(stride) {
             // Heal torn-trailing-write at EOF (mirrors `read_shard_aligned`):
             // the OS guarantees atomicity only up to a page, so an
             // aggregator killed mid-append can leave a partial trailing
@@ -727,6 +727,7 @@ impl<T: Pod> ShardStream<T> {
     }
 
     /// Next record, or `Ok(None)` at EOF.
+    #[allow(clippy::should_implement_trait)] // returns Result<Option<T>>, not Iterator::next's Option<T>
     pub fn next(&mut self) -> Result<Option<T>> {
         let stride = core::mem::size_of::<T>();
         if stride == 0 {
@@ -1152,16 +1153,16 @@ impl IdxShardWriter {
         // Finalize the previous day's manifest entry only on a genuine date
         // change. A same-day open with no live log (seeded-from-tail restart)
         // just reopens today's shard in append mode — no finalize, no rotate.
-        if let Some(prev) = self.cur_date {
-            if prev != date {
-                // Drop the old log first so its fdatasync runs and the file is
-                // complete before we hash it.
-                self.log = None;
-                if self.manifest {
-                    if let Err(e) = self.finalize_manifest(prev) {
-                        tracing::warn!(err = %e, "shard manifest finalize failed");
-                    }
-                }
+        if let Some(prev) = self.cur_date
+            && prev != date
+        {
+            // Drop the old log first so its fdatasync runs and the file is
+            // complete before we hash it.
+            self.log = None;
+            if self.manifest
+                && let Err(e) = self.finalize_manifest(prev)
+            {
+                tracing::warn!(err = %e, "shard manifest finalize failed");
             }
         }
         let path = shard_path(&self.dir, date, "idx");
@@ -1268,16 +1269,17 @@ impl IdxShardWriter {
         // new_day=true, bypass the out-of-order drop below, and re-open
         // yesterday's shard for an out-of-order append (non-monotone record
         // + day-misrouted writer churn). Prior-day shards are closed history.
-        if let (Some(cur), Some(d)) = (self.cur_date, date) {
-            if new_day && d < cur {
-                tracing::warn!(
-                    ts,
-                    record_date = %d,
-                    current_date = %cur,
-                    "IdxShardWriter: dropped prior-day straggler (backward rotation forbidden)"
-                );
-                return Ok(false);
-            }
+        if let (Some(cur), Some(d)) = (self.cur_date, date)
+            && new_day
+            && d < cur
+        {
+            tracing::warn!(
+                ts,
+                record_date = %d,
+                current_date = %cur,
+                "IdxShardWriter: dropped prior-day straggler (backward rotation forbidden)"
+            );
+            return Ok(false);
         }
         if self.have_last && !new_day && ts < self.last_written_ts {
             tracing::warn!(
@@ -1552,14 +1554,14 @@ impl BarShardWriter {
         if self.cur_date == Some(date) && self.log.is_some() {
             return Ok(());
         }
-        if let Some(prev) = self.cur_date {
-            if prev != date {
-                self.log = None;
-                if self.manifest {
-                    if let Err(e) = self.finalize_manifest(prev) {
-                        tracing::warn!(err = %e, "bar shard manifest finalize failed");
-                    }
-                }
+        if let Some(prev) = self.cur_date
+            && prev != date
+        {
+            self.log = None;
+            if self.manifest
+                && let Err(e) = self.finalize_manifest(prev)
+            {
+                tracing::warn!(err = %e, "bar shard manifest finalize failed");
             }
         }
         let path = shard_path(&self.dir, date, self.ext);

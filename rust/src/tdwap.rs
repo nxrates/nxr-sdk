@@ -1432,7 +1432,7 @@ mod unmapped_bloc_tests {
         let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, now).unwrap();
         assert_eq!(mitch::index::conf_active_count(snap.confidence), 1);
         assert!(
-            u32::from(mitch::index::conf_active_count(snap.confidence)) < 2,
+            mitch::index::conf_active_count(snap.confidence) < 2,
             "one ticking leg must fail MIN_ACTIVE_PROVIDERS regardless of weight share"
         );
     }
@@ -1803,7 +1803,7 @@ mod tests {
         const STALE: f64 = 10.0;
         // Survivors agree near 63 700; the departing leg sits 100 bps below, so
         // any discontinuity in its weight is plainly visible in the mid.
-        let mut legs = vec![
+        let mut legs = [
             (1u16, mk_entry(63_699.5, 63_700.5, 1_000, 1_000, 1.0, t0)),
             (2u16, mk_entry(63_701.5, 63_702.5, 1_000, 1_000, 1.0, t0)),
             (3u16, mk_entry(63_062.0, 63_063.0, 1_000, 1_000, 1.0, t0)),

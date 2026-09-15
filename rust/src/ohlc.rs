@@ -299,7 +299,7 @@ where
                             state.ingest(mid, vbid, vask, ci_ubp);
                         }
                         Some(state) if bs > state.ts => {
-                            let closed = state.clone();
+                            let closed = *state;
                             self.cur =
                                 Some(BucketState::new(bs, self.tf_ms, mid, vbid, vask, ci_ubp));
                             return Some(closed.finalize());

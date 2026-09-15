@@ -20,7 +20,7 @@ pub fn compute_synth_tick(
     py: Python<'_>,
     legs: &Bound<'_, PyList>,
     snapshots: &Bound<'_, PyDict>,
-) -> PyResult<Option<PyObject>> {
+) -> Result<Option<PyObject>, crate::types::PyErr2> {
     // Parse legs.
     let mut rs_legs: Vec<Leg> = Vec::with_capacity(legs.len());
     for item in legs.iter() {
@@ -28,14 +28,14 @@ pub fn compute_synth_tick(
             .downcast()
             .map_err(|_| PyValueError::new_err("each leg must be a (sym, exp) tuple"))?;
         if tup.len() != 2 {
-            return Err(PyValueError::new_err("each leg tuple must have 2 elements"));
+            return Err(PyValueError::new_err("each leg tuple must have 2 elements").into());
         }
         let sym: String = tup.get_item(0)?.extract()?;
         let exp: i8 = tup.get_item(1)?.extract()?;
         if exp != 1 && exp != -1 {
-            return Err(PyValueError::new_err(format!(
-                "leg exp must be +1 or -1, got {exp}"
-            )));
+            return Err(
+                PyValueError::new_err(format!("leg exp must be +1 or -1, got {exp}")).into(),
+            );
         }
         rs_legs.push(Leg::new(sym, exp));
     }
@@ -94,9 +94,9 @@ pub fn compute_synth_tick(
                 conf,
             }
         } else {
-            return Err(PyValueError::new_err(format!(
-                "snapshot for {sym} must be tuple or dict"
-            )));
+            return Err(
+                PyValueError::new_err(format!("snapshot for {sym} must be tuple or dict")).into(),
+            );
         };
         owned.push((sym, snap));
     }

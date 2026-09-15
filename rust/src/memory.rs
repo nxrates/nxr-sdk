@@ -107,10 +107,10 @@ pub(crate) fn available_memory_bytes() -> Option<u64> {
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("Mach Virtual Memory Statistics: (page size of ")
             {
-                if let Some(num) = rest.split_whitespace().next() {
-                    if let Ok(n) = num.parse::<u64>() {
-                        page_size = n;
-                    }
+                if let Some(num) = rest.split_whitespace().next()
+                    && let Ok(n) = num.parse::<u64>()
+                {
+                    page_size = n;
                 }
             } else if let Some(rest) = line.strip_prefix("Pages free:") {
                 free = parse_pages(rest);
@@ -334,15 +334,15 @@ fn spawn_rss_watchdog(cap_bytes: u64) {
         .spawn(move || {
             loop {
                 std::thread::sleep(poll);
-                if let Some(rss) = process_rss_bytes(pid) {
-                    if rss > threshold {
-                        error!(
-                            rss_gib = rss / GIB,
-                            cap_gib = cap_bytes / GIB,
-                            "process RSS exceeded 80% of cap; aborting to protect host"
-                        );
-                        std::process::abort();
-                    }
+                if let Some(rss) = process_rss_bytes(pid)
+                    && rss > threshold
+                {
+                    error!(
+                        rss_gib = rss / GIB,
+                        cap_gib = cap_bytes / GIB,
+                        "process RSS exceeded 80% of cap; aborting to protect host"
+                    );
+                    std::process::abort();
                 }
             }
         });

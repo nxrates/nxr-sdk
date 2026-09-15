@@ -62,7 +62,7 @@ impl Client {
         from_ms: Option<i64>,
         to_ms: Option<i64>,
         limit: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> Result<PyObject, crate::types::PyErr2> {
         let mut url = format!("{}/v1/idx/{}", self.base, url_sym(sym));
         append_query(
             &mut url,
@@ -108,7 +108,7 @@ impl Client {
         from_ms: Option<i64>,
         to_ms: Option<i64>,
         limit: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> Result<PyObject, crate::types::PyErr2> {
         let mut url = format!("{}/v1/ohlc/{}", self.base, url_sym(sym));
         append_query(
             &mut url,
@@ -191,7 +191,7 @@ impl Client {
         from_ms: Option<i64>,
         to_ms: Option<i64>,
         limit: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> Result<PyObject, crate::types::PyErr2> {
         let mut url = format!("{}/v1/bars/{}/{}", self.base, url_sym(sym), kind);
         append_query(
             &mut url,
@@ -223,12 +223,12 @@ impl Client {
     }
 
     /// GET /v1/tickers — JSON list passthrough.
-    fn fetch_tickers(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn fetch_tickers(&self, py: Python<'_>) -> Result<PyObject, crate::types::PyErr2> {
         self.get_json(py, "/v1/tickers")
     }
 
     /// GET /v1/providers — JSON {id: name} passthrough.
-    fn fetch_providers(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn fetch_providers(&self, py: Python<'_>) -> Result<PyObject, crate::types::PyErr2> {
         self.get_json(py, "/v1/providers")
     }
 
@@ -238,7 +238,7 @@ impl Client {
 }
 
 impl Client {
-    fn get_json(&self, py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    fn get_json(&self, py: Python<'_>, path: &str) -> Result<PyObject, crate::types::PyErr2> {
         let url = format!("{}{}", self.base, path);
         let body = py
             .allow_threads(|| -> Result<String, String> {

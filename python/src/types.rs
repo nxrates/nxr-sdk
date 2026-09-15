@@ -12,6 +12,25 @@ use mitch::tick::Tick as MTick;
 use mitch::timestamp;
 use nxr_sdk::ipc::record::IndexRecord as NIndexRecord;
 
+/// Transparent `PyErr` wrapper. pyo3 0.22's `#[pyfunction]`/`#[pymethods]`
+/// macros append `.map_err(Into::<PyErr>::into)`, which clippy flags as a
+/// useless self-conversion when the return error is already `PyErr`; returning
+/// this newtype keeps the conversion non-trivial and propagates the identical
+/// error (see pyo3 error-handling docs, "newtype strategy").
+pub(crate) struct PyErr2(PyErr);
+
+impl From<PyErr> for PyErr2 {
+    fn from(e: PyErr) -> Self {
+        Self(e)
+    }
+}
+
+impl From<PyErr2> for PyErr {
+    fn from(e: PyErr2) -> Self {
+        e.0
+    }
+}
+
 /// 56-byte IndexRecord = MitchHeader (16B) + Index body (40B).
 #[pyclass(name = "IndexRecord", module = "nxr_sdk._native")]
 #[derive(Clone, Copy)]
@@ -135,6 +154,7 @@ impl IndexRecord {
     }
 
     /// Wire-format bytes (56 B).
+    #[allow(clippy::wrong_self_convention)] // pyo3 rejects by-value `self` on PyClass methods; `&self` receiver is mandatory
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         pyo3::types::PyBytes::new_bound(py, bytemuck::bytes_of(&self.inner))
     }
@@ -278,6 +298,7 @@ impl Bar {
         self.inner.kind
     }
 
+    #[allow(clippy::wrong_self_convention)] // pyo3 rejects by-value `self` on PyClass methods; `&self` receiver is mandatory
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         pyo3::types::PyBytes::new_bound(py, bytemuck::bytes_of(&self.inner))
     }
@@ -344,6 +365,7 @@ impl Tick {
         (self.inner.bid + self.inner.ask) / 2.0
     }
 
+    #[allow(clippy::wrong_self_convention)] // pyo3 rejects by-value `self` on PyClass methods; `&self` receiver is mandatory
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         pyo3::types::PyBytes::new_bound(py, bytemuck::bytes_of(&self.inner))
     }

@@ -179,6 +179,18 @@ pub enum RecordFormat {
     /// `BatchQuoteV4`, so a V5 signature can never verify as a V4 one.
     /// See `server::signed_v5`.
     PackedV5,
+    /// V6 DIFF wire for `ExternalOracleV5`: 12 B header (`version:u8(=6) |
+    /// seq:u32 | srcSecs:u32 | nP:u8 | nS:u8 | nC:u8`) then three gi-sorted
+    /// sparse sections — price 5 B (`gi:u8 | word:u32`), σ 5 B and conf 3 B
+    /// unchanged from V4/V5. `srcSecs` is the ABSOLUTE unix source second
+    /// (A-262: V4/V5's cyclic deci-second aliased every 24 h). The price word
+    /// is `exp7:u7 | mant:u25` with an ABSOLUTE exponent
+    /// (`mark = mant << (exp7 - 16)`), so a `packedV6` lane map MUST declare
+    /// `exp_bias: 0`. `nP != 0`, `nC == nP` and the price/conf `gi` sequences
+    /// are identical. 4 lanes per slot. EIP-712 domain name and the
+    /// `BatchQuoteV4` typehash are UNCHANGED from V5 — only the encoder moves.
+    /// See `server::signed_v6`.
+    PackedV6,
 }
 
 impl Default for RecordFormat {
@@ -203,6 +215,7 @@ impl RecordFormat {
             "packedV2" | "packed_v2" => Ok(Self::PackedV2),
             "packedV4" | "packed_v4" => Ok(Self::PackedV4),
             "packedV5" | "packed_v5" => Ok(Self::PackedV5),
+            "packedV6" | "packed_v6" => Ok(Self::PackedV6),
             "ticker30" => Err(
                 "signed_quotes record_format `ticker30` is RETIRED and this build cannot emit \
                  it. Declare `ticker22` if the consumer contract was migrated, `idx24` if it \
@@ -211,13 +224,15 @@ impl RecordFormat {
             ),
             other => Err(format!(
                 "signed_quotes record_format {other:?} is not a layout this build emits; \
-                 accepted: `idx24`, `ticker22`, `packedV2`, `packedV4`, `packedV5`"
+                 accepted: `idx24`, `ticker22`, `packedV2`, `packedV4`, `packedV5`, \
+                 `packedV6`"
             )),
         }
     }
 
-    /// Bytes per packed record. `None` = VARIABLE: `packedV4`/`packedV5` are
-    /// diff wires of per-section entry sizes (4/5/3 B and 5/5/3 B), so no
+    /// Bytes per packed record. `None` = VARIABLE: `packedV4`/`packedV5`/
+    /// `packedV6` are diff wires of per-section entry sizes (4/5/3 B and
+    /// 5/5/3 B), so no
     /// single stride exists and a consumer must frame off the header counts,
     /// never off a stride.
     pub fn record_bytes(self) -> Option<usize> {
@@ -225,7 +240,7 @@ impl RecordFormat {
             Self::Idx24 => Some(24),
             Self::Ticker22 => Some(22),
             Self::PackedV2 => Some(100),
-            Self::PackedV4 | Self::PackedV5 => None,
+            Self::PackedV4 | Self::PackedV5 | Self::PackedV6 => None,
         }
     }
 
@@ -240,6 +255,7 @@ impl RecordFormat {
             Self::PackedV2 => 9,
             Self::PackedV4 => 12,
             Self::PackedV5 => 11,
+            Self::PackedV6 => 12,
         }
     }
 
@@ -251,6 +267,7 @@ impl RecordFormat {
             Self::PackedV2 => "packedV2",
             Self::PackedV4 => "packedV4",
             Self::PackedV5 => "packedV5",
+            Self::PackedV6 => "packedV6",
         }
     }
 }

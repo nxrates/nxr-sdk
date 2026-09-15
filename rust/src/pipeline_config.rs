@@ -185,8 +185,10 @@ pub enum RecordFormat {
     /// unchanged from V4/V5. `srcSecs` is the ABSOLUTE unix source second
     /// (A-262: V4/V5's cyclic deci-second aliased every 24 h). The price word
     /// is `exp7:u7 | mant:u25` with an ABSOLUTE exponent
-    /// (`mark = mant << (exp7 - 16)`), so a `packedV6` lane map MUST declare
-    /// `exp_bias: 0`. `nP != 0`, `nC == nP` and the price/conf `gi` sequences
+    /// (`mark = mant << (exp7 - 16)`), so every `packedV6` lane MUST resolve to
+    /// `exp_bias: 0` — from the domain's `lane_map` where it has one, and from
+    /// the per-feed catalog row (`SignedFeedYml::exp_bias`) where it does not.
+    /// Both paths are refused at boot, not at push time. `nP != 0`, `nC == nP` and the price/conf `gi` sequences
     /// are identical. 4 lanes per slot. EIP-712 domain name and the
     /// `BatchQuoteV4` typehash are UNCHANGED from V5 — only the encoder moves.
     /// See `server::signed_v6`.

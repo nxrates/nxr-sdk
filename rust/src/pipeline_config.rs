@@ -1095,29 +1095,28 @@ pub struct StorageYml {
     /// PARITY LEGS, keyed by base asset: another instrument's price joins the
     /// asset's storage vector at 1:1, converted over its own bridge at epoch -1
     /// like any market and held to the same HHI ceiling. `XAUT: [XAU/USD]`
-    /// blends spot gold into the token's mark; `QQQ: [binance QQQB/USDT]`
-    /// carries the 24/7 tokenised book into an RTH-only equity. A closed
+    /// blends spot gold into the token's mark; `QQQ: [NAS100/USD]`
+    /// carries the index, rebased (`multiplier`), into an RTH-only equity. A closed
     /// market goes stale and drops out by the ordinary freshness gate. The
     /// asset's published id is unchanged: a leg is an input, never an output.
     #[serde(default)]
     pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
+    /// Ceiling on the COMBINED share of an EQ asset's surveyed markets (the
+    /// tokenised wrappers, QQQB/SPYB) in its vector, in (0, 1). Absent = no
+    /// ceiling. A wrapper premium then moves the mark by at most this share.
+    #[serde(default)]
+    pub wrapper_share_cap: Option<f64>,
 }
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at
 /// epoch -1 and weighted as a relay venue; present = that venue's book for
-/// `pair`, weighted from the survey like any surveyed market. An asset with a
-/// row also takes its SURVEYED CEX markets whatever its class (the tokenised
-/// ETF wrappers are markets of the ETF, aliased in `cexs.aliases`).
+/// `pair`, weighted from the survey like any surveyed market. A perp leg names
+/// its own id (`XAU/USDT:PERP`), so no book kind is needed to tell it apart.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ParityLegYml {
     pub pair: String,
     #[serde(default)]
     pub provider: Option<String>,
-    /// The book kind the venue entry must carry (`spot` default, `perp`). A
-    /// perp book sits under the underlying's id state-only, so the kind is
-    /// what keeps a spot row from reading it and vice versa.
-    #[serde(default)]
-    pub kind: crate::tdwap::MarketKind,
     /// Multiplier on the leg's base weight (relay median for a composite, the
     /// survey's for a venue book) before the HHI ceiling. 1.0 = one median
     /// venue; 0.5 halves a two-leg blend's exposure to a wrapper premium.
@@ -1149,7 +1148,6 @@ impl Default for ParityLegYml {
         Self {
             pair: String::new(),
             provider: None,
-            kind: crate::tdwap::MarketKind::Spot,
             weight: 1.0,
             share: None,
             max_dev_bps: None,
@@ -1476,14 +1474,14 @@ mod tests {
     }
 
     /// U3/U4 grammar: an absolute share, a derived leg with its defaults, a
-    /// perp-kind venue leg, and the shipped rows.
+    /// perp venue leg, and the shipped rows.
     #[test]
-    fn parity_leg_share_kind_and_multiplier_parse() {
+    fn parity_leg_share_and_multiplier_parse() {
         let y: StorageYml = serde_yml::from_str(concat!(
             "parity_legs:\n",
             "  XAUT: [{pair: XAU/USD, share: 0.35, max_dev_bps: 60, multiplier: {learn: rolling_common, window_h: 24, cap_bps: 100, ref: survey}}]\n",
             "  QQQ: [{pair: NAS100/USD, multiplier: {learn: daily_open_vwap, window_h: 6.5, seed: 0.024339}},\n",
-            "        {pair: QQQ/USD, provider: binance_futures, kind: perp, weight: 0.5}]\n",
+            "        {pair: QQQ/USDT:PERP, provider: binance_futures, weight: 0.5}]\n",
         ))
         .expect("parse");
         let xau = &y.parity_legs["XAUT"][0];
@@ -1505,23 +1503,20 @@ mod tests {
             (60, 100.0, 30.0, 96.0, 1.0)
         );
         let q = &y.parity_legs["QQQ"];
-        assert_eq!(q[0].kind, crate::tdwap::MarketKind::Spot);
         let m = q[0].multiplier.unwrap();
         assert_eq!(
             (m.learn, m.reference, m.cap_bps),
             (LearnWindow::DailyOpenVwap, BasisRef::Relay, 300.0)
         );
         assert!((m.seed - 0.024339).abs() < 1e-12);
-        assert_eq!(
-            (q[1].kind, q[1].weight),
-            (crate::tdwap::MarketKind::Perp, 0.5)
-        );
+        assert_eq!((q[1].pair.as_str(), q[1].weight), ("QQQ/USDT:PERP", 0.5));
 
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.yml");
         if let Ok(raw) = std::fs::read_to_string(path) {
             let y: PipelineYml = serde_yml::from_str(&raw).expect("config.yml parses");
             let legs = &y.cexs.storage.parity_legs;
             assert_eq!(legs["XAUT"][0].share, Some(0.35));
+            assert_eq!(y.cexs.storage.wrapper_share_cap, Some(0.5));
             assert!(
                 legs.values()
                     .flatten()

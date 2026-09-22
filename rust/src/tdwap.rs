@@ -266,18 +266,6 @@ pub fn coarse_now_backdated(lateness_ms: u64) -> Instant {
     coarse_now() - Duration::from_millis(lateness_ms)
 }
 
-/// What kind of book a state entry is. A PERP book lives under its
-/// underlying's id (U2 admits it at ingest, state-only, never published) and
-/// is read ONLY by a `parity_legs` row that names `kind: perp`: the relay fold
-/// and the basis reference skip it, so a perp never enters a mark unrebased.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MarketKind {
-    #[default]
-    Spot,
-    Perp,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderEntry {
     /// Latest per-provider aggregate (MITCH canonical type).
@@ -327,8 +315,6 @@ pub struct ProviderEntry {
     /// unmapped, the bloc bound does not apply, and the blend is the same
     /// equal-weight composite it was before the bound existed.
     pub mapped: bool,
-    /// Spot (default) or perp. See [`MarketKind`].
-    pub market_kind: MarketKind,
 }
 
 impl ProviderEntry {
@@ -347,7 +333,6 @@ impl ProviderEntry {
             ema_ipi_secs: 5.0,
             injected: false,
             mapped: false,
-            market_kind: MarketKind::Spot,
         }
     }
 

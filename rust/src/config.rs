@@ -194,9 +194,7 @@ impl NxrConfig {
             // heals) — plus USDT/USDC made EXPLICIT (fallback-reachable via
             // USDT/USD today, but it is the signed-manifest via-leg for 6
             // bridges; do not leave it implicit).
-            // QQQB/USDT (binance bStocks, 24/7): the `cexs.storage.parity_legs`
-            // venue leg for QQQ/USD. Subscribed here or the leg is dead.
-            // QQQ/USDT + SPY/USDT (2026-09-22): the Binance bStocks wrappers
+            // QQQB/USDT, QQQ/USDT + SPY/USDT (2026-09-22): the Binance bStocks wrappers
             // (venue symbols QQQBUSDT / SPYBUSDT, aliased per venue in
             // `cexs.exchanges.<name>.aliases`) are the QQQ and SPY equities
             // themselves; `QQQB/USDT` spelled here selects the same book and id.

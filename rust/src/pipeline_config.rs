@@ -1035,6 +1035,11 @@ pub struct CexsYml {
     /// FX major currency symbols. Was: `series_factory::nxr_calibrate::FX_MAJORS`.
     #[serde(default)]
     pub fx_majors: Vec<String>,
+    /// Metal-backed tokens (XAUT, PAXG): wire class CR, but they price like
+    /// the metal. Selects the FX/metal price kernel (`tdwap::Kernel`), not the
+    /// crypto one. Empty = `asset_class::DEFAULT_METAL_BACKED`.
+    #[serde(default)]
+    pub metal_backed: Vec<String>,
     /// All scrape-able assets (input list for the weights scraper).
     #[serde(default)]
     pub assets: Vec<String>,

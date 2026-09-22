@@ -168,6 +168,8 @@ pub fn effective_list<'a>(yaml: &'a [String], default: &'static [&'static str])
 /// Audit-frozen fallback crypto-major list. Only used when
 /// `cexs.crypto_majors` in YAML is empty (warn-logged).
 pub const DEFAULT_CRYPTO_MAJORS: &[&str] = &["BTC", "ETH", "SOL", "BNB", "XRP"];
+/// Fallback for `cexs.metal_backed`.
+pub const DEFAULT_METAL_BACKED: &[&str] = &["XAUT", "PAXG"];
 
 /// Audit-frozen fallback stablecoin list. Mirrors the Tier-1 set in
 /// `config.yml::cexs.pegged`. Used only when YAML empty (warn).

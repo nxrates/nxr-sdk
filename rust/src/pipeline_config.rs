@@ -496,10 +496,13 @@ pub struct CtraderProviderYml {
     #[serde(default)]
     pub fix_sender_comp_id: String,
     /// Canonical "BASE/QUOTE" → broker-side cTrader symbol name (e.g.
-    /// "XAU/USD" → "XAUUSD"). Symbol IDs are NOT configured: they differ per
-    /// broker, so they are resolved at connect via ProtoOASymbolsListReq.
+    /// "XAU/USD" → "XAUUSD"), or a LIST of spellings when the broker's own
+    /// name for an instrument is not settled (`US500-PERP` vs `SP500-PERP`):
+    /// the first one the broker actually lists wins and the rest cost nothing.
+    /// Symbol IDs are NOT configured: they differ per broker, so they are
+    /// resolved at connect via ProtoOASymbolsListReq.
     #[serde(default)]
-    pub symbols: BTreeMap<String, String>,
+    pub symbols: BTreeMap<String, BrokerSymbol>,
     /// Endpoint host: `demo.ctraderapi.com` or `live.ctraderapi.com`.
     /// Demo and live are fully separate account systems.
     #[serde(default)]
@@ -508,6 +511,26 @@ pub struct CtraderProviderYml {
     /// cTrader UI). Selects one `ctidTraderAccountId` out of the token grant.
     #[serde(default)]
     pub trader_login: i64,
+}
+
+/// One broker-side symbol name, or the spellings to try for it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum BrokerSymbol {
+    One(String),
+    Any(Vec<String>),
+}
+
+impl BrokerSymbol {
+    /// The spellings, in config order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Self::One(s) => std::slice::from_ref(s),
+            Self::Any(v) => v.as_slice(),
+        }
+        .iter()
+        .map(String::as_str)
+    }
 }
 
 /// `runtime:` block — forwarder + server tuning knobs. All `Option<…>`
@@ -652,9 +675,8 @@ impl PipelineYml {
         self.oracles
             .providers
             .values()
-            .map(|p| &p.symbols)
-            .chain(self.ctrader.providers.values().map(|p| &p.symbols))
-            .flat_map(|m| m.keys())
+            .flat_map(|p| p.symbols.keys())
+            .chain(self.ctrader.providers.values().flat_map(|p| p.symbols.keys()))
             .map(|s| s.to_uppercase())
             .filter(|s| crate::is_perp_symbol(s) == perp)
             .collect()

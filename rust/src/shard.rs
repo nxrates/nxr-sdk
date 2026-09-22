@@ -98,10 +98,10 @@ pub const FLAG_CONF_FRESHNESS: u8 = 0b0000_1000;
 /// byte carries the PACKED ACTIVE-PROVIDER measurement written by
 /// `nxr_sdk::tdwap::compute_vwap_at`:
 ///
-/// - bits 0..6 (`& 0x7F`) = `active_count` — legs with non-floored staleness
-///   decay `>= 0.1`, i.e. genuinely ticking, saturated at 64.
-/// - bit 7 (`& 0x80`) = `fresh_weight_ok` — the fresh-WEIGHT share
-///   `wd_sum/bw_sum >= FRESH_WEIGHT_SHARE_FLOOR`.
+/// - bits 0..6 (`& 0x7F`) = `active_count` — live, observed legs
+///   (`tdwap::freshness > 0`, not injected), saturated at 64.
+/// - bit 7 (`& 0x80`) = `fresh_weight_ok` — those legs' final share of the
+///   mark `>= FRESH_WEIGHT_SHARE_FLOOR`.
 ///
 /// Pack/unpack live in `mitch::index` (`conf_pack_active`, `conf_active_count`,
 /// `conf_fresh_weight_ok`) — the single source of truth for the encoding.
@@ -156,28 +156,19 @@ pub fn conf_bps(confidence: u8, flags: u8) -> u16 {
     }
 }
 
-/// Minimum share of base weight held by TICKING legs (`active_bw_sum/bw_sum` in
-/// `tdwap.rs`) for `fresh_weight_ok` (bit 7 of the packed `confidence` byte).
+/// Minimum FINAL share of the mark held by live, observed legs
+/// (`compute_vwap_at` bit 7): the weight-aware companion of `active_count`,
+/// which alone would pass 2 ticking legs carrying 1% of the mark.
 ///
-/// This is the WEIGHT-AWARENESS companion to `active_count`, which is otherwise
-/// weight-blind: 2 ticking legs carrying 1% of the book would satisfy a pure
-/// count. 0.20 = with 10 equal-weight legs, 2 ticking legs hold 20% of base
-/// weight — the same 2-of-N doctrine as `signed_quotes.min_accepted_providers`.
+/// 0.20 = two of ten equal legs: past `stale` a silent leg keeps only its
+/// decaying kernel share and never the cap's excess, so two confirming legs
+/// clear 0.20 from the crossing on, one does not
+/// (`tdwap::tests::fresh_weight_floor_is_two_of_ten`). On final shares the
+/// value does not dilute with breadth: a healthy book sits near 1.0.
 ///
-/// ⚠ It is deliberately the ACTIVE-weight share, NOT the decay-weighted
-/// `Σ base_weight·decay / Σ base_weight` that the old `confidence` byte carried.
-/// The decay-weighted ratio DILUTES with breadth (each added venue contributes
-/// full base_weight to the denominator but only base_weight·decay to the
-/// numerator), so thresholding it re-creates the very inversion this gate exists
-/// to remove: measured 2026-07-25 it scored 0.059 on BTC-USDC (10 venues) and
-/// 0.082 on ETH-USDC, i.e. a 0.20 floor would reject our two best-corroborated
-/// books while admitting a single-leg Pyth feed. The active share does not
-/// dilute — a recently-ticked leg contributes its FULL base weight — so a healthy
-/// deep book sits near 1.0. Never swap the numerator back.
-///
-/// The floor this REPLACES, `min_composite_freshness_bps = 300`, only demanded
-/// `f >= 0.03` (byte >= 8 of 255), so a composite whose every leg was
-/// stale-but-not-corpse (decay ≈ 0.05 → f = 0.05 = 500 bps) PASSED it.
+/// Not refit on a leg replay: per-leg frames are not persisted (`/data/ticks`
+/// is empty) and the 2026-09-06..10 replay tape carries <= 3 distinct sources
+/// per pair, too few for a share distribution. The value is the doctrine's.
 pub const FRESH_WEIGHT_SHARE_FLOOR: f64 = 0.20;
 
 /// `Index.flags` bit 4: this INDEX record was rewritten by the offline

@@ -2060,6 +2060,36 @@ mod tests {
         assert!(mid(0, 3_000) < 100.05 - 1e-4, "past the cadence the older leg fades");
     }
 
+    /// The floor on final shares: the live legs carry at least 0.20 of the
+    /// mark. Of ten equal pegged legs, two still confirming clear it from the
+    /// moment the other eight pass `stale` (those keep only their decaying
+    /// kernel share, never the cap's excess); one alone does not at the
+    /// crossing, and gains influence only as the silent ones decay (the
+    /// breadth gate, `active_count >= 2`, still refuses it).
+    #[test]
+    fn fresh_weight_floor_is_two_of_ten() {
+        let t0 = Instant::now();
+        for (live, ok) in [(2usize, true), (1, false)] {
+            let mut legs: Vec<ProviderEntry> =
+                (0..10).map(|_| mk_entry(0.99990, 0.99991, 1_000, 1_000, 1.0, t0)).collect();
+            for secs in (5u64..=300).step_by(5) {
+                let now = t0 + Duration::from_secs(secs);
+                for e in legs.iter_mut().take(live) {
+                    e.update_at(e.index, now);
+                }
+                if secs <= 10 {
+                    continue;
+                }
+                let idx = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap();
+                assert_eq!(mitch::index::conf_active_count(idx.confidence) as usize, live);
+                let bit = mitch::index::conf_fresh_weight_ok(idx.confidence);
+                if ok || secs <= 15 {
+                    assert_eq!(bit, ok, "{live} of 10 live at t+{secs} s");
+                }
+            }
+        }
+    }
+
     #[test]
     fn measured_sigma_is_clamped_to_ten_floors() {
         let k = Kernel::MAJOR;

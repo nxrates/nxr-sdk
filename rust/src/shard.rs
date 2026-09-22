@@ -67,6 +67,15 @@ pub const FLAG_HISTORICAL_BACKFILL: u8 = 0b0000_0010;
 /// consumers can ignore the flag. Set by `nxr_sdk::renko::RenkoGenerator`.
 pub const FLAG_RENKO_SYNTHETIC_BRICK: u8 = 0b0000_0100;
 
+/// `Index.flags` bit 2 (INDEX flag space, FORWARDER -> CORE WIRE ONLY): this
+/// provider frame re-affirms an unchanged quote the forwarder proved live
+/// (venue sequence advanced, size moved, or venue-wide activity), rather than
+/// carrying a new price. The core stamps it as a confirmation like any frame;
+/// the bit lives only in provider state and never reaches a composite, `.idx`
+/// or the bars (composites build their own flags). Bit 2 is
+/// `FLAG_RENKO_SYNTHETIC_BRICK` in the *Bar* space, which never sees it.
+pub const FLAG_REAFFIRM: u8 = 0b0000_0100;
+
 /// `Index.flags` bit 3: LEGACY (pre-2026-07-25 cutover) — this INDEX record's
 /// `confidence` byte (Index body offset 36) carries a continuous freshness
 /// FRACTION (`f = byte / 255 ∈ [0,1]`, ~1 when all providers fresh) rather than

@@ -98,7 +98,9 @@ pub use providers::{get_market_provider_by_id, get_market_provider_id_by_name};
 
 // ---- Aggregation primitives ----
 
-pub use agg::{RunningStats, TickAccumulator, is_valid_tick, now_ms, now_mts, now_ns, now_sec};
+pub use agg::{
+    RunningStats, TickAccumulator, is_valid_book, is_valid_tick, now_ms, now_mts, now_ns, now_sec,
+};
 
 // ---- TDWAP aggregation ----
 

@@ -144,6 +144,13 @@ pub fn bucket_for_pair(
     classify_ticker(&ticker, &base_uc, &quote_uc, crypto_majors, stablecoins, fx_majors)
 }
 
+/// Both legs of `symbol` (`BASE/QUOTE` or `BASE-QUOTE`) are USD-pegged:
+/// members of `pegged` (`cexs.pegged` plus `cexs.usd_aliases`).
+pub fn is_pegged_pair(symbol: &str, pegged: &[&str]) -> bool {
+    crate::split_pair_multi(symbol, &['-', '/'])
+        .is_some_and(|(b, q)| contains_ci(pegged, b) && contains_ci(pegged, q))
+}
+
 /// Resolve a YAML `Vec<String>` list to `Vec<&str>`, falling back to a
 /// compile-time list only when the YAML field is empty. Callers should
 /// `warn!` on empty YAML so operators notice cfg drift (see

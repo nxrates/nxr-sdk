@@ -160,6 +160,11 @@ mod perp_tests {
             ("QQQ/USDT:PERP", "QQQ/USDT"),
             ("XAUT/USDT:PERP", "XAUT/USDT"),
             ("PAXG/USDT:PERP", "PAXG/USDT"),
+            // The Pepperstone index perps (NAS100-PERP, US500-PERP): USD-quoted
+            // on the index asset itself, so the leg is rebasable onto the cash
+            // CFD and can never collide with it.
+            ("NDX/USD:PERP", "NDX/USD"),
+            ("SPX/USD:PERP", "SPX/USD"),
             ("xau/usdt:perp", "XAU/USDT"),
         ] {
             let p = try_resolve_ticker_id(perp).unwrap_or_else(|| panic!("{perp} must resolve"));

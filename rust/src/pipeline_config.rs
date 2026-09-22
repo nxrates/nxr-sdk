@@ -623,20 +623,41 @@ impl PipelineYml {
         for sym in &self.cexs.cross_pairs {
             out.insert(sym.to_uppercase());
         }
-        for prov in self.oracles.providers.values() {
-            for sym in prov.symbols.keys() {
-                out.insert(sym.to_uppercase());
-            }
-        }
-        // Broker symbols count too: this set is what the aggregator admits, so a
-        // section missing here is silently dropped as `unknown_ticker` no matter
-        // how healthy the forwarder is.
-        for prov in self.ctrader.providers.values() {
-            for sym in prov.symbols.keys() {
-                out.insert(sym.to_uppercase());
-            }
-        }
+        // Oracle and broker symbols count too: this set is what the aggregator
+        // admits, so a section missing here is silently dropped as
+        // `unknown_ticker` no matter how healthy the forwarder is. The
+        // state-only `:PERP` rows are NOT here: `configured_perp_symbols`.
+        out.extend(self.relay_manifest(false));
         out
+    }
+
+    /// The `<X>:PERP` rows of `oracles.providers.*` / `ctrader.providers.*`:
+    /// STATE-ONLY ids, excluded from [`Self::configured_symbols`] and
+    /// [`Self::relay_symbols`] for the same reason an `NXR_SYMBOLS` perp entry
+    /// is excluded from the served list (`core::main::split_perp_symbols`):
+    /// a perp is a parity/derived leg and nothing else, never served, never
+    /// published as an asset, never sharded, never an auto-cross leg. It still
+    /// has to be ADMITTED at the UDP gate, which is the one thing this set is
+    /// for.
+    pub fn configured_perp_symbols(&self) -> std::collections::BTreeSet<String> {
+        self.relay_manifest(true)
+    }
+
+    /// Every symbol declared by a relay forwarder (`oracles` + `ctrader`),
+    /// uppercased, split on the one axis every caller splits it on: `perp` =
+    /// the state-only `:PERP` rows, `!perp` = everything that is served and
+    /// sharded. One iteration behind `configured_symbols`, `relay_symbols` and
+    /// `configured_perp_symbols`.
+    fn relay_manifest(&self, perp: bool) -> std::collections::BTreeSet<String> {
+        self.oracles
+            .providers
+            .values()
+            .map(|p| &p.symbols)
+            .chain(self.ctrader.providers.values().map(|p| &p.symbols))
+            .flat_map(|m| m.keys())
+            .map(|s| s.to_uppercase())
+            .filter(|s| crate::is_perp_symbol(s) == perp)
+            .collect()
     }
 
     /// Every symbol a RELAY forwarder observes directly: `oracles.providers.*`
@@ -651,18 +672,8 @@ impl PipelineYml {
     /// that is ALSO listed as a cross stays here: observed beats derived, the
     /// same precedence `composed_gate_set` applies.
     pub fn relay_symbols(&self) -> std::collections::BTreeSet<String> {
-        let mut out = std::collections::BTreeSet::new();
-        for prov in self.oracles.providers.values() {
-            for sym in prov.symbols.keys() {
-                out.insert(sym.to_uppercase());
-            }
-        }
-        for prov in self.ctrader.providers.values() {
-            for sym in prov.symbols.keys() {
-                out.insert(sym.to_uppercase());
-            }
-        }
-        out
+        // A perp leg gets no `.idx`: see `configured_perp_symbols`.
+        self.relay_manifest(false)
     }
 
     /// Relay provider names (`oracles.providers` ∪ `ctrader.providers` keys).

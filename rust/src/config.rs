@@ -71,32 +71,6 @@ pub struct NxrConfig {
     /// Path to the hot-reloadable TDWAP weights / ticker parameters file.
     /// Defaults to `<config_dir>/ticker-params.json`.
     pub ticker_params_path: String,
-    /// Per-ticker absolute cap on any single provider's share of total weight.
-    /// Prevents a single wash-volume venue (eg a tier-3 exchange spiking 100× the
-    /// typical volume on an illiquid alt) from dominating consolidated TDWAP.
-    /// Bloomberg BVAL tier-1 venues sit around 35-40%; this is the upper end of
-    /// industry idiom, chosen to minimise accuracy cost on legit-concentrated
-    /// markets while neutering wash-vol capture. Tunable per deployment.
-    /// Default: 0.40 (40%).
-    pub max_weight_per_source: f64,
-    /// HHI-adaptive ceiling upper bound. The effective per-ticker cap is
-    /// `clamp(sqrt(HHI_w), max_weight_per_source, max_weight_concentrated)`
-    /// where `HHI_w` is the Herfindahl index of WINSORIZED volumes (each
-    /// provider truncated at `anomaly_vol_ratio × median`). sqrt(HHI) = RMS
-    /// share ≥ every winsorized share, so the cap only bites on raw shares
-    /// that exceeded the winsor point — ie a genuinely (or fraudulently)
-    /// dominant venue keeps its concentration-corroborated share up to this
-    /// bound. A primary market (eg Binance on an issuer-partnered listing at
-    /// 75% raw share) earns up to 60%; fragmented tickers degrade to the flat
-    /// `max_weight_per_source` floor. Single-venue wash volume cannot lift the
-    /// ceiling past this bound: winsorization caps its HHI contribution and
-    /// moving the median needs ⌈N/2⌉ colluding venues. Must be ≥
-    /// `max_weight_per_source`. Default: 0.60 (60%).
-    pub max_weight_concentrated: f64,
-    /// Minimum number of active providers per ticker required to enforce the
-    /// cap. With < N providers, the thin coverage is itself the bottleneck and
-    /// forcing a cap would distort the few legitimate quotes. Default: 3.
-    pub min_providers_for_cap: usize,
     /// Anomaly flag threshold: when raw_volume(p, t) > anomaly_vol_ratio ·
     /// median_t for a ticker, log a `weights_anomaly_high_vol` warn. Useful for
     /// spotting CMC scrape errors or genuine wash-trading. Default: 5.0.
@@ -109,14 +83,12 @@ pub struct NxrConfig {
     /// the cert (`integrity-check idx`) flags after the fact — it stops a single
     /// bad forwarder (e.g. the 2026-05-28..06-02 SOL/USDT $1784/$643 garbage)
     /// from poisoning the composite and the `.idx` history in the first place.
-    /// Mirrors the `max_weight_per_source` wash-vol cap idiom (a per-source
-    /// guard on the consolidated composite). Default: 0.20 (20%).
+    /// Default: 0.20 (20%).
     pub reject_band_pct: f64,
     /// Minimum number of OTHER live providers (with a finite, positive mid) for
     /// the ticker before the price-sanity reject band is enforced. Below this,
     /// the median reference is too thin to trust, so the gate is skipped and the
-    /// quote is admitted (thin coverage is itself the bottleneck — same rationale
-    /// as `min_providers_for_cap`). Default: 2.
+    /// quote is admitted (thin coverage is itself the bottleneck). Default: 2.
     pub reject_min_providers: usize,
 }
 
@@ -233,15 +205,6 @@ impl NxrConfig {
             sink_host: env_or("NXR_SINK_HOST", "127.0.0.1"),
             sink_port: env_or("NXR_SINK_PORT", "40010").parse().unwrap_or(40010),
             ticker_params_path,
-            max_weight_per_source: env_or("NXR_MAX_WEIGHT_PER_SOURCE", "0.40")
-                .parse()
-                .unwrap_or(0.40),
-            max_weight_concentrated: env_or("NXR_MAX_WEIGHT_CONCENTRATED", "0.60")
-                .parse()
-                .unwrap_or(0.60),
-            min_providers_for_cap: env_or("NXR_MIN_PROVIDERS_FOR_CAP", "3")
-                .parse()
-                .unwrap_or(3),
             anomaly_vol_ratio: env_or("NXR_ANOMALY_VOL_RATIO", "5.0")
                 .parse()
                 .unwrap_or(5.0),

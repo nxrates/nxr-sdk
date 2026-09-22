@@ -2,8 +2,7 @@
 //!
 //! One definition for both readings of the same number: `hhi` in [1/N, 1]
 //! (1 = a single holder) and `n_eff = 1/hhi` in [1, N], the effective count.
-//! `core/src/weights.rs` derives the per-ticker weight ceiling from `sqrt(hhi)`
-//! and `tdwap` publishes `n_eff` as the breadth axis of a composite.
+//! `tdwap` publishes `n_eff` as the breadth axis of a composite.
 
 /// Herfindahl index: Σ (w_i / Σw)². Takes UNNORMALISED weights; normalising
 /// first is a no-op (Σw = 1).

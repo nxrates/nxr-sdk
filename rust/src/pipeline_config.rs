@@ -1062,12 +1062,15 @@ pub struct CexsYml {
     /// (`docs/internal/storage-quote.md`).
     #[serde(default)]
     pub storage: StorageYml,
+    /// The one cap on a live leg's final share (`tdwap::Concentration`).
+    #[serde(default)]
+    pub concentration: crate::tdwap::Concentration,
 }
 
-/// `cexs.storage:` block: per-asset market ranking, weight caps and the published
+/// `cexs.storage:` block: per-asset market ranking and the published
 /// storage denomination. Genuinely YAML-sourced: no env indirection, no Rust
-/// literal that outranks the file (the mistake `max_weight_per_source` and
-/// friends still carry).
+/// literal that outranks the file (the mistake the retired env-only weight
+/// caps made).
 ///
 /// Serde ignores unknown keys, so a ConfigMap still carrying the retired
 /// `pivot:` key falls back to defaults rather than failing: roll the ConfigMap
@@ -1080,12 +1083,6 @@ pub struct StorageYml {
     /// Trust floor per market, either side.
     #[serde(default)]
     pub min_market_volume_usd: Option<f64>,
-    /// Weight cap at `n == min_providers_for_cap`.
-    #[serde(default)]
-    pub max_weight_at_min_markets: Option<f64>,
-    /// Weight cap at `n >= max_markets_per_asset`.
-    #[serde(default)]
-    pub max_weight_at_max_markets: Option<f64>,
     /// PUBLISHED denomination for every CR asset: it decides the ticker_id, and
     /// therefore the `.idx`/`.s10` directory name, so it is fixed for the
     /// process. Every market of an asset is converted straight into it.
@@ -1100,18 +1097,13 @@ pub struct StorageYml {
     pub storage_quote_overrides: std::collections::BTreeMap<String, String>,
     /// PARITY LEGS, keyed by base asset: another instrument's price joins the
     /// asset's storage vector at 1:1, converted over its own bridge at epoch -1
-    /// like any market and held to the same HHI ceiling. `XAUT: [XAU/USD]`
+    /// like any market and held to the same `w_max(n)` cap. `XAUT: [XAU/USD]`
     /// blends spot gold into the token's mark; `QQQ: [NDX/USD]`
     /// carries the index, rebased (`multiplier`), into an RTH-only equity. A closed
     /// market goes stale and drops out by the ordinary freshness gate. The
     /// asset's published id is unchanged: a leg is an input, never an output.
     #[serde(default)]
     pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
-    /// Ceiling on the COMBINED share of an EQ asset's surveyed markets (the
-    /// tokenised wrappers, QQQB/SPYB) in its vector, in (0, 1). Absent = no
-    /// ceiling. A wrapper premium then moves the mark by at most this share.
-    #[serde(default)]
-    pub wrapper_share_cap: Option<f64>,
 }
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at
@@ -1124,13 +1116,13 @@ pub struct ParityLegYml {
     #[serde(default)]
     pub provider: Option<String>,
     /// Multiplier on the leg's base weight (relay median for a composite, the
-    /// survey's for a venue book) before the HHI ceiling. 1.0 = one median
+    /// survey's for a venue book). 1.0 = one median
     /// venue; 0.5 halves a two-leg blend's exposure to a wrapper premium.
     #[serde(default = "parity_weight_default")]
     pub weight: f64,
     /// ABSOLUTE share of the asset's vector this leg claims, in (0, 1); the
-    /// other legs split the rest by their own weights, then the HHI ceiling
-    /// re-binds. `weight` cannot express a fixed split: one median venue among
+    /// other legs split the rest by their own weights, then `w_max(n)` binds on
+    /// the final shares. `weight` cannot express a fixed split: one median venue among
     /// 19 CEX books is ~0.05 whatever the multiplier, and the same multiplier
     /// is 0.5 of a two-leg blend. Ignored when set with `weight` (share wins).
     #[serde(default)]
@@ -1522,7 +1514,7 @@ mod tests {
             let y: PipelineYml = serde_yml::from_str(&raw).expect("config.yml parses");
             let legs = &y.cexs.storage.parity_legs;
             assert_eq!(legs["XAUT"][0].share, Some(0.35));
-            assert_eq!(y.cexs.storage.wrapper_share_cap, Some(0.5));
+            assert_eq!(y.cexs.concentration, crate::tdwap::Concentration::default());
             assert!(
                 legs.values()
                     .flatten()

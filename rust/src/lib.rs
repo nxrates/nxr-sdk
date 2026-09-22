@@ -105,7 +105,7 @@ pub use agg::{
 // ---- TDWAP aggregation ----
 
 pub use tdwap::{
-    ProviderEntry, WeightCache, compute_vwap, compute_vwap_at, compute_vwap_throttled,
+    Kernel, ProviderEntry, WeightCache, compute_vwap_at, compute_vwap_throttled,
     default_refresh_interval_ms,
 };
 

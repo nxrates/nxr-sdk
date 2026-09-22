@@ -19,8 +19,8 @@ pub fn get_market_provider_id_by_name(name: &str) -> Option<u16> {
 /// Providers HARD-EXCLUDED from all aggregation and index construction
 /// (operator decision 2026-07-04). These venues published fabricated L1 sizes
 /// (24h turnover as top-of-book qty: Biconomy=71, Coinstore=361, CoinW=371).
-/// NOTE (red-team verified 2026-07-04): TDWAP price weighting is
-/// base_weight × decay — fake sizes never moved the published bid/ask/spread;
+/// NOTE (red-team verified 2026-07-04): TDWAP price weighting never reads
+/// size (`tdwap::Kernel`) — fake sizes never moved the published bid/ask/spread;
 /// they corrupt the SUMMED volume fields (vbid/vask) and everything derived
 /// from them (vol_imbalance/OFI, volume features). Exclusion is a DATA-HYGIENE
 /// decision: venues that fabricate L1 fields are untrusted everywhere.

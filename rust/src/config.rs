@@ -194,6 +194,8 @@ impl NxrConfig {
             // heals) — plus USDT/USDC made EXPLICIT (fallback-reachable via
             // USDT/USD today, but it is the signed-manifest via-leg for 6
             // bridges; do not leave it implicit).
+            // QQQB/USDT (binance bStocks, 24/7): the `cexs.storage.parity_legs`
+            // venue leg for QQQ/USD. Subscribed here or the leg is dead.
             symbols: env_or(
                 "NXR_SYMBOLS",
                 "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,ADA/USDT,DOGE/USDT,\
@@ -218,7 +220,8 @@ impl NxrConfig {
                  RLUSD/USDT,USDY/USDT,USDTB/USDT,USD0/USDT,\
                  AUSD/USDT,USDG/USDT,USDD/USDT,PYUSD/USDT,\
                  USDE/USDT,USDE/USDC,\
-                 USDT/USDC,RLUSD/USDC,USDG/USDC,DAI/USDT,TUSD/USDT,FDUSD/USDC",
+                 USDT/USDC,RLUSD/USDC,USDG/USDC,DAI/USDT,TUSD/USDT,FDUSD/USDC,\
+                 QQQB/USDT",
             ),
             sink_host: env_or("NXR_SINK_HOST", "127.0.0.1"),
             sink_port: env_or("NXR_SINK_PORT", "40010").parse().unwrap_or(40010),

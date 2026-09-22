@@ -42,15 +42,14 @@ pub fn now_mts() -> u64 {
 
 // ---- Quality gate ----
 
-/// Absurd-spread ceiling for [`is_valid_tick`], in basis points.
-///
-/// Deliberately loose (50%) — this is a CORRUPTION guard, not a market filter.
-/// The composite's real spread policy is `mitch::Index::reject_reason`'s
-/// 2000 bps cap; anything wider than 5000 bps at the single-tick level is a
-/// parse fault (wrong field read, mismatched sides of two different books, a
-/// price and a quantity swapped), never a quote. Before this, `1e-12 / 1e6`
-/// passed the gate and became a provider's mid.
-pub const MAX_TICK_SPREAD_BPS: f64 = 5_000.0;
+/// THE spread ceiling of the pipeline, in basis points: a CORRUPTION guard,
+/// not a market filter. Mirrors `mitch::Index::reject_reason`'s `spread_cap`,
+/// so a tick, a converted quote and a composite are all held to one number.
+/// Anything wider is a parse fault (wrong field read, two different books'
+/// sides, a price and a quantity swapped), never a quote: `1e-12 / 1e6` used to
+/// pass and become a provider's mid. Market width is bounded by the class band
+/// (`aggregator::quote_bands`) and priced by the kernel, never cut here.
+pub const MAX_SPREAD_BPS: f64 = 2_000.0;
 
 /// Basic tick sanity check: finite, positive prices, uncrossed, and not
 /// absurdly wide.
@@ -65,7 +64,7 @@ pub fn is_valid_tick(bid: f64, ask: f64) -> bool {
         return false;
     }
     let mid = (bid + ask) * 0.5;
-    (ask - bid) / mid * 10_000.0 <= MAX_TICK_SPREAD_BPS
+    (ask - bid) / mid * 10_000.0 <= MAX_SPREAD_BPS
 }
 
 /// [`is_valid_tick`] for a venue ORDER BOOK: additionally refuses a locked

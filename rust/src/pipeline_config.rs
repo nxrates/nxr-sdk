@@ -200,8 +200,10 @@ pub struct SignedQuotesYml {
     /// Required minimum accepted provider count on every direct/bridge leg.
     /// Must be >= 2. Provider identity authentication is a separate layer.
     pub min_accepted_providers: u8,
-    /// Required minimum composite freshness in bps (1..=10_000), derived from
-    /// the Index confidence freshness byte on every direct/bridge leg.
+    /// RETIRED: gated only legacy `FLAG_CONF_FRESHNESS` records, which the
+    /// signer now refuses outright. Still accepted so deployed ConfigMaps parse
+    /// under `deny_unknown_fields`; read by nothing. Drop with the key.
+    #[serde(default)]
     pub min_composite_freshness_bps: u16,
     /// Peer replicas for k-of-n co-signing (exclude self). Every URL is pinned
     /// to the exact signer address expected in its response.

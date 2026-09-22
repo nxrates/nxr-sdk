@@ -34,16 +34,19 @@
 //! at the first bound, so leaving never steps the mark.
 //! No floor: an all-stale set has no weight to manufacture a fresh mark from.
 //!
-//! **Cap.** Final shares are water-filled at `max_weight_concentrated` (0.60)
-//! whenever two or more legs are live: a thin venue quoting tight, or one
-//! dominant venue, cannot own the mark. One live leg keeps the whole blend
-//! and reads as single-source (`n_eff = 1`). With exactly two live legs the
-//! cap floors the other at 0.40, an ageing one included, so there it leaves
-//! the mark in one step at eviction.
+//! **Cap.** Final shares of the legs inside their confirmation window
+//! (`τ ≤ stale_threshold`; a live book re-affirms every stale/2) are
+//! water-filled at `max_weight_concentrated` (0.60): a thin venue quoting
+//! tight, or one dominant venue, cannot own the mark. A leg past the window
+//! keeps its raw share `w/Σw`, so the cap never holds a dying leg up. One
+//! fresh leg keeps the whole fresh mass and reads as single-source
+//! (`n_eff = 1`).
 //!
-//! **`ci`.** Cross-venue disagreement in quadrature with the kernel posterior
-//! `s_ref·√(Σb/Σw)`, both absolute, so staleness widens the interval instead
-//! of hiding inside normalised shares.
+//! **`ci`.** Share-weighted cross-venue disagreement in quadrature with each
+//! leg's half-spread × min(√(τ/ipi), 3), floored at the composite
+//! half-spread. Deliberately on the pre-kernel scale: the BTR keeper's 25 bp
+//! ci-spike trigger and the signer ceilings are calibrated to it. An all-stale
+//! set is caught by the liveness bits and by eviction, not by `ci`.
 //!
 //! Liveness (`active_count`, `fresh_weight_ok` in `confidence`) is a separate
 //! axis on `stale_threshold`, read by the signed-quote gates.
@@ -129,12 +132,13 @@ impl Kernel {
         }
     }
 
-    /// Raise `sigma` to a measured value (fraction per √s). The class floor
-    /// holds: a quiet measurement never slows ageing below it.
+    /// Set `sigma` from a measured value (fraction per √s), clamped to
+    /// `[class floor, 10 × class floor]`: a quiet measurement never slows
+    /// ageing below the floor, a garbage one cannot evict every leg at once.
     #[must_use]
     pub fn with_sigma(mut self, realised: f64) -> Self {
         if realised.is_finite() {
-            self.sigma = self.sigma.max(realised);
+            self.sigma = realised.clamp(self.sigma, 10.0 * self.sigma);
         }
         self
     }
@@ -587,22 +591,35 @@ where
             .map(|(tau, u)| (tau, base(e) * s_ref * s_ref * u))
     };
 
-    // Posterior mass, and the water-fill of the final shares.
-    let (mut b_sum, mut w_sum) = (0.0f64, 0.0f64);
+    // Final shares. A leg past its confirmation window (`τ > stale`; a live
+    // book re-affirms every stale/2) keeps its raw share `w/Σw` and fades. The
+    // legs inside it share the rest, water-filled at the cap: the cap never
+    // lifts a dying leg, it only bounds the live ones.
+    let fresh = |tau: f64| tau <= stale_threshold_secs;
+    let (mut w_sum, mut w_stale) = (0.0f64, 0.0f64);
     for e in entries.clone() {
-        if let Some((_, w)) = weigh(e) {
-            b_sum += base(e);
+        if let Some((tau, w)) = weigh(e) {
             w_sum += w;
+            if !fresh(tau) {
+                w_stale += w;
+            }
         }
     }
     if w_sum < 1e-12 {
         return None;
     }
+    let fresh_mass = 1.0 - w_stale / w_sum;
     let (k, t, cap) = water_fill(
-        entries.clone().filter_map(|e| weigh(e).map(|(_, w)| w)),
-        max_leg_share(),
+        entries
+            .clone()
+            .filter_map(|e| weigh(e).filter(|(tau, _)| fresh(*tau)).map(|(_, w)| w)),
+        max_leg_share() / fresh_mass.max(f64::MIN_POSITIVE),
     );
-    let share = |w: f64| if w >= t { cap } else { k * w };
+    let share = |tau: f64, w: f64| match (fresh(tau), w >= t) {
+        (false, _) => w / w_sum,
+        (true, true) => fresh_mass * cap,
+        (true, false) => fresh_mass * k * w,
+    };
 
     let mut w_bid_sum = 0.0f64;
     let mut w_ask_sum = 0.0f64;
@@ -618,6 +635,7 @@ where
     // Welford-style weighted variance accumulator for the disagreement term.
     let mut mean_mid = 0.0f64;
     let mut m2 = 0.0f64;
+    let mut stale_sq_sum = 0.0f64;
 
     // Weight-share accumulators. `bw_sum` = Σ base_weight over every LIVE
     // leg; `active_bw_sum` = the same over legs genuinely TICKING (liveness
@@ -658,13 +676,19 @@ where
             active_bw_sum += base_weight;
         }
 
-        let sh = share(w);
+        let sh = share(age, w);
         if sh <= 1e-12 {
             continue;
         }
         let bid = entry.index.bid;
         let ask = entry.index.ask;
         let mid = (bid + ask) * 0.5;
+        // Published staleness widening, on the scale consumers are calibrated
+        // to (BTR keeper 25 bp ci-spike trigger, signer ci ceilings): the
+        // leg's half-spread × √(τ/ipi), capped at 3×. The kernel's σ²τ decides
+        // weight and eviction; it does not set the interval.
+        let stale_unc = (ask - bid) * 0.5 * (age / entry.ema_ipi_secs.max(1e-6)).sqrt().min(3.0);
+        stale_sq_sum += sh * stale_unc * stale_unc;
 
         w_bid_sum += bid * sh;
         w_ask_sum += ask * sh;
@@ -696,9 +720,8 @@ where
     let vwap_mid = (tdwap_bid + tdwap_ask) * 0.5;
 
     let sigma_disagree_sq = m2 / s_sum;
-    let posterior = s_ref * (b_sum / w_sum).sqrt() * vwap_mid;
-    // NOT `stats::ci::rss`: the first term is already a variance.
-    let raw_ci = (sigma_disagree_sq + posterior * posterior).sqrt();
+    // NOT `stats::ci::rss`: both terms are already variances.
+    let raw_ci = (sigma_disagree_sq + stale_sq_sum / s_sum).sqrt();
     let half_spread_agg = (tdwap_ask - tdwap_bid).abs() * 0.5;
     let conf_interval = raw_ci.max(half_spread_agg);
 
@@ -1858,6 +1881,51 @@ mod tests {
                 p.top_weight_share
             );
         }
+    }
+
+    /// Two legs, one stops confirming: once past its confirmation window it is
+    /// not held at the cap's 0.40 floor, it fades on its own kernel weight.
+    #[test]
+    fn a_dying_leg_is_not_held_up_by_the_cap() {
+        let t0 = Instant::now();
+        let mut live = mk_entry(0.9999, 1.0000, 1_000, 1_000, 1.0, t0);
+        let dying = mk_entry(0.9997, 0.9998, 1_000, 1_000, 1.0, t0);
+        let share_of_dying = |live: &ProviderEntry, now| {
+            let legs = [*live, dying];
+            let idx = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).expect("mark");
+            (0.99995 - idx.mid()) / (0.99995 - 0.99975)
+        };
+        let mut prev = 0.5 + 1e-9;
+        for secs in [5u64, 30, 60, 120, 300] {
+            let now = t0 + Duration::from_secs(secs);
+            live.update_at(live.index, now);
+            let sh = share_of_dying(&live, now);
+            assert!(sh <= prev, "t+{secs} s: share rose to {sh}");
+            prev = sh;
+        }
+        assert!(prev < 0.2, "dying leg still holds {prev} after 300 s");
+    }
+
+    /// Healthy pegged book: ci stays on the half-spread scale (0.05 bp for a
+    /// 5 dp USDC/USDT book), not the kernel's 1 bp spread floor.
+    #[test]
+    fn healthy_pegged_ci_is_on_the_spread_scale() {
+        let t0 = Instant::now();
+        let legs = [
+            mk_entry(0.99990, 0.99991, 1_000, 1_000, 1.0, t0),
+            mk_entry(0.99990, 0.99991, 1_000, 1_000, 1.0, t0),
+        ];
+        let idx = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).expect("mark");
+        let ci_bp = decode_ci_ubp(idx.ci) / 1e4;
+        assert!(ci_bp > 0.02 && ci_bp < 0.1, "ci {ci_bp} bp");
+    }
+
+    #[test]
+    fn measured_sigma_is_clamped_to_ten_floors() {
+        let k = Kernel::MAJOR;
+        assert_eq!(k.with_sigma(0.0).sigma, k.sigma);
+        assert_eq!(k.with_sigma(1.0).sigma, 10.0 * k.sigma);
+        assert_eq!(k.with_sigma(3.0 * k.sigma).sigma, 3.0 * k.sigma);
     }
 
     #[test]

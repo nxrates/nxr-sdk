@@ -195,8 +195,8 @@ impl NxrConfig {
             // USDT/USD today, but it is the signed-manifest via-leg for 6
             // bridges; do not leave it implicit).
             // QQQB/USDT, QQQ/USDT + SPY/USDT (2026-09-22): the Binance bStocks wrappers
-            // (venue symbols QQQBUSDT / SPYBUSDT, aliased per venue in
-            // `cexs.exchanges.<name>.aliases`) are the QQQ and SPY equities
+            // (venue symbols QQQBUSDT / SPYBUSDT, aliased for every venue by
+            // `cexs.aliases`) are the QQQ and SPY equities
             // themselves; `QQQB/USDT` spelled here selects the same book and id.
             // `:PERP` entries (2026-09-22): USDT perpetuals on binance_futures +
             // bybit_linear, the 24/7 legs of the gold and ETF composites. Only

@@ -758,8 +758,9 @@ pub struct ExchangeYml {
     /// `XBT → BTC`, Bitfinex `UST → USDT`). `format_symbol` walks the same
     /// map in reverse. Was hardcoded `.replace("XBT","BTC")` and
     /// `("UST","USDT")` literal arrays in `kraken.rs` / `bitfinex.rs`
-    /// (phase 59.R3.C2.O3, 2026-05-30). Distinct from the top-level
-    /// `cexs.aliases` map which the weights scraper uses globally.
+    /// (phase 59.R3.C2.O3, 2026-05-30). Wins over the top-level
+    /// `cexs.aliases`, which applies to every venue (weights survey and the
+    /// forwarder's codec alike).
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
     /// Historical-archive URL template(s) used by `series-factory` sources.

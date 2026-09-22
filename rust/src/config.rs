@@ -134,7 +134,7 @@ impl NxrConfig {
         let ticks_dir = env_or("NXR_DATA_TICKS", &format!("{}/ticks", data_root));
         let bars_dir = env_or("NXR_DATA_BARS", &format!("{}/bars", data_root));
         let indexes_dir = env_or("NXR_DATA_INDEXES", &format!("{}/indexes", data_root));
-        let config_dir = env_or("NXR_DATA_CONFIG", &format!("{}/config", data_root));
+        let config_dir = config_dir();
         let ticker_params_path = env_or(
             "NXR_TICKER_PARAMS_PATH",
             &format!("{}/ticker-params.json", config_dir),
@@ -350,6 +350,13 @@ fn reconcile_aggregation_interval_ms(env_val: Option<u64>, yaml_val: Option<u64>
     yaml_val
         .or(env_val)
         .unwrap_or(DEFAULT_AGGREGATION_INTERVAL_MS)
+}
+
+/// `NXR_DATA_CONFIG`, default `<NXR_DATA_ROOT>/config`: the hot-reload and
+/// per-ticker state directory (`ticker-params.json`, `basis.json`).
+pub fn config_dir() -> String {
+    let data_root = env_or("NXR_DATA_ROOT", "/data");
+    env_or("NXR_DATA_CONFIG", &format!("{}/config", data_root))
 }
 
 fn env_or(key: &str, default: &str) -> String {

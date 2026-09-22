@@ -458,6 +458,28 @@ pub const MAJOR_QUOTE_SYMBOLS_LC: &[&str] = &[
 /// Phase 59.R2D moved this from `crypto::exchange::mod::DEFAULT_QUOTE_SUFFIXES`.
 pub const DEFAULT_QUOTE_SUFFIXES: &[&str] = &["USDT", "USDC", "BTC", "ETH", "USD"];
 
+/// Marks a perpetual-swap market in a canonical symbol: `XAU/USDT:PERP`.
+/// The resolver mints the PERP instrument nibble for it, so the id never
+/// collides with the spot book; the perp handlers add it in `normalize_symbol`
+/// and no spot listing carries it, so a spot venue can never match one.
+pub const PERP_SUFFIX: &str = ":PERP";
+
+/// Split the [`PERP_SUFFIX`] off a symbol: `(bare symbol, instrument type)`.
+pub fn split_perp(symbol: &str) -> (&str, InstrumentType) {
+    let n = symbol.len().saturating_sub(PERP_SUFFIX.len());
+    match symbol.get(n..) {
+        Some(tail) if tail.eq_ignore_ascii_case(PERP_SUFFIX) => {
+            (&symbol[..n], InstrumentType::PERP)
+        }
+        _ => (symbol, InstrumentType::SPOT),
+    }
+}
+
+/// True when `symbol` carries the [`PERP_SUFFIX`].
+pub fn is_perp_symbol(symbol: &str) -> bool {
+    split_perp(symbol).1 == InstrumentType::PERP
+}
+
 /// Resolve a quote-side token to an Asset. Crypto majors (usdt/usdc/btc/eth)
 /// and USD resolve cross-class; everything else is tried as an FX fiat code
 /// FIRST (RCA ROOT1b, 2026-06-01) so `USDT/THB` → quote=THB(FX), not a

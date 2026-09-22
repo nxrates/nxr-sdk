@@ -1105,25 +1105,135 @@ pub struct StorageYml {
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at
 /// epoch -1 and weighted as a relay venue; present = that venue's book for
-/// `pair`, weighted from the survey like any surveyed market.
+/// `pair`, weighted from the survey like any surveyed market. An asset with a
+/// row also takes its SURVEYED CEX markets whatever its class (the tokenised
+/// ETF wrappers are markets of the ETF, aliased in `cexs.aliases`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ParityLegYml {
     pub pair: String,
     #[serde(default)]
     pub provider: Option<String>,
+    /// The book kind the venue entry must carry (`spot` default, `perp`). A
+    /// perp book sits under the underlying's id state-only, so the kind is
+    /// what keeps a spot row from reading it and vice versa.
+    #[serde(default)]
+    pub kind: crate::tdwap::MarketKind,
     /// Multiplier on the leg's base weight (relay median for a composite, the
     /// survey's for a venue book) before the HHI ceiling. 1.0 = one median
     /// venue; 0.5 halves a two-leg blend's exposure to a wrapper premium.
     #[serde(default = "parity_weight_default")]
     pub weight: f64,
+    /// ABSOLUTE share of the asset's vector this leg claims, in (0, 1); the
+    /// other legs split the rest by their own weights, then the HHI ceiling
+    /// re-binds. `weight` cannot express a fixed split: one median venue among
+    /// 19 CEX books is ~0.05 whatever the multiplier, and the same multiplier
+    /// is 0.5 of a two-leg blend. Ignored when set with `weight` (share wins).
+    #[serde(default)]
+    pub share: Option<f64>,
     /// Drop the leg for the cycle when its converted mid sits further than
     /// this from the asset's own fresh epoch -1 mark. Absent = no gate. A leg
-    /// alone (no fresh mark to compare against) always carries.
+    /// alone (no fresh mark to compare against) always carries. On a derived
+    /// leg the gate is on the RESIDUAL after rebasing.
     #[serde(default)]
     pub max_dev_bps: Option<f64>,
+    /// DERIVED leg: the leg enters at `price x seed x exp(-b)`, `b` learned as
+    /// the median 1-minute log-ratio `ln(leg x seed / reference)` over common
+    /// quoting minutes. Rebases a perp onto its cash reference (`b` ~ bps) or
+    /// an index composite onto its ETF (`seed` ~ 1/41, `b` the correction).
+    #[serde(default)]
+    pub multiplier: Option<MultiplierYml>,
+}
+
+impl Default for ParityLegYml {
+    fn default() -> Self {
+        Self {
+            pair: String::new(),
+            provider: None,
+            kind: crate::tdwap::MarketKind::Spot,
+            weight: 1.0,
+            share: None,
+            max_dev_bps: None,
+            multiplier: None,
+        }
+    }
+}
+
+/// Basis / multiplier estimator knobs for a derived parity leg. Every window
+/// is in COMMON minutes (both the leg and the reference fresh): a weekend does
+/// not advance it, so Friday's estimate carries until `max_stale_h`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct MultiplierYml {
+    pub learn: LearnWindow,
+    /// Ring length, hours of common minutes (6.5 = one RTH session, 24 = a
+    /// stationary basis). At most 168.
+    pub window_h: f64,
+    /// Common minutes filled before the ring's median is used; below it the
+    /// persisted value carries if younger than `max_stale_h`, else the leg is
+    /// refused (`reason="warmup"`).
+    #[serde(default = "mult_min_overlap")]
+    pub min_overlap_min: usize,
+    /// `|b|` is clamped to this, in bps of log-ratio (300 = 3% either side of
+    /// `seed`).
+    #[serde(default = "mult_cap_bps")]
+    pub cap_bps: f64,
+    /// Regime reset: >= 25 of the last 30 common minutes further than
+    /// `max(6 x MAD(ring), reset_bps)` from `b` replace the ring with those 30.
+    /// An ex-div step (10-35 bps) stays under the floor and is absorbed by
+    /// the window instead.
+    #[serde(default = "mult_reset_bps")]
+    pub reset_bps: f64,
+    /// Age of the last common minute past which the leg is refused
+    /// (`reason="basis_stale"`). 96 h covers Good Friday (Thu 20:00 -> Mon
+    /// 13:30 UTC = 89.5 h).
+    #[serde(default = "mult_max_stale_h")]
+    pub max_stale_h: f64,
+    /// Prior multiplier the estimator corrects (1.0 for a basis, ~1/41 for
+    /// QQQ from NDX): `cap_bps` bounds the CORRECTION, so the seed must be
+    /// within it of the truth.
+    #[serde(default = "mult_seed")]
+    pub seed: f64,
+    /// What `b` is measured against: `relay` (default) = the asset's own
+    /// CFD/relay books on its id, `survey` = the median of its surveyed CEX
+    /// books this cycle (XAUT, which has no relay). Never the published mark
+    /// (contains the leg: self-chasing), never another parity leg.
+    #[serde(default, rename = "ref")]
+    pub reference: BasisRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearnWindow {
+    /// Rolling ring over the last `window_h` of common minutes.
+    RollingCommon,
+    /// The first `window_h` of common minutes after each session open (a gap
+    /// > 4 h), frozen until the next open. Noisier (opening auction).
+    DailyOpenVwap,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BasisRef {
+    #[default]
+    Relay,
+    Survey,
 }
 
 fn parity_weight_default() -> f64 {
+    1.0
+}
+fn mult_min_overlap() -> usize {
+    60
+}
+fn mult_cap_bps() -> f64 {
+    300.0
+}
+fn mult_reset_bps() -> f64 {
+    30.0
+}
+fn mult_max_stale_h() -> f64 {
+    96.0
+}
+fn mult_seed() -> f64 {
     1.0
 }
 
@@ -1363,6 +1473,68 @@ mod tests {
             "overrides must stay empty: they are for an asset with no USD route, not tuning"
         );
         assert_eq!(storage.storage_quote_for("BTC"), "USD");
+    }
+
+    /// U3/U4 grammar: an absolute share, a derived leg with its defaults, a
+    /// perp-kind venue leg, and the shipped rows.
+    #[test]
+    fn parity_leg_share_kind_and_multiplier_parse() {
+        let y: StorageYml = serde_yml::from_str(concat!(
+            "parity_legs:\n",
+            "  XAUT: [{pair: XAU/USD, share: 0.35, max_dev_bps: 60, multiplier: {learn: rolling_common, window_h: 24, cap_bps: 100, ref: survey}}]\n",
+            "  QQQ: [{pair: NAS100/USD, multiplier: {learn: daily_open_vwap, window_h: 6.5, seed: 0.024339}},\n",
+            "        {pair: QQQ/USD, provider: binance_futures, kind: perp, weight: 0.5}]\n",
+        ))
+        .expect("parse");
+        let xau = &y.parity_legs["XAUT"][0];
+        assert_eq!(xau.share, Some(0.35));
+        assert_eq!(xau.weight, 1.0);
+        let m = xau.multiplier.unwrap();
+        assert_eq!(
+            (m.learn, m.reference),
+            (LearnWindow::RollingCommon, BasisRef::Survey)
+        );
+        assert_eq!(
+            (
+                m.min_overlap_min,
+                m.cap_bps,
+                m.reset_bps,
+                m.max_stale_h,
+                m.seed
+            ),
+            (60, 100.0, 30.0, 96.0, 1.0)
+        );
+        let q = &y.parity_legs["QQQ"];
+        assert_eq!(q[0].kind, crate::tdwap::MarketKind::Spot);
+        let m = q[0].multiplier.unwrap();
+        assert_eq!(
+            (m.learn, m.reference, m.cap_bps),
+            (LearnWindow::DailyOpenVwap, BasisRef::Relay, 300.0)
+        );
+        assert!((m.seed - 0.024339).abs() < 1e-12);
+        assert_eq!(
+            (q[1].kind, q[1].weight),
+            (crate::tdwap::MarketKind::Perp, 0.5)
+        );
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.yml");
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            let y: PipelineYml = serde_yml::from_str(&raw).expect("config.yml parses");
+            let legs = &y.cexs.storage.parity_legs;
+            assert_eq!(legs["XAUT"][0].share, Some(0.35));
+            assert!(
+                legs.values()
+                    .flatten()
+                    .all(|l| !l.pair.starts_with("QQQB") && !l.pair.starts_with("SPYB")),
+                "wrappers are survey markets of the ETF, never a leg"
+            );
+            for a in ["QQQ", "SPY"] {
+                assert!(
+                    legs[a].iter().any(|l| l.multiplier.is_some()),
+                    "{a} needs its index-derived leg"
+                );
+            }
+        }
     }
 
     fn cal() -> CalibrationYml {

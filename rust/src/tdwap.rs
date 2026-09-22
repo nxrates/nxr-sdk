@@ -84,9 +84,6 @@ const IPI_ALPHA: f64 = 0.1;
 const RAMP_IPI: f64 = 3.0;
 /// Ramp floor: a lone joining leg still prices its ticker.
 const RAMP_MIN: f64 = 1e-3;
-/// A frame after a longer silence re-joins and ramps again: the leg has been
-/// out of `n` for a dozen re-affirm intervals.
-const REJOIN_SECS: f64 = 60.0;
 
 /// Liveness on the confirmation clock: 1 while `τ <= window/2`, linear to 0
 /// at `window` (`min(stale, τ_evict)`; a live book re-affirms every stale/2).
@@ -193,7 +190,13 @@ impl Kernel {
     ) -> Option<(f64, f64, f64)> {
         let tau = self.age(e, now)?;
         let var = (self.sigma * self.sigma).max(f64::MIN_POSITIVE);
-        let t_evict = ((EVICT_SPREADS * s_ref).powi(2) / var).max(0.5 * stale);
+        // The BINDING bound: whichever of the diffusion age and the class
+        // backstop comes first. Tapering against the diffusion bound alone let
+        // a wide book (whose diffusion age runs past the backstop) leave at
+        // full weight, which is exactly the step the taper exists to remove.
+        let t_evict = ((EVICT_SPREADS * s_ref).powi(2) / var)
+            .max(0.5 * stale)
+            .min(self.horizon_secs);
         let t_eff = tau.max(e.ema_ipi_secs.min(0.5 * t_evict));
         (t_eff <= t_evict).then(|| {
             let s = self.spread(e);
@@ -204,7 +207,8 @@ impl Kernel {
 
 /// Water-fill over `(raw share r, excess eligibility e)`: `λ >= 0` such that
 /// `Σ min(cap, r + λ·e) = 1`. `None` when capped excess has no eligible home
-/// (every eligible leg capped, or none): the caller keeps raw shares.
+/// (every eligible leg capped, or none): the caller still CAPS every leg at
+/// `cap` and renormalises, so the cap is never skipped.
 fn water_fill<I: Iterator<Item = (f64, f64)> + Clone>(legs: I, cap: f64) -> Option<f64> {
     let mut lam = 0.0f64;
     loop {
@@ -479,6 +483,11 @@ pub struct ProviderEntry {
     /// When this leg joined the blend; the join ramp runs from here. `None` =
     /// no ramp (a derived leg that is always present).
     pub joined: Option<Instant>,
+    /// Silence before the latest frame, seconds. A gap past the leg's own
+    /// eviction age means it was OUT of the blend and its return is a join,
+    /// which the kernel ramps: the eviction age is the kernel's to know, so the
+    /// gap is recorded here and judged there.
+    pub last_gap_secs: f64,
 }
 
 impl ProviderEntry {
@@ -498,6 +507,7 @@ impl ProviderEntry {
             injected: false,
             mapped: false,
             joined: Some(now),
+            last_gap_secs: 0.0,
         }
     }
 
@@ -521,9 +531,7 @@ impl ProviderEntry {
         // (uses `u64::saturating_sub` internally), so the previous
         // `saturating_duration_since` → `duration_since` rename is safe.
         let gap = now.duration_since(self.last_update).as_f64();
-        if gap > REJOIN_SECS {
-            self.joined = Some(now);
-        }
+        self.last_gap_secs = gap;
         let ipi = gap.clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
         self.last_update = now;
@@ -614,7 +622,14 @@ where
     // dimensionless; it cancels in the shares.
     let weigh = |e: &ProviderEntry| {
         kernel.leg(e, now, s_ref, stale).map(|(tau, u, t_evict)| {
-            let ramp = e.joined.map_or(1.0, |j| {
+            // A leg that was out (its last gap ran past its own eviction age)
+            // re-joins: the ramp runs from the frame that brought it back.
+            let joined = if e.last_gap_secs > t_evict {
+                Some(e.last_update)
+            } else {
+                e.joined
+            };
+            let ramp = joined.map_or(1.0, |j| {
                 let window = (RAMP_IPI * e.ema_ipi_secs).max(f64::MIN_POSITIVE);
                 (now.duration_since(j).as_f64() / window).clamp(RAMP_MIN, 1.0)
             });
@@ -688,9 +703,25 @@ where
         entries.clone().filter_map(|e| weigh(e).map(|(_, f, w)| raw(e, f, w))),
         cap,
     );
+    // No eligible home for the excess: rather than skip the cap, water-fill
+    // again with EVERY leg eligible in proportion to its own share. Only a
+    // single live leg (nothing to move share to) then keeps its raw 1.0.
+    let all_eligible = lam.is_none().then(|| {
+        water_fill(
+            entries
+                .clone()
+                .filter_map(|e| weigh(e).map(|(_, g, w)| raw(e, g, w)))
+                .map(|(r, _)| (r, r)),
+            cap,
+        )
+    });
     let share = |e: &ProviderEntry, g: f64, w: f64| {
         let (r, x) = raw(e, g, w);
-        lam.map_or(r, |l| (r + l * x).min(cap))
+        match (lam, all_eligible) {
+            (Some(l), _) => (r + l * x).min(cap),
+            (None, Some(Some(l))) => (r + l * r).min(cap),
+            (None, _) => r,
+        }
     };
 
     let mut w_bid_sum = 0.0f64;
@@ -2113,6 +2144,69 @@ mod tests {
         // No eligible home for the excess: raw shares stand.
         assert!(water_fill([(1.0, 1.0)].into_iter(), 0.6).is_none());
         assert_eq!(water_fill([(0.5, 0.5), (0.5, 0.5)].into_iter(), 0.6), Some(0.0));
+    }
+
+    /// The cap is never skipped: with the excess having no eligible home (a
+    /// stale peer, an unmapped one) every leg becomes eligible in proportion
+    /// to its own share, and only a single live leg keeps the whole mark.
+    #[test]
+    fn the_cap_holds_when_no_leg_is_eligible_for_the_excess() {
+        let t0 = Instant::now();
+        let mut legs = [
+            mk_entry(0.99995, 1.00005, 1_000, 1_000, 50.0, t0).with_mapped(true),
+            mk_entry(0.99965, 0.99975, 1_000, 1_000, 1.0, t0),
+        ];
+        // The peer is unmapped AND past its window: ineligible on both counts.
+        let now = t0 + Duration::from_secs(8);
+        legs[0].update_at(legs[0].index, now);
+        let (_, p) = compute_vwap_profiled_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap();
+        let cap = Concentration::get().w_max(1.0);
+        assert!(p.top_weight_share <= cap + 1e-9, "top {}", p.top_weight_share);
+        let one = [mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, t0)];
+        let (_, p1) = compute_vwap_profiled_at(1, one.iter(), 10.0, Kernel::PEGGED, t0).unwrap();
+        assert_eq!(p1.top_weight_share, 1.0, "one live leg is the whole mark");
+    }
+
+    /// A leg that was evicted and comes back ramps in again: the re-join is
+    /// keyed on its own eviction age, not on a flat timeout.
+    #[test]
+    fn a_returning_leg_ramps_in_again() {
+        let t0 = Instant::now();
+        let mut legs = [
+            mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, t0),
+            mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, t0),
+            mk_entry(0.99965, 0.99975, 1_000, 1_000, 1.0, t0),
+        ];
+        let mid_at = |legs: &[ProviderEntry; 3], now| {
+            compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap().mid()
+        };
+        // The odd leg goes silent past the PEGGED eviction age while the other
+        // two keep confirming, then it returns.
+        let gone = t0 + Duration::from_secs(600);
+        for s in (5..=600).step_by(5) {
+            let at = t0 + Duration::from_secs(s);
+            for e in legs.iter_mut().take(2) {
+                e.update_at(e.index, at);
+            }
+        }
+        let before = mid_at(&legs, gone);
+        legs[2].update_at(legs[2].index, gone);
+        let back = mid_at(&legs, gone);
+        assert!(
+            ((back - before) / before).abs() * 1e4 < 0.2,
+            "a returning leg stepped the mark {:.3} bp",
+            ((back - before) / before).abs() * 1e4
+        );
+        // ...and it is fully back once the ramp completes.
+        let later = gone + Duration::from_secs(60);
+        for s in (5..=60).step_by(5) {
+            let at = gone + Duration::from_secs(s);
+            for e in legs.iter_mut() {
+                e.update_at(e.index, at);
+            }
+        }
+        let full = mid_at(&legs, later);
+        assert!(full < before - 1e-5 && full > 0.99975, "ramped in: {full}");
     }
 
     /// A leg crossing `τ = stale` fades out of `n` continuously, so the cap on

@@ -1106,6 +1106,15 @@ pub struct StorageYml {
     /// asset's published id is unchanged: a leg is an input, never an output.
     #[serde(default)]
     pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
+    /// Weight multiplier on a tokenised WRAPPER book (an EQ asset's surveyed
+    /// markets), on top of its survey weight. The ladder for an ETF is cash
+    /// relay (1.0) > index-derived leg (`ParityLegYml::weight`) > perp-derived
+    /// ~ wrapper: the cash book tracks spot best, the index CFD next, and a
+    /// wrapper carries a premium and twice the tracking noise (measured
+    /// 2026-09-23: QQQ wrapper basis sd 1.1 bp vs 0.7 for the index leg,
+    /// SPY 3.3 vs 1.3, wrapper premium +7 bp on SPY).
+    #[serde(default)]
+    pub wrapper_weight: Option<f64>,
     /// Band of a tokenised WRAPPER book (an EQ asset's surveyed markets) in
     /// the deviation guard, in bp. Absent = the class band. A wrapper is a
     /// claim on the same underlying, so its honest premium is small and a wide

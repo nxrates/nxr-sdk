@@ -16,7 +16,10 @@
 //! - `s_v²`: the quote's own noise, relative half-spread floored per class
 //!   (`s_min`), so a razor-thin book cannot claim infinite precision.
 //! - `σ²·τ_v`: how far the price can have moved since the leg was last
-//!   CONFIRMED. `σ` = max(measured `.vol` sigma, class floor) per √s.
+//!   CONFIRMED, `τ_v` floored at the leg's own cadence (`ema_ipi_secs`, at most
+//!   half the eviction budget): weight is flat between normal confirmations and
+//!   decays only past them, so the mark does not hop to the last leg that
+//!   confirmed. `σ` = max(measured `.vol` sigma, class floor) per √s.
 //!
 //! **Confirmation clock.** `τ_v` runs from `last_update`, stamped by every
 //! frame the core admits: a new price, or a forwarder re-affirm of an
@@ -41,6 +44,10 @@
 //! keeps its raw share `w/Σw`, so the cap never holds a dying leg up. One
 //! fresh leg keeps the whole fresh mass and reads as single-source
 //! (`n_eff = 1`).
+//!
+//! **Group cap.** Legs marked [`ProviderEntry::grouped`] (an EQ asset's
+//! wrappers) hold at most [`Kernel::group_cap`] of the FINAL shares together
+//! while another leg is live; the others are scaled up to fill.
 //!
 //! **`ci`.** Share-weighted cross-venue disagreement in quadrature with each
 //! leg's half-spread × min(√(τ/ipi), 3), floored at the composite
@@ -85,6 +92,9 @@ pub struct Kernel {
     pub s_min: f64,
     /// Backstop: a leg unconfirmed this long is evicted whatever its spread.
     pub horizon_secs: f64,
+    /// Ceiling on the FINAL share the [`ProviderEntry::grouped`] legs hold
+    /// together while any other leg is live (1 = none).
+    pub group_cap: f64,
 }
 
 /// A leg is dead once its price can have diffused this many reference
@@ -116,7 +126,16 @@ impl Kernel {
             sigma: sigma_bp_sqrt_min * 1e-4 * PER_SQRT_MIN,
             s_min: s_min_bp * 1e-4,
             horizon_secs,
+            group_cap: 1.0,
         }
+    }
+
+    /// Hold the grouped legs to `cap` of the final shares (see
+    /// [`Self::group_cap`]); a cap outside `(0, 1)` is none.
+    #[must_use]
+    pub fn with_group_cap(mut self, cap: f64) -> Self {
+        self.group_cap = if cap > 0.0 && cap < 1.0 { cap } else { 1.0 };
+        self
     }
 
     /// Class by MITCH wire bits alone, for a caller without the operator
@@ -158,13 +177,18 @@ impl Kernel {
         (is_valid_tick(e.index.bid, e.index.ask) && tau <= self.horizon_secs).then_some(tau)
     }
 
-    /// `(τ, taper / (s_v² + σ²τ))` of a leg alive against `s_ref`, `None` once
-    /// its diffusion `σ√τ` passes `EVICT_SPREADS · s_ref`.
+    /// `(τ, taper / (s_v² + σ²τ_eff))` of a leg alive against `s_ref`, `None`
+    /// once its diffusion `σ√τ_eff` passes `EVICT_SPREADS · s_ref`.
+    /// `τ_eff = max(τ, ema_ipi)`: a leg is not younger than its own cadence, so
+    /// its weight is flat between normal confirmations. The floor spends at most
+    /// half the eviction budget, so a just-confirmed leg is never evicted.
     #[inline]
     fn leg(&self, e: &ProviderEntry, now: Instant, s_ref: f64) -> Option<(f64, f64)> {
         let tau = self.age(e, now)?;
-        let drift = self.sigma * self.sigma * tau;
+        let var = self.sigma * self.sigma;
         let evict = (EVICT_SPREADS * s_ref).powi(2);
+        let floor = e.ema_ipi_secs.min(0.5 * evict / var.max(f64::MIN_POSITIVE));
+        let drift = var * tau.max(floor);
         (drift <= evict).then(|| {
             let s = self.spread(e);
             // Tapered to exactly 0 at eviction so a departing leg never steps
@@ -417,6 +441,9 @@ pub struct ProviderEntry {
     /// unmapped, the bloc bound does not apply, and the blend is the same
     /// equal-weight composite it was before the bound existed.
     pub mapped: bool,
+    /// Member of the group [`Kernel::group_cap`] bounds (an EQ asset's
+    /// tokenised wrappers). Default `false`.
+    pub grouped: bool,
 }
 
 impl ProviderEntry {
@@ -435,7 +462,16 @@ impl ProviderEntry {
             ema_ipi_secs: 5.0,
             injected: false,
             mapped: false,
+            grouped: false,
         }
+    }
+
+    /// Mark the leg as a [`Self::grouped`] member.
+    #[inline]
+    #[must_use]
+    pub const fn with_grouped(mut self, grouped: bool) -> Self {
+        self.grouped = grouped;
+        self
     }
 
     /// Mark whether `base_weight` is evidence-backed (see [`Self::mapped`]).
@@ -620,6 +656,25 @@ where
         (true, true) => fresh_mass * cap,
         (true, false) => fresh_mass * k * w,
     };
+    // GROUP cap, on the final (aged, water-filled) shares: the grouped legs are
+    // scaled to `group_cap` together and the rest take up the difference. On
+    // the raw weights it bound nothing at the instant a grouped leg confirmed.
+    let (mut g, mut all) = (0.0f64, 0.0f64);
+    for e in entries.clone() {
+        if let Some((tau, w)) = weigh(e) {
+            let sh = share(tau, w);
+            all += sh;
+            if e.grouped {
+                g += sh;
+            }
+        }
+    }
+    let cap_g = kernel.group_cap * all;
+    let (k_group, k_rest) = if g > cap_g && g < all {
+        (cap_g / g, (all - cap_g) / (all - g))
+    } else {
+        (1.0, 1.0)
+    };
 
     let mut w_bid_sum = 0.0f64;
     let mut w_ask_sum = 0.0f64;
@@ -676,7 +731,7 @@ where
             active_bw_sum += base_weight;
         }
 
-        let sh = share(age, w);
+        let sh = share(age, w) * if entry.grouped { k_group } else { k_rest };
         if sh <= 1e-12 {
             continue;
         }
@@ -1699,13 +1754,13 @@ mod tests {
         );
     }
 
-    /// A quiet interval must not move the mark.
+    /// A quiet interval moves the mark only through legs that fall OVERDUE.
     ///
-    /// Every leg ages together and no quote changes, so the composite is pure
-    /// re-weighting. Under the old per-provider half-life the legs decayed at
-    /// rates differing by up to 5x, share migrated to whichever leg last ticked,
-    /// and the composite walked across a lull on its own. With one half-life per
-    /// ticker the decay factor is common to every leg and cancels in `w_sum`.
+    /// Every leg ages together and no quote changes. Inside every leg's own
+    /// cadence (`τ_eff = max(τ, ema_ipi)`) nothing re-weights, so the mark is
+    /// exactly still; past it, the fast legs' silence is evidence and they
+    /// fade toward the slow ones, a bounded drift, never a walk to the last
+    /// leg that ticked.
     #[test]
     fn quiet_interval_does_not_move_the_composite() {
         let t0 = Instant::now();
@@ -1727,23 +1782,17 @@ mod tests {
             e.ema_ipi_secs = *ipi;
             legs.push((i as u16 + 1, e));
         }
-        let first = compute_vwap_at(1, legs.iter().map(|(_, e)| e), 10.0, Kernel::ALT, t0)
-            .expect("composite");
-        let first_mid = first.mid();
-        // Walk 9 s of total silence: no leg updates, all ages advance together.
+        let mid_at = |ms: u64| {
+            let now = t0 + Duration::from_millis(ms);
+            compute_vwap_at(1, legs.iter().map(|(_, e)| e), 10.0, Kernel::ALT, now)
+                .expect("composite")
+                .mid()
+        };
+        let first_mid = mid_at(0);
+        assert_eq!(mid_at(200).to_bits(), first_mid.to_bits(), "inside every cadence: still");
         for step in 1..=90u64 {
-            let now = t0 + Duration::from_millis(step * 100);
-            let cur = compute_vwap_at(1, legs.iter().map(|(_, e)| e), 10.0, Kernel::ALT, now)
-                .expect("composite");
-            let drift_bps = ((cur.mid() - first_mid) / first_mid).abs() * 1e4;
-            assert!(
-                drift_bps < 0.01,
-                "t+{} ms: composite drifted {drift_bps:.4} bps on a quiet book \
-                 (mid {} -> {}); decay must cancel under normalisation",
-                step * 100,
-                first_mid,
-                cur.mid(),
-            );
+            let drift_bps = ((mid_at(step * 100) - first_mid) / first_mid).abs() * 1e4;
+            assert!(drift_bps < 0.5, "t+{} ms: drifted {drift_bps:.4} bps", step * 100);
         }
     }
 
@@ -1918,6 +1967,49 @@ mod tests {
         let idx = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).expect("mark");
         let ci_bp = decode_ci_ubp(idx.ci) / 1e4;
         assert!(ci_bp > 0.02 && ci_bp < 0.1, "ci {ci_bp} bp");
+    }
+
+    /// Two legs at the same cadence, one just confirmed and one about to: the
+    /// weight is flat inside the cadence, so the mark does not hop to the
+    /// last leg that confirmed. Past its cadence a leg decays as before.
+    #[test]
+    fn weight_is_flat_between_normal_updates() {
+        let t0 = Instant::now();
+        let k = Kernel::FX_METAL.with_sigma(4.0 * Kernel::FX_METAL.sigma);
+        let leg = |mid: f64, age_ms: u64| {
+            let mut e = mk_entry(mid - 0.005, mid + 0.005, 10, 10, 1.0, t0);
+            e.ema_ipi_secs = 1.4;
+            e.last_update = t0 - Duration::from_millis(age_ms);
+            e
+        };
+        let mid = |a: u64, b: u64| {
+            compute_vwap_at(1, [leg(100.0, a), leg(100.1, b)].iter(), 10.0, k, t0).unwrap().mid()
+        };
+        assert!((mid(0, 1_300) - 100.05).abs() < 1e-9, "flat inside the cadence");
+        assert!((mid(1_300, 0) - 100.05).abs() < 1e-9);
+        assert!(mid(0, 3_000) < 100.05 - 1e-4, "past the cadence the older leg fades");
+    }
+
+    /// The group cap binds on the FINAL shares: a grouped leg that just
+    /// confirmed against an aged ungrouped one still holds at most the cap.
+    #[test]
+    fn group_cap_binds_after_ageing() {
+        let t0 = Instant::now();
+        let at = |mid: f64, age_ms: u64, grouped: bool| {
+            let mut e = mk_entry(mid - 0.005, mid + 0.005, 10, 10, 1.0, t0).with_grouped(grouped);
+            e.last_update = t0 - Duration::from_millis(age_ms);
+            e
+        };
+        let k = Kernel::FX_METAL.with_sigma(4.0 * Kernel::FX_METAL.sigma);
+        let legs = [at(100.0, 0, true), at(100.0, 0, true), at(100.1, 3_000, false)];
+        let raw = compute_vwap_at(1, legs.iter(), 10.0, k, t0).unwrap().mid();
+        assert!((100.1 - raw) / 0.1 > 0.5, "aged: the group holds more than half uncapped");
+        let capped = compute_vwap_at(1, legs.iter(), 10.0, k.with_group_cap(0.5), t0).unwrap();
+        let share = (100.1 - capped.mid()) / 0.1;
+        assert!((share - 0.5).abs() < 1e-9, "group share {share}");
+        // Alone, the group carries the mark.
+        let alone = compute_vwap_at(1, legs[..2].iter(), 10.0, k.with_group_cap(0.5), t0).unwrap();
+        assert!((alone.mid() - 100.0).abs() < 1e-9);
     }
 
     #[test]

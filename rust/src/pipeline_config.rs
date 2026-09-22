@@ -1106,6 +1106,12 @@ pub struct StorageYml {
     /// asset's published id is unchanged: a leg is an input, never an output.
     #[serde(default)]
     pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
+    /// Band of a tokenised WRAPPER book (an EQ asset's surveyed markets) in
+    /// the deviation guard, in bp. Absent = the class band. A wrapper is a
+    /// claim on the same underlying, so its honest premium is small and a wide
+    /// one is a broken claim, not a market.
+    #[serde(default)]
+    pub wrapper_max_dev_bps: Option<f64>,
     /// Per base asset class (`EQ`): how far, in bp, a mark with no fresh
     /// external reference (relay book or derived leg) may drift from the last
     /// mark that had one. Past it the id stops publishing and goes stale

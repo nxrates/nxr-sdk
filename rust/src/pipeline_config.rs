@@ -1691,6 +1691,39 @@ pub struct StorageYml {
     /// in one series.
     #[serde(default)]
     pub storage_quote_overrides: std::collections::BTreeMap<String, String>,
+    /// PARITY LEGS, keyed by base asset: another instrument's price joins the
+    /// asset's storage vector at 1:1, converted over its own bridge at epoch -1
+    /// like any market and held to the same HHI ceiling. `XAUT: [XAU/USD]`
+    /// blends spot gold into the token's mark; `QQQ: [binance QQQB/USDT]`
+    /// carries the 24/7 tokenised book into an RTH-only equity. A closed
+    /// market goes stale and drops out by the ordinary freshness gate. The
+    /// asset's published id is unchanged: a leg is an input, never an output.
+    #[serde(default)]
+    pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
+}
+
+/// One parity leg. `provider` absent = NXR's own composite for `pair`, read at
+/// epoch -1 and weighted as a relay venue; present = that venue's book for
+/// `pair`, weighted from the survey like any surveyed market.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ParityLegYml {
+    pub pair: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Multiplier on the leg's base weight (relay median for a composite, the
+    /// survey's for a venue book) before the HHI ceiling. 1.0 = one median
+    /// venue; 0.5 halves a two-leg blend's exposure to a wrapper premium.
+    #[serde(default = "parity_weight_default")]
+    pub weight: f64,
+    /// Drop the leg for the cycle when its converted mid sits further than
+    /// this from the asset's own fresh epoch -1 mark. Absent = no gate. A leg
+    /// alone (no fresh mark to compare against) always carries.
+    #[serde(default)]
+    pub max_dev_bps: Option<f64>,
+}
+
+fn parity_weight_default() -> f64 {
+    1.0
 }
 
 impl StorageYml {

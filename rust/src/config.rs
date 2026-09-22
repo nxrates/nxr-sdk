@@ -160,10 +160,16 @@ impl NxrConfig {
             // (venue symbols QQQBUSDT / SPYBUSDT, aliased for every venue by
             // `cexs.aliases`) are the QQQ and SPY equities
             // themselves; `QQQB/USDT` spelled here selects the same book and id.
-            // `:PERP` entries (2026-09-22): USDT perpetuals on binance_futures +
-            // bybit_linear, the 24/7 legs of the gold and ETF composites. Only
-            // the perp handlers match them (no spot listing carries the marker)
-            // and core admits them STATE-ONLY: never served, never published.
+            // NO `:PERP` entries here (2026-09-23). A perp VENUE re-labels every
+            // book it is given with the marker, so a perp entry is what makes
+            // binance_futures / bybit_linear subscribe at all; with the CEX perp
+            // parity rows still commented behind the weekend gate, core admitted
+            // none of what they sent and 96% of its `unknown_ticker` drops were
+            // those ids. They come back in the SAME edit that uncomments the
+            // rows in `cexs.storage.parity_legs`, never before: a subscribed
+            // instrument no leg reads is ingest, UDP and log cost for nothing.
+            // The Pepperstone INDEX perps are unaffected: they are broker
+            // symbols under `ctrader.providers`, not CEX subscriptions.
             symbols: env_or(
                 "NXR_SYMBOLS",
                 "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,ADA/USDT,DOGE/USDT,\
@@ -189,8 +195,7 @@ impl NxrConfig {
                  AUSD/USDT,USDG/USDT,USDD/USDT,PYUSD/USDT,\
                  USDE/USDT,USDE/USDC,\
                  USDT/USDC,RLUSD/USDC,USDG/USDC,DAI/USDT,TUSD/USDT,FDUSD/USDC,\
-                 QQQB/USDT,QQQ/USDT,SPY/USDT,\
-                 XAU/USDT:PERP,QQQ/USDT:PERP,SPY/USDT:PERP,XAUT/USDT:PERP,PAXG/USDT:PERP",
+                 QQQB/USDT,QQQ/USDT,SPY/USDT",
             ),
             sink_host: env_or("NXR_SINK_HOST", "127.0.0.1"),
             sink_port: env_or("NXR_SINK_PORT", "40010").parse().unwrap_or(40010),

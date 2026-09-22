@@ -1,4 +1,4 @@
-use crate::resolve::{resolve_asset_in_class, resolve_ticker};
+use crate::resolve::{resolve_asset_in_class, resolve_ticker, split_perp};
 use dashmap::DashMap;
 use mitch::ticker::forex_ticker;
 use mitch::{AssetClass, InstrumentType};
@@ -83,33 +83,31 @@ impl Default for TickerIdCache {
 /// (e.g. "USDJPY" -> JPY/USD instead of USD/JPY). This function bypasses that by
 /// treating the first 3 chars as base and last 3 as quote, matching the 6-char
 /// symbol form brokers quote.
-fn resolve_fx6_ticker_id(symbol: &str) -> Option<u64> {
+fn resolve_fx6_ticker_id(symbol: &str, instrument_type: InstrumentType) -> Option<u64> {
     let b = symbol.as_bytes();
     if b.len() != 6 || !b.iter().all(|c| c.is_ascii_alphabetic()) {
         return None;
     }
     let base = resolve_asset_in_class(&symbol[..3], 0.90, AssetClass::FX)?;
     let quote = resolve_asset_in_class(&symbol[3..], 0.90, AssetClass::FX)?;
-    forex_ticker(
-        base.asset.class_id,
-        quote.asset.class_id,
-        InstrumentType::SPOT,
-        0,
-    )
-    .ok()
-    .map(|t| t.raw)
+    forex_ticker(base.asset.class_id, quote.asset.class_id, instrument_type, 0)
+        .ok()
+        .map(|t| t.raw)
 }
 
 /// Strict resolution: fx6 shortcut then full resolver, NO FNV fallback.
 /// `None` = unresolvable symbol. Boot-time config validation (nxr-oracle)
 /// uses this to fail loud instead of sharding under a phantom hash id.
+/// A `:PERP` suffix ([`crate::resolve::PERP_SUFFIX`]) selects the PERP
+/// instrument nibble; everything else is SPOT.
 pub fn try_resolve_ticker_id(symbol: &str) -> Option<u64> {
+    let (symbol, instrument_type) = split_perp(symbol);
     // For 6-char pure-alpha FX pairs (EURUSD, USDJPY, USDCAD, ...), use a direct 3+3
     // base/quote split to match the 6-char broker symbol encoding.
-    if let Some(id) = resolve_fx6_ticker_id(symbol) {
+    if let Some(id) = resolve_fx6_ticker_id(symbol, instrument_type) {
         return Some(id);
     }
-    resolve_ticker(symbol, InstrumentType::SPOT)
+    resolve_ticker(symbol, instrument_type)
         .ok()
         .map(|m| m.ticker.id)
 }
@@ -146,4 +144,56 @@ const fn fnv1a_64(data: &[u8]) -> u64 {
         i += 1;
     }
     hash
+}
+
+#[cfg(test)]
+mod perp_tests {
+    use super::*;
+    use mitch::ticker::TickerId;
+
+    /// `:PERP` mints the PERP nibble on the same base/quote: a distinct id
+    /// from the spot book, decoded as `InstrumentType::PERP`.
+    #[test]
+    fn perp_suffix_selects_the_perp_instrument() {
+        for (perp, spot) in [
+            ("XAU/USDT:PERP", "XAU/USDT"),
+            ("QQQ/USDT:PERP", "QQQ/USDT"),
+            ("XAUT/USDT:PERP", "XAUT/USDT"),
+            ("PAXG/USDT:PERP", "PAXG/USDT"),
+            ("xau/usdt:perp", "XAU/USDT"),
+        ] {
+            let p = try_resolve_ticker_id(perp).unwrap_or_else(|| panic!("{perp} must resolve"));
+            let s = try_resolve_ticker_id(spot).unwrap();
+            let (pt, st) = (TickerId::from_raw(p), TickerId::from_raw(s));
+            assert_eq!(pt.instrument_type(), InstrumentType::PERP, "{perp}");
+            assert!(st.is_spot(), "{spot}");
+            assert_ne!(p, s, "{perp} must not share the spot id");
+            let legs = |t: &TickerId| {
+                (t.base_asset_class(), t.base_asset_id(), t.quote_asset_class(), t.quote_asset_id())
+            };
+            assert_eq!(legs(&pt), legs(&st), "{perp}: only the instrument nibble may differ");
+        }
+    }
+
+    /// The QQQ perp tracks the ETF, not the bStocks wrapper `QQQB` one edit away.
+    #[test]
+    fn qqq_perp_is_the_etf_not_the_wrapper() {
+        let p = TickerId::from_raw(try_resolve_ticker_id("QQQ/USDT:PERP").unwrap());
+        let etf = TickerId::from_raw(try_resolve_ticker_id("QQQ/USD").unwrap());
+        assert_eq!(p.base_asset_class(), AssetClass::EQ);
+        assert_eq!(p.base_asset_id(), etf.base_asset_id());
+        let wrapper = TickerId::from_raw(try_resolve_ticker_id("QQQB/USDT").unwrap());
+        assert_ne!(
+            (p.base_asset_class(), p.base_asset_id()),
+            (wrapper.base_asset_class(), wrapper.base_asset_id())
+        );
+    }
+
+    /// An unknown perp symbol is refused, never minted off a fuzzy hit.
+    #[test]
+    fn unknown_perp_symbol_is_refused() {
+        assert!(try_resolve_ticker_id("ZZZQX/USDT:PERP").is_none());
+        assert!(!crate::is_perp_symbol("XAU/USDT"));
+        assert!(crate::is_perp_symbol("XAU/USDT:PERP"));
+    }
 }

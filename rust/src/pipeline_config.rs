@@ -1179,10 +1179,10 @@ pub struct MultiplierYml {
     /// `seed`).
     #[serde(default = "mult_cap_bps")]
     pub cap_bps: f64,
-    /// Regime reset: >= 25 of the last 30 common minutes further than
-    /// `max(6 x MAD(ring), reset_bps)` from `b` replace the ring with those 30.
-    /// An ex-div step (10-35 bps) stays under the floor and is absorbed by
-    /// the window instead.
+    /// Regime reset: >= 20 of the last 30 common minutes further than
+    /// `max(3 x MAD(ring), reset_bps)` from `b`, on one side, replace the ring
+    /// with those 30. 8 bps (the QQQ/SPY rows) catches an ETF ex-div step
+    /// (QQQ ~15, SPY ~30 per quarter) the 6.5 h window takes 3 h to half-absorb.
     #[serde(default = "mult_reset_bps")]
     pub reset_bps: f64,
     /// Age of the last common minute past which the leg is refused

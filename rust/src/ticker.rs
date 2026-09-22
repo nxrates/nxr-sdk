@@ -175,18 +175,18 @@ mod perp_tests {
         }
     }
 
-    /// The QQQ perp tracks the ETF, not the bStocks wrapper `QQQB` one edit away.
+    /// The QQQ perp, the ETF and the bStocks wrapper `QQQB` are one EQ asset
+    /// (owner rule 2026-09-22); SPY/SPYB likewise. XAUT stays its own CR asset.
     #[test]
-    fn qqq_perp_is_the_etf_not_the_wrapper() {
+    fn qqq_perp_wrapper_and_etf_share_the_asset() {
         let p = TickerId::from_raw(try_resolve_ticker_id("QQQ/USDT:PERP").unwrap());
         let etf = TickerId::from_raw(try_resolve_ticker_id("QQQ/USD").unwrap());
         assert_eq!(p.base_asset_class(), AssetClass::EQ);
         assert_eq!(p.base_asset_id(), etf.base_asset_id());
-        let wrapper = TickerId::from_raw(try_resolve_ticker_id("QQQB/USDT").unwrap());
-        assert_ne!(
-            (p.base_asset_class(), p.base_asset_id()),
-            (wrapper.base_asset_class(), wrapper.base_asset_id())
-        );
+        assert_eq!(try_resolve_ticker_id("QQQB/USDT"), try_resolve_ticker_id("QQQ/USDT"));
+        assert_eq!(try_resolve_ticker_id("SPYB/USDT"), try_resolve_ticker_id("SPY/USDT"));
+        let xaut = TickerId::from_raw(try_resolve_ticker_id("XAUT/USDT").unwrap());
+        assert_eq!(xaut.base_asset_class(), AssetClass::CR);
     }
 
     /// An unknown perp symbol is refused, never minted off a fuzzy hit.

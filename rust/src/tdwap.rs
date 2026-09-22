@@ -21,8 +21,8 @@
 //! **Confirmation clock.** `τ_v` runs from `last_update`, stamped by every
 //! frame the core admits: a new price, or a forwarder re-affirm of an
 //! unchanged one (`shard::FLAG_REAFFIRM`, sent only on proof the book is live:
-//! venue sequence advanced, size moved, or venue-wide activity; capped 300 s
-//! pegged / 30 s otherwise after the last price change). 2026-09-22: Binance
+//! venue sequence advanced or size moved, indefinitely; venue-wide activity,
+//! only 300 s pegged / 30 s otherwise past the last price change). 2026-09-22: Binance
 //! USD1/USDC held 0.9992/0.9993 for minutes; the forwarder dropped every
 //! identical quote, the old uniform 5 s half-life aged the busiest venue out,
 //! and `/v1/price/USD1-USDC` served a thin venue's book as `stale`. Price

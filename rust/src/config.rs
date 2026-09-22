@@ -196,6 +196,10 @@ impl NxrConfig {
             // bridges; do not leave it implicit).
             // QQQB/USDT (binance bStocks, 24/7): the `cexs.storage.parity_legs`
             // venue leg for QQQ/USD. Subscribed here or the leg is dead.
+            // `:PERP` entries (2026-09-22): USDT perpetuals on binance_futures +
+            // bybit_linear, the 24/7 legs of the gold and ETF composites. Only
+            // the perp handlers match them (no spot listing carries the marker)
+            // and core admits them STATE-ONLY: never served, never published.
             symbols: env_or(
                 "NXR_SYMBOLS",
                 "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,ADA/USDT,DOGE/USDT,\
@@ -221,7 +225,8 @@ impl NxrConfig {
                  AUSD/USDT,USDG/USDT,USDD/USDT,PYUSD/USDT,\
                  USDE/USDT,USDE/USDC,\
                  USDT/USDC,RLUSD/USDC,USDG/USDC,DAI/USDT,TUSD/USDT,FDUSD/USDC,\
-                 QQQB/USDT",
+                 QQQB/USDT,\
+                 XAU/USDT:PERP,QQQ/USDT:PERP,SPY/USDT:PERP,XAUT/USDT:PERP,PAXG/USDT:PERP",
             ),
             sink_host: env_or("NXR_SINK_HOST", "127.0.0.1"),
             sink_port: env_or("NXR_SINK_PORT", "40010").parse().unwrap_or(40010),

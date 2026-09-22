@@ -1095,7 +1095,7 @@ pub struct StorageYml {
     /// PARITY LEGS, keyed by base asset: another instrument's price joins the
     /// asset's storage vector at 1:1, converted over its own bridge at epoch -1
     /// like any market and held to the same HHI ceiling. `XAUT: [XAU/USD]`
-    /// blends spot gold into the token's mark; `QQQ: [NAS100/USD]`
+    /// blends spot gold into the token's mark; `QQQ: [NDX/USD]`
     /// carries the index, rebased (`multiplier`), into an RTH-only equity. A closed
     /// market goes stale and drops out by the ordinary freshness gate. The
     /// asset's published id is unchanged: a leg is an input, never an output.
@@ -1480,7 +1480,7 @@ mod tests {
         let y: StorageYml = serde_yml::from_str(concat!(
             "parity_legs:\n",
             "  XAUT: [{pair: XAU/USD, share: 0.35, max_dev_bps: 60, multiplier: {learn: rolling_common, window_h: 24, cap_bps: 100, ref: survey}}]\n",
-            "  QQQ: [{pair: NAS100/USD, multiplier: {learn: daily_open_vwap, window_h: 6.5, seed: 0.024339}},\n",
+            "  QQQ: [{pair: NDX/USD, multiplier: {learn: daily_open_vwap, window_h: 6.5, seed: 0.024339}},\n",
             "        {pair: QQQ/USDT:PERP, provider: binance_futures, weight: 0.5}]\n",
         ))
         .expect("parse");

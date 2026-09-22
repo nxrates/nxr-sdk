@@ -569,6 +569,13 @@ impl SignedQuotesYml {
         let mut s = std::collections::BTreeSet::new();
         for f in &self.feeds {
             s.insert(f.symbol.to_uppercase());
+            // A `quote_via` bridge is a second MARK the signer reads directly,
+            // not a graph leg discovered at route time. Omitting it here strips
+            // it from the `sign_only` keep-set and the σ prewarm, and the feed
+            // it carries then answers `unknown symbol` on a light node.
+            if let Some(via) = &f.quote_via {
+                s.insert(via.to_uppercase());
+            }
         }
         s
     }
@@ -683,6 +690,23 @@ pub struct SignedFeedYml {
     /// inversion, so only the mid flips.
     #[serde(default)]
     pub invert: bool,
+    /// Optional BRIDGE symbol: the pushed mark is `mid(symbol) x mid(quote_via)`,
+    /// CI and sigma composed in quadrature, provenance the OLDER leg. The
+    /// published ticker keeps `symbol`'s base and takes `quote_via`'s quote, so
+    /// re-basing a feed onto a deeper book (`XAUT-USDC` -> `XAUT-USDT` via
+    /// `USDT-USDC`) changes neither the published id nor the on-chain ordinal.
+    ///
+    /// Exists because `mark_record` is NATIVE FIRST: a thin observed book for
+    /// the published pair shadows the deeper route the cross graph would take
+    /// (XAUT/USDC is 2 venues, XAUT/USDT is 6). This is the explicit override
+    /// for that, and it is deliberately not inferred.
+    ///
+    /// Mutually exclusive with [`Self::invert`] (a reciprocal of a product is
+    /// not a product of reciprocals in this pipeline, and no deployment needs
+    /// both); enforced at boot in `signed.rs`. Absent = today's behaviour
+    /// exactly: one leg, no composition.
+    #[serde(default)]
+    pub quote_via: Option<String>,
 }
 
 /// `oracles:` block — Pyth Pro (Lazer) push providers consumed by the

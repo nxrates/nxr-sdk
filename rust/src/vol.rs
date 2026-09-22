@@ -519,6 +519,12 @@ impl LiveVolRing {
         finalized
     }
 
+    /// Newest finalized bin as a `.vol` row `(bin_start_ms, ema_sigma)`.
+    #[inline]
+    pub fn last_row(&self) -> Option<(i64, f64)> {
+        Some((*self.bin_starts.back()?, *self.sigmas.back()?))
+    }
+
     /// Index of the newest finalized bin, or `None` if empty.
     #[inline]
     pub fn last_index(&self) -> Option<usize> {
@@ -568,6 +574,29 @@ pub fn read_vol_tail(path: &std::path::Path, max_rows: usize) -> Vec<(i64, f64)>
         }
     }
     out
+}
+
+/// Append one `(bin_start_ms, sigma)` row to a `.vol` file, creating it and
+/// its directory. A file that is not a record-size multiple is left alone:
+/// appending would misalign every later row.
+pub fn append_vol_row(
+    path: &std::path::Path,
+    bin_start_ms: i64,
+    sigma: f64,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    if f.metadata()?.len() % VOL_RECORD_BYTES as u64 != 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "misaligned .vol"));
+    }
+    let mut row = [0u8; VOL_RECORD_BYTES];
+    let mts = mitch::timestamp::from_epoch_ms(bin_start_ms);
+    row[..6].copy_from_slice(&mitch::timestamp::encode_u48(mts));
+    row[6..].copy_from_slice(&sigma.to_le_bytes());
+    f.write_all(&row)
 }
 
 /// Drop everything before the newest `max_rows` records, returning the bytes
@@ -691,6 +720,19 @@ mod tests {
         fn find_index_for_mts(&self, _mts: u64) -> usize {
             self.0.len().saturating_sub(1)
         }
+    }
+
+    /// A live-finalized bin appended to `.vol` reads back through the prime.
+    #[test]
+    fn appended_rows_read_back_in_order() {
+        let dir = std::env::temp_dir().join(format!("nxr-vol-append-{}", std::process::id()));
+        let path = dir.join("vol").join("7.vol");
+        let rows = [(1_700_000_000_000i64, 0.0012), (1_700_001_800_000, 0.0015)];
+        for (ms, s) in rows {
+            append_vol_row(&path, ms, s).unwrap();
+        }
+        assert_eq!(read_vol_tail(&path, 8), rows.to_vec());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

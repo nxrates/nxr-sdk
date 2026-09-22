@@ -1104,6 +1104,12 @@ pub struct StorageYml {
     /// asset's published id is unchanged: a leg is an input, never an output.
     #[serde(default)]
     pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
+    /// Per base asset class (`EQ`): how far, in bp, a mark with no fresh
+    /// external reference (relay book or derived leg) may drift from the last
+    /// mark that had one. Past it the id stops publishing and goes stale
+    /// instead of following wrapper books alone. Absent class = no bound.
+    #[serde(default)]
+    pub unanchored_drift_bps: BTreeMap<String, f64>,
 }
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at
@@ -1127,10 +1133,10 @@ pub struct ParityLegYml {
     /// is 0.5 of a two-leg blend. Ignored when set with `weight` (share wins).
     #[serde(default)]
     pub share: Option<f64>,
-    /// Drop the leg for the cycle when its converted mid sits further than
-    /// this from the asset's own fresh epoch -1 mark. Absent = no gate. A leg
-    /// alone (no fresh mark to compare against) always carries. On a derived
-    /// leg the gate is on the RESIDUAL after rebasing.
+    /// The leg's band in the storage deviation guard: dropped when its
+    /// converted mid sits further than this from the median of the other
+    /// legs (never the mark). Absent = the class band. On a derived leg the
+    /// gate is on the RESIDUAL after rebasing, at half the band while seeded.
     #[serde(default)]
     pub max_dev_bps: Option<f64>,
     /// DERIVED leg: the leg enters at `price x seed x exp(-b)`, `b` learned as

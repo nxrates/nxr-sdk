@@ -47,7 +47,7 @@
 //!
 //! **Group cap.** Legs marked [`ProviderEntry::grouped`] (an EQ asset's
 //! wrappers) hold at most [`Kernel::group_cap`] of the FINAL shares together
-//! while another leg is live; the others are scaled up to fill.
+//! while another fresh leg is live; the fresh others are scaled up to fill.
 //!
 //! **`ci`.** Share-weighted cross-venue disagreement in quadrature with each
 //! leg's half-spread × min(√(τ/ipi), 3), floored at the composite
@@ -656,24 +656,34 @@ where
         (true, true) => fresh_mass * cap,
         (true, false) => fresh_mass * k * w,
     };
-    // GROUP cap, on the final (aged, water-filled) shares: the grouped legs are
-    // scaled to `group_cap` together and the rest take up the difference. On
-    // the raw weights it bound nothing at the instant a grouped leg confirmed.
-    let (mut g, mut all) = (0.0f64, 0.0f64);
+    // GROUP cap, on the final (aged, water-filled) shares: the FRESH grouped
+    // legs are scaled so the group holds `group_cap`, the fresh ungrouped legs
+    // take up the difference. A leg past its window keeps its raw share, so
+    // the cap never lifts a dying leg. On raw weights it bound nothing at the
+    // instant a grouped leg confirmed.
+    let (mut gs, mut gf, mut rf, mut all) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for e in entries.clone() {
         if let Some((tau, w)) = weigh(e) {
             let sh = share(tau, w);
             all += sh;
-            if e.grouped {
-                g += sh;
+            match (e.grouped, fresh(tau)) {
+                (true, true) => gf += sh,
+                (true, false) => gs += sh,
+                (false, true) => rf += sh,
+                (false, false) => {}
             }
         }
     }
-    let cap_g = kernel.group_cap * all;
-    let (k_group, k_rest) = if g > cap_g && g < all {
-        (cap_g / g, (all - cap_g) / (all - g))
+    let gf_cap = (kernel.group_cap * all - gs).max(0.0);
+    let (k_group, k_rest) = if gf > gf_cap && rf > 0.0 {
+        (gf_cap / gf, (rf + gf - gf_cap) / rf)
     } else {
         (1.0, 1.0)
+    };
+    let scale = |e: &ProviderEntry, tau: f64| match (fresh(tau), e.grouped) {
+        (false, _) => 1.0,
+        (true, true) => k_group,
+        (true, false) => k_rest,
     };
 
     let mut w_bid_sum = 0.0f64;
@@ -731,7 +741,7 @@ where
             active_bw_sum += base_weight;
         }
 
-        let sh = share(age, w) * if entry.grouped { k_group } else { k_rest };
+        let sh = share(age, w) * scale(entry, age);
         if sh <= 1e-12 {
             continue;
         }
@@ -2007,6 +2017,10 @@ mod tests {
         let capped = compute_vwap_at(1, legs.iter(), 10.0, k.with_group_cap(0.5), t0).unwrap();
         let share = (100.1 - capped.mid()) / 0.1;
         assert!((share - 0.5).abs() < 1e-9, "group share {share}");
+        // A leg past its window (stale 2 s) is never lifted to fill the cap.
+        let stale = compute_vwap_at(1, legs.iter(), 2.0, k, t0).unwrap().mid();
+        let kept = compute_vwap_at(1, legs.iter(), 2.0, k.with_group_cap(0.5), t0).unwrap();
+        assert_eq!(kept.mid().to_bits(), stale.to_bits(), "dying leg not lifted");
         // Alone, the group carries the mark.
         let alone = compute_vwap_at(1, legs[..2].iter(), 10.0, k.with_group_cap(0.5), t0).unwrap();
         assert!((alone.mid() - 100.0).abs() < 1e-9);

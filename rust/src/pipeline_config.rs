@@ -994,6 +994,15 @@ pub struct SignedFeedYml {
     /// exactly: one leg, no composition.
     #[serde(default)]
     pub quote_via: Option<String>,
+    /// Freshness tier (ms) for THIS row's `quote_via` leg. Absent = the tier the
+    /// via symbol declares on its own catalog row, else the global bound. For a
+    /// bridge with no row of its own (a row is a lane, and the lane set is
+    /// frozen on chain). Requires `quote_via`; bounds as `max_age_ms`.
+    ///
+    /// ROLLOUT: `deny_unknown_fields` ⇒ an older image refuses a catalog that
+    /// carries this key. Roll the image first, the ConfigMap second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_max_age_ms: Option<u64>,
     /// V2 (`packedV2`) ONLY: this feed's global lane index on `ExternalOracleV2`
     /// (`slotId = global_index / 8`, `laneIdx = global_index % 8`). Mirror of
     /// BTR's `deployments/arc-oracle-v2-lanes.json` `feeds.<SYM>.globalIndex`,

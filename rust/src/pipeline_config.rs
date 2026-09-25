@@ -179,20 +179,16 @@ pub enum RecordFormat {
     /// `BatchQuoteV4`, so a V5 signature can never verify as a V4 one.
     /// See `server::signed_v5`.
     PackedV5,
-    /// V6 DIFF wire for `ExternalOracleV5`: 12 B header (`version:u8(=6) |
-    /// seq:u32 | srcSecs:u32 | nP:u8 | nS:u8 | nC:u8`) then three gi-sorted
-    /// sparse sections — price 5 B (`gi:u8 | word:u32`), σ 5 B and conf 3 B
-    /// unchanged from V4/V5. `srcSecs` is the ABSOLUTE unix source second
-    /// (A-262: V4/V5's cyclic deci-second aliased every 24 h). The price word
-    /// is `exp7:u7 | mant:u25` with an ABSOLUTE exponent
-    /// (`mark = mant << (exp7 - 16)`), so every `packedV6` lane MUST resolve to
-    /// `exp_bias: 0` — from the domain's `lane_map` where it has one, and from
-    /// the per-feed catalog row (`SignedFeedYml::exp_bias`) where it does not.
-    /// Both paths are refused at boot, not at push time. `nP != 0`, `nC == nP` and the price/conf `gi` sequences
-    /// are identical. 4 lanes per slot. EIP-712 domain name and the
-    /// `BatchQuoteV4` typehash are UNCHANGED from V5 — only the encoder moves.
-    /// See `server::signed_v6`.
-    PackedV6,
+    /// P8 segment wire for BTR `MarkStoreP8`: 13 B header (`tier:u8 | srcSecs:u32 |
+    /// laneMask:u64`) then one entry per set lane, ascending: `word:u32 | code:u8
+    /// [| σ8:u8]` (`code` = conf code 0..61, `| 0x80` when σ8 follows). `word` is
+    /// `exp7:u7 | mant:u25` with an ABSOLUTE exponent (`mark = mant << (exp7 - 16)`,
+    /// exp7 17..79), so every `packedP8` lane MUST resolve to `exp_bias: 0`, refused
+    /// at boot otherwise. `srcSecs` is the absolute unix source second. EIP-712
+    /// domain version is "2" (name and `BatchQuoteV4` typehash unchanged), and the
+    /// domain declares its `tier` (1 primary, 2 reference), the header's first byte.
+    /// See `server::signed_p8`.
+    PackedP8,
 }
 
 impl Default for RecordFormat {
@@ -217,7 +213,7 @@ impl RecordFormat {
             "packedV2" | "packed_v2" => Ok(Self::PackedV2),
             "packedV4" | "packed_v4" => Ok(Self::PackedV4),
             "packedV5" | "packed_v5" => Ok(Self::PackedV5),
-            "packedV6" | "packed_v6" => Ok(Self::PackedV6),
+            "packedP8" | "packed_p8" => Ok(Self::PackedP8),
             "ticker30" => Err(
                 "signed_quotes record_format `ticker30` is RETIRED and this build cannot emit \
                  it. Declare `ticker22` if the consumer contract was migrated, `idx24` if it \
@@ -227,14 +223,13 @@ impl RecordFormat {
             other => Err(format!(
                 "signed_quotes record_format {other:?} is not a layout this build emits; \
                  accepted: `idx24`, `ticker22`, `packedV2`, `packedV4`, `packedV5`, \
-                 `packedV6`"
+                 `packedP8`"
             )),
         }
     }
 
     /// Bytes per packed record. `None` = VARIABLE: `packedV4`/`packedV5`/
-    /// `packedV6` are diff wires of per-section entry sizes (4/5/3 B and
-    /// 5/5/3 B), so no
+    /// `packedP8` are diff wires of per-section or per-lane entry sizes, so no
     /// single stride exists and a consumer must frame off the header counts,
     /// never off a stride.
     pub fn record_bytes(self) -> Option<usize> {
@@ -242,7 +237,7 @@ impl RecordFormat {
             Self::Idx24 => Some(24),
             Self::Ticker22 => Some(22),
             Self::PackedV2 => Some(100),
-            Self::PackedV4 | Self::PackedV5 | Self::PackedV6 => None,
+            Self::PackedV4 | Self::PackedV5 | Self::PackedP8 => None,
         }
     }
 
@@ -257,7 +252,7 @@ impl RecordFormat {
             Self::PackedV2 => 9,
             Self::PackedV4 => 12,
             Self::PackedV5 => 11,
-            Self::PackedV6 => 12,
+            Self::PackedP8 => 13,
         }
     }
 
@@ -269,7 +264,7 @@ impl RecordFormat {
             Self::PackedV2 => "packedV2",
             Self::PackedV4 => "packedV4",
             Self::PackedV5 => "packedV5",
-            Self::PackedV6 => "packedV6",
+            Self::PackedP8 => "packedP8",
         }
     }
 }
@@ -317,6 +312,11 @@ pub struct SignedDomainYml {
     /// never at config load: see [`RecordFormat`].
     #[serde(default)]
     pub record_format: Option<String>,
+    /// `packedP8` ONLY, and required there: the `MarkStoreP8` tier this domain signs
+    /// (1 primary, 2 reference). It is the segment's first byte; `oracle` is that
+    /// tier's `tierVerifier`.
+    #[serde(default)]
+    pub tier: Option<u8>,
     /// `packedV2`/`packedV4` ONLY: the oracle's immutable deciseconds clock
     /// origin in SECONDS (`sourceTsDs = (sourceSec - epoch) * 10`). Persisted
     /// alongside BTR's deploy record; Arc (chainId 5042002) = 1735689600
@@ -736,6 +736,7 @@ impl SignedQuotesYml {
                 // the deployment default, which is where its `record_format`
                 // was already written.
                 record_format: None,
+                tier: None,
                 epoch: None,
                 // The singleton alias predates per-domain lane maps too: it
                 // takes the per-feed catalog fields, as it always has.

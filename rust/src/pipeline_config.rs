@@ -918,6 +918,11 @@ pub struct SignedFeedYml {
     /// Bounds 1..=64 enforced at boot.
     #[serde(default)]
     pub min_active_providers: Option<u8>,
+    /// Per-feed override for `min_accepted_providers` (weighted composite
+    /// providers). `None` = global. Tighten-only: boot refuses a value below
+    /// the global (so never under the mainnet floor) or outside 1..=64.
+    #[serde(default)]
+    pub min_accepted_providers: Option<u8>,
     /// Per-feed σ-understatement allowance (PBPS) at co-sign, overriding the
     /// global `SIGMA_UNDERSTATEMENT_TOL_PBPS` (100). A thin feed whose
     /// independent 30 m Parkinson windows legitimately diverge more than the
@@ -2500,6 +2505,12 @@ mod tests {
         )
         .expect("the rendered ConfigMap feeds block must parse");
         assert_eq!(feeds.len(), 7);
+        assert!(feeds.iter().all(|f| f.min_accepted_providers.is_none()));
+        let f: SignedFeedYml = serde_yml::from_str(
+            "{ symbol: ETH-USDC, cosign_tolerance_bps: 5.0, min_accepted_providers: 4 }",
+        )
+        .expect("per-feed min_accepted_providers parses");
+        assert_eq!(f.min_accepted_providers, Some(4));
         assert_eq!(
             feeds.iter().map(|f| f.symbol.as_str()).collect::<Vec<_>>(),
             vec![

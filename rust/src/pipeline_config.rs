@@ -1009,6 +1009,15 @@ pub struct SignedFeedYml {
     /// carries this key. Roll the image first, the ConfigMap second.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via_max_age_ms: Option<u64>,
+    /// Publish under this `BASE-QUOTE` instead of the pair `symbol` /
+    /// `invert` / `quote_via` resolve to. Same mark, different id: for a CAT-2
+    /// wrap priced 1:1 off its underlying (`EURC-USDC` off `USDC-EUR` inverted,
+    /// `WBTC-USDC` off `BTC-USDC`), where the wrap has no book of its own and
+    /// the signer never composes. Boot refuses a `publish` whose
+    /// `series_alias::series_canonical_ticker_id` differs from the resolved
+    /// pair's, so it can only relabel a wrap, never re-price.
+    #[serde(default)]
+    pub publish: Option<String>,
     /// V2 (`packedV2`) ONLY: this feed's global lane index on `ExternalOracleV2`
     /// (`slotId = global_index / 8`, `laneIdx = global_index % 8`). Mirror of
     /// BTR's `deployments/arc-oracle-v2-lanes.json` `feeds.<SYM>.globalIndex`,

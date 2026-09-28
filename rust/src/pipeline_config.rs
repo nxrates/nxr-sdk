@@ -1975,6 +1975,16 @@ impl StorageYml {
             format!("{asset}/{}", self.storage_quote_for(asset))
         }
     }
+
+    /// `base/quote` is a storage primary: the base's storage denomination, or
+    /// a pair-keyed `parity_legs` row.
+    pub fn is_storage_primary(&self, base: &str, quote: &str) -> bool {
+        quote.eq_ignore_ascii_case(&self.storage_quote_for(base))
+            || self
+                .parity_legs
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case(&format!("{base}/{quote}")))
+    }
 }
 
 /// `cexs.scraper:` block — endpoints + selectors for CEX volume scraping.

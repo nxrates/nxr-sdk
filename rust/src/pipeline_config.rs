@@ -1964,6 +1964,17 @@ impl StorageYml {
             .cloned()
             .unwrap_or_else(|| "USD".to_string())
     }
+
+    /// Storage pair for a `parity_legs` key: a key naming a pair (`USD/KRW`,
+    /// an FX ticker whose base is the USD numeraire) IS the target; an asset
+    /// key is `<asset>/<storage_quote_for(asset)>`.
+    pub fn storage_pair(&self, asset: &str) -> String {
+        if asset.contains('/') {
+            asset.to_ascii_uppercase()
+        } else {
+            format!("{asset}/{}", self.storage_quote_for(asset))
+        }
+    }
 }
 
 /// `cexs.scraper:` block — endpoints + selectors for CEX volume scraping.

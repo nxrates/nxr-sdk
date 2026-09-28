@@ -126,6 +126,19 @@ where
     let _ = HEALTH.set(Box::new(f));
 }
 
+/// Process-global readiness probe for `/ready`. Default (nothing registered) =
+/// ready. Unlike `/health` it may report market-data coverage: readiness only
+/// gates rollouts and Service endpoints, never restarts the pod.
+static READY: OnceLock<Box<dyn Fn() -> bool + Send + Sync>> = OnceLock::new();
+
+/// Register the process readiness probe. Call once before `serve`.
+pub fn set_ready_check<F>(f: F)
+where
+    F: Fn() -> bool + Send + Sync + 'static,
+{
+    let _ = READY.set(Box::new(f));
+}
+
 /// Install the Prometheus recorder and spawn an HTTP server on the given port.
 ///
 /// Returns immediately once the listener is bound; the server runs on a
@@ -145,6 +158,7 @@ pub async fn serve(port: u16) -> Result<()> {
     let app = Router::new()
         .route("/metrics", get(render_metrics))
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .with_state(handle);
 
     tokio::spawn(async move {
@@ -185,6 +199,14 @@ async fn health() -> (StatusCode, String) {
             StatusCode::SERVICE_UNAVAILABLE,
             h.reason.unwrap_or_else(|| "unhealthy".to_string()),
         )
+    }
+}
+
+async fn ready() -> (StatusCode, &'static str) {
+    if READY.get().is_none_or(|probe| probe()) {
+        (StatusCode::OK, "ready")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "warming")
     }
 }
 

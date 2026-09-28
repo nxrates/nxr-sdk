@@ -42,15 +42,14 @@ pub fn now_mts() -> u64 {
 
 // ---- Quality gate ----
 
-/// Absurd-spread ceiling for [`is_valid_tick`], in basis points.
-///
-/// Deliberately loose (50%) — this is a CORRUPTION guard, not a market filter.
-/// The composite's real spread policy is `mitch::Index::reject_reason`'s
-/// 2000 bps cap; anything wider than 5000 bps at the single-tick level is a
-/// parse fault (wrong field read, mismatched sides of two different books, a
-/// price and a quantity swapped), never a quote. Before this, `1e-12 / 1e6`
-/// passed the gate and became a provider's mid.
-pub const MAX_TICK_SPREAD_BPS: f64 = 5_000.0;
+/// THE spread ceiling of the pipeline, in basis points: a CORRUPTION guard,
+/// not a market filter. Mirrors `mitch::Index::reject_reason`'s `spread_cap`,
+/// so a tick, a converted quote and a composite are all held to one number.
+/// Anything wider is a parse fault (wrong field read, two different books'
+/// sides, a price and a quantity swapped), never a quote: `1e-12 / 1e6` used to
+/// pass and become a provider's mid. Market width is bounded by the class band
+/// (`aggregator::quote_bands`) and priced by the kernel, never cut here.
+pub const MAX_SPREAD_BPS: f64 = 2_000.0;
 
 /// Basic tick sanity check: finite, positive prices, uncrossed, and not
 /// absurdly wide.
@@ -65,7 +64,17 @@ pub fn is_valid_tick(bid: f64, ask: f64) -> bool {
         return false;
     }
     let mid = (bid + ask) * 0.5;
-    (ask - bid) / mid * 10_000.0 <= MAX_TICK_SPREAD_BPS
+    (ask - bid) / mid * 10_000.0 <= MAX_SPREAD_BPS
+}
+
+/// [`is_valid_tick`] for a venue ORDER BOOK: additionally refuses a locked
+/// book (`bid == ask`). Only trades-only and oracle feeds legitimately publish
+/// `bid == ask`; a CEX top of book that locks is a mid-update or stale-cross
+/// frame, and admitting it hands the kernel a zero spread (floored, but still
+/// the tightest leg in the blend).
+#[inline]
+pub fn is_valid_book(bid: f64, ask: f64) -> bool {
+    is_valid_tick(bid, ask) && ask > bid
 }
 
 // ---- Outlier detection ----
@@ -140,6 +149,9 @@ pub struct TickAccumulator {
     /// Ticks rejected by the caller's pre-filter (e.g. z-score gate) during
     /// this window. Reported in `Index.rejected` on flush, clamped to u8.
     acc_rejected: u32,
+    /// Every tick this window was a [`Self::reaffirm`]: flushed as
+    /// [`crate::shard::FLAG_REAFFIRM`].
+    acc_reaffirm_only: bool,
 }
 
 impl TickAccumulator {
@@ -152,6 +164,7 @@ impl TickAccumulator {
             acc_ask_vol: 0,
             acc_count: 0,
             acc_rejected: 0,
+            acc_reaffirm_only: true,
         }
     }
 
@@ -166,8 +179,8 @@ impl TickAccumulator {
     /// stayed `4_100_000`. The field was therefore not comparable across assets
     /// and not summable — structurally broken, not merely scaled.
     ///
-    /// Prices are unaffected either way: TDWAP weights providers by
-    /// `base_weight * decay` and never by size (`crate::tdwap`), so no mark,
+    /// Prices are unaffected either way: TDWAP never weights a provider by
+    /// size (`crate::tdwap`), so no mark,
     /// `ci`, or signed quote moves with this. Producer of record is
     /// `crypto/src/client.rs::ingest_tick`; client-facing semantics are in
     /// `docs/api-v1.md#volume-units-vbid--vask`, which also states that history
@@ -179,6 +192,17 @@ impl TickAccumulator {
         self.acc_bid_vol += vbid as u64;
         self.acc_ask_vol += vask as u64;
         self.acc_count += 1;
+        self.acc_reaffirm_only = false;
+    }
+
+    /// Buffer an unchanged quote the caller has PROVEN live (venue sequence
+    /// advanced, size moved, or venue-wide activity). Same as [`Self::ingest`]
+    /// except that a window holding only these flushes as a re-affirm.
+    #[inline]
+    pub fn reaffirm(&mut self, bid: f64, ask: f64, vbid: u32, vask: u32) {
+        let only = self.acc_reaffirm_only;
+        self.ingest(bid, ask, vbid, vask);
+        self.acc_reaffirm_only = only;
     }
 
     /// Record that a raw tick was dropped by the caller's pre-filter
@@ -200,6 +224,11 @@ impl TickAccumulator {
             self.acc_rejected = 0;
             return None;
         }
+        let flags = if self.acc_reaffirm_only {
+            crate::shard::FLAG_REAFFIRM
+        } else {
+            0
+        };
         let rejected = self.acc_rejected.min(u8::MAX as u32) as u8;
         let index = Index {
             ticker: self.ticker,
@@ -212,12 +241,44 @@ impl TickAccumulator {
             confidence: 1,
             accepted: 1,
             rejected,
-            flags: 0,
+            flags,
         };
         self.acc_bid_vol = 0;
         self.acc_ask_vol = 0;
         self.acc_count = 0;
         self.acc_rejected = 0;
+        self.acc_reaffirm_only = true;
         Some(index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shard::FLAG_REAFFIRM;
+
+    #[test]
+    fn locked_book_is_not_a_book() {
+        assert!(is_valid_book(0.9992, 0.9993));
+        assert!(!is_valid_book(1.0, 1.0), "locked");
+        assert!(!is_valid_book(1.0, 0.9), "crossed");
+        assert!(is_valid_tick(1.0, 1.0), "a trades-only tick stays valid");
+    }
+
+    #[test]
+    fn a_window_of_only_reaffirms_flushes_flagged() {
+        let mut acc = TickAccumulator::new(7);
+        acc.reaffirm(1.0, 1.0001, 5, 5);
+        assert_eq!(acc.flush().unwrap().flags, FLAG_REAFFIRM);
+        acc.reaffirm(1.0, 1.0001, 5, 5);
+        acc.ingest(1.0, 1.0002, 5, 5);
+        assert_eq!(
+            acc.flush().unwrap().flags,
+            0,
+            "a real tick in the window clears it"
+        );
+        acc.ingest(1.0, 1.0002, 5, 5);
+        acc.reaffirm(1.0, 1.0002, 5, 5);
+        assert_eq!(acc.flush().unwrap().flags, 0);
     }
 }

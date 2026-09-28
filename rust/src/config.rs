@@ -71,52 +71,14 @@ pub struct NxrConfig {
     /// Path to the hot-reloadable TDWAP weights / ticker parameters file.
     /// Defaults to `<config_dir>/ticker-params.json`.
     pub ticker_params_path: String,
-    /// Per-ticker absolute cap on any single provider's share of total weight.
-    /// Prevents a single wash-volume venue (eg a tier-3 exchange spiking 100× the
-    /// typical volume on an illiquid alt) from dominating consolidated TDWAP.
-    /// Bloomberg BVAL tier-1 venues sit around 35-40%; this is the upper end of
-    /// industry idiom, chosen to minimise accuracy cost on legit-concentrated
-    /// markets while neutering wash-vol capture. Tunable per deployment.
-    /// Default: 0.40 (40%).
-    pub max_weight_per_source: f64,
-    /// HHI-adaptive ceiling upper bound. The effective per-ticker cap is
-    /// `clamp(sqrt(HHI_w), max_weight_per_source, max_weight_concentrated)`
-    /// where `HHI_w` is the Herfindahl index of WINSORIZED volumes (each
-    /// provider truncated at `anomaly_vol_ratio × median`). sqrt(HHI) = RMS
-    /// share ≥ every winsorized share, so the cap only bites on raw shares
-    /// that exceeded the winsor point — ie a genuinely (or fraudulently)
-    /// dominant venue keeps its concentration-corroborated share up to this
-    /// bound. A primary market (eg Binance on an issuer-partnered listing at
-    /// 75% raw share) earns up to 60%; fragmented tickers degrade to the flat
-    /// `max_weight_per_source` floor. Single-venue wash volume cannot lift the
-    /// ceiling past this bound: winsorization caps its HHI contribution and
-    /// moving the median needs ⌈N/2⌉ colluding venues. Must be ≥
-    /// `max_weight_per_source`. Default: 0.60 (60%).
-    pub max_weight_concentrated: f64,
-    /// Minimum number of active providers per ticker required to enforce the
-    /// cap. With < N providers, the thin coverage is itself the bottleneck and
-    /// forcing a cap would distort the few legitimate quotes. Default: 3.
-    pub min_providers_for_cap: usize,
     /// Anomaly flag threshold: when raw_volume(p, t) > anomaly_vol_ratio ·
     /// median_t for a ticker, log a `weights_anomaly_high_vol` warn. Useful for
     /// spotting CMC scrape errors or genuine wash-trading. Default: 5.0.
     pub anomaly_vol_ratio: f64,
-    /// Hot-path PRICE-sanity reject band (fraction). On ingest, a provider quote
-    /// whose mid deviates from the robust median of the ticker's OTHER live
-    /// provider mids by more than this fraction is REJECTED (not merged into
-    /// aggregator state) and the `nxr_quotes_rejected_total` counter is bumped.
-    /// This is the live counterpart to the `mid jump` / degenerate-CI signature
-    /// the cert (`integrity-check idx`) flags after the fact — it stops a single
-    /// bad forwarder (e.g. the 2026-05-28..06-02 SOL/USDT $1784/$643 garbage)
-    /// from poisoning the composite and the `.idx` history in the first place.
-    /// Mirrors the `max_weight_per_source` wash-vol cap idiom (a per-source
-    /// guard on the consolidated composite). Default: 0.20 (20%).
-    pub reject_band_pct: f64,
     /// Minimum number of OTHER live providers (with a finite, positive mid) for
     /// the ticker before the price-sanity reject band is enforced. Below this,
     /// the median reference is too thin to trust, so the gate is skipped and the
-    /// quote is admitted (thin coverage is itself the bottleneck — same rationale
-    /// as `min_providers_for_cap`). Default: 2.
+    /// quote is admitted (thin coverage is itself the bottleneck). Default: 2.
     pub reject_min_providers: usize,
 }
 
@@ -134,7 +96,7 @@ impl NxrConfig {
         let ticks_dir = env_or("NXR_DATA_TICKS", &format!("{}/ticks", data_root));
         let bars_dir = env_or("NXR_DATA_BARS", &format!("{}/bars", data_root));
         let indexes_dir = env_or("NXR_DATA_INDEXES", &format!("{}/indexes", data_root));
-        let config_dir = env_or("NXR_DATA_CONFIG", &format!("{}/config", data_root));
+        let config_dir = config_dir();
         let ticker_params_path = env_or(
             "NXR_TICKER_PARAMS_PATH",
             &format!("{}/ticker-params.json", config_dir),
@@ -194,8 +156,20 @@ impl NxrConfig {
             // heals) — plus USDT/USDC made EXPLICIT (fallback-reachable via
             // USDT/USD today, but it is the signed-manifest via-leg for 6
             // bridges; do not leave it implicit).
-            // QQQB/USDT (binance bStocks, 24/7): the `cexs.storage.parity_legs`
-            // venue leg for QQQ/USD. Subscribed here or the leg is dead.
+            // QQQB/USDT, QQQ/USDT + SPY/USDT (2026-09-22): the Binance bStocks wrappers
+            // (venue symbols QQQBUSDT / SPYBUSDT, aliased for every venue by
+            // `cexs.aliases`) are the QQQ and SPY equities
+            // themselves; `QQQB/USDT` spelled here selects the same book and id.
+            // NO `:PERP` entries here (2026-09-23). A perp VENUE re-labels every
+            // book it is given with the marker, so a perp entry is what makes
+            // binance_futures / bybit_linear subscribe at all; with the CEX perp
+            // parity rows still commented behind the weekend gate, core admitted
+            // none of what they sent and 96% of its `unknown_ticker` drops were
+            // those ids. They come back in the SAME edit that uncomments the
+            // rows in `cexs.storage.parity_legs`, never before: a subscribed
+            // instrument no leg reads is ingest, UDP and log cost for nothing.
+            // The Pepperstone INDEX perps are unaffected: they are broker
+            // symbols under `ctrader.providers`, not CEX subscriptions.
             symbols: env_or(
                 "NXR_SYMBOLS",
                 "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,ADA/USDT,DOGE/USDT,\
@@ -221,26 +195,14 @@ impl NxrConfig {
                  AUSD/USDT,USDG/USDT,USDD/USDT,PYUSD/USDT,\
                  USDE/USDT,USDE/USDC,\
                  USDT/USDC,RLUSD/USDC,USDG/USDC,DAI/USDT,TUSD/USDT,FDUSD/USDC,\
-                 QQQB/USDT",
+                 QQQB/USDT,QQQ/USDT,SPY/USDT",
             ),
             sink_host: env_or("NXR_SINK_HOST", "127.0.0.1"),
             sink_port: env_or("NXR_SINK_PORT", "40010").parse().unwrap_or(40010),
             ticker_params_path,
-            max_weight_per_source: env_or("NXR_MAX_WEIGHT_PER_SOURCE", "0.40")
-                .parse()
-                .unwrap_or(0.40),
-            max_weight_concentrated: env_or("NXR_MAX_WEIGHT_CONCENTRATED", "0.60")
-                .parse()
-                .unwrap_or(0.60),
-            min_providers_for_cap: env_or("NXR_MIN_PROVIDERS_FOR_CAP", "3")
-                .parse()
-                .unwrap_or(3),
             anomaly_vol_ratio: env_or("NXR_ANOMALY_VOL_RATIO", "5.0")
                 .parse()
                 .unwrap_or(5.0),
-            reject_band_pct: env_or("NXR_REJECT_BAND_PCT", "0.20")
-                .parse()
-                .unwrap_or(0.20),
             reject_min_providers: env_or("NXR_REJECT_MIN_PROVIDERS", "2").parse().unwrap_or(2),
         }
     }
@@ -353,6 +315,13 @@ fn reconcile_aggregation_interval_ms(env_val: Option<u64>, yaml_val: Option<u64>
     yaml_val
         .or(env_val)
         .unwrap_or(DEFAULT_AGGREGATION_INTERVAL_MS)
+}
+
+/// `NXR_DATA_CONFIG`, default `<NXR_DATA_ROOT>/config`: the hot-reload and
+/// per-ticker state directory (`ticker-params.json`, `basis.json`).
+pub fn config_dir() -> String {
+    let data_root = env_or("NXR_DATA_ROOT", "/data");
+    env_or("NXR_DATA_CONFIG", &format!("{}/config", data_root))
 }
 
 fn env_or(key: &str, default: &str) -> String {

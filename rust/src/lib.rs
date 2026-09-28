@@ -80,12 +80,15 @@ pub use shard::{BarShardWriter, IdxShardWriter};
 
 pub use grid::{grid_step_for_brick, snap_to_25_grid, snap_to_grid};
 pub use renko::{RenkoConfig, RenkoGenerator};
-pub use vol::{LiveVolRing, MtfVolCalculator, VolConfig, VolSource, read_vol_tail, trim_vol_tail};
+pub use vol::{
+    LiveVolRing, MtfVolCalculator, VolConfig, VolSource, append_vol_row, read_vol_tail,
+    trim_vol_tail,
+};
 pub use vol_estimator::rs_sigma_from_ohlc;
 
 // ---- Ticker resolution ----
 
-pub use resolve::resolve_ticker;
+pub use resolve::{is_perp_symbol, resolve_ticker};
 pub use series_alias::{is_parity_wrap, peg_asset, series_canonical_ticker_id};
 pub use ticker::{
     TickerIdCache, phantom_ticker_id, resolve_ticker_id, split_pair, split_pair_multi,
@@ -98,12 +101,14 @@ pub use providers::{get_market_provider_by_id, get_market_provider_id_by_name};
 
 // ---- Aggregation primitives ----
 
-pub use agg::{RunningStats, TickAccumulator, is_valid_tick, now_ms, now_mts, now_ns, now_sec};
+pub use agg::{
+    RunningStats, TickAccumulator, is_valid_book, is_valid_tick, now_ms, now_mts, now_ns, now_sec,
+};
 
 // ---- TDWAP aggregation ----
 
 pub use tdwap::{
-    ProviderEntry, WeightCache, compute_vwap, compute_vwap_at, compute_vwap_throttled,
+    Kernel, ProviderEntry, WeightCache, compute_vwap_at, compute_vwap_throttled,
     default_refresh_interval_ms,
 };
 

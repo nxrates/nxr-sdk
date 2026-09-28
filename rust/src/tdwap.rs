@@ -1,28 +1,76 @@
-//! Time-Decay Weighted Average Price (TDWAP) aggregation.
+//! Cross-provider composite: the ONE place provider legs are weighted.
 //!
 //! Level 2 of the two-level aggregation pipeline:
 //!   Level 1: raw ticks -> per-provider Index (via `TickAccumulator`)
-//!   Level 2: per-provider Indexes -> cross-provider TDWAP Index (this module)
+//!   Level 2: per-provider Indexes -> cross-provider composite (this module)
 //!
-//! Exported types:
-//!   - `ProviderEntry`: per-provider metadata wrapper around `Index`
-//!   - `compute_vwap`: cross-provider TDWAP with adaptive decay and confidence interval
+//! ## Weight of leg `v` ([`Kernel`], [`compute_vwap_at`])
+//!
+//! ```text
+//! w_v = b_v · r_v · s_ref² / (s_v² + σ²·τ_v) · (1 − τ_v / τ_evict)
+//! shares = w / Σw, unmapped bloc bounded, water-filled at w_max(n_eff)
+//! ```
+//!
+//! - `b_v`: evidence, the venue's volume weight (`ticker-params.json`,
+//!   median venue = 1.0).
+//! - `r_v`: join ramp, `(age since join) / (3·ema_ipi)` in `[1e-3, 1]`: a
+//!   leg entering 3 bp off a stable mark fades in instead of stepping it.
+//! - `s_v²`: the quote's own noise, relative half-spread floored per class
+//!   (`s_min`), so a razor-thin book cannot claim infinite precision.
+//! - `σ²·τ_v`: how far the price can have moved since the leg was last
+//!   CONFIRMED, `τ_v` floored at the leg's own cadence (`ema_ipi_secs`, at most
+//!   half the eviction age): weight is flat between normal confirmations and
+//!   decays only past them, so the mark does not hop to the last leg that
+//!   confirmed. `σ` = max(measured `.vol` sigma, class floor) per √s.
+//!
+//! **Confirmation clock.** `τ_v` runs from `last_update`, stamped by every
+//! frame the core admits: a new price, or a forwarder re-affirm of an
+//! unchanged one (`shard::FLAG_REAFFIRM`, sent only on proof the book is live:
+//! venue sequence advanced or size moved, indefinitely; venue-wide activity,
+//! only 300 s pegged / 30 s otherwise past the last price change). Price
+//! change is not liveness; confirmation is.
+//!
+//! **Liveness** ([`freshness`]), one test for `n` and `active_count`: 1 inside
+//! half the window, linear to 0 at `min(stale, τ_evict)`; `stale/2` is one
+//! re-affirm interval of a live book.
+//!
+//! **Eviction.** `τ_evict = max((4·s_ref)² / σ², stale/2)`: a leg is dropped
+//! once it can have diffused four typical half-spreads (`s_ref` =
+//! base-weighted mean `s_v`), never inside one re-affirm interval, or once `τ_v`
+//! passes the class backstop. The taper reaches 0 at `τ_evict`, so leaving
+//! never steps the mark. An all-stale set has no weight to make a mark from.
+//!
+//! **Unmapped bloc.** Legs with no volume evidence (`mapped = false`) hold at
+//! most `FRAC/(1+FRAC)` of the FINAL shares while the mapped mass is present;
+//! the bound relaxes with that presence (freshness × ramp), so a dying mapped
+//! venue is never held up by it. No mapped leg: no bound.
+//!
+//! **Cap.** The ONE concentration rule of the pipeline ([`Concentration`]):
+//! every live leg is held to `w_max(n)`, `n = n_eff = (Σx)²/Σx²` over the
+//! evidence legs (mapped, else all; never injected), `x = min(b, anom_k) ·
+//! freshness · ramp`. Clipping at `anom_k` (median = 1) stops one wash-volume
+//! venue from reading as single-source; `n_eff` stops dust venues from
+//! inflating `n` and lowering the cap. The excess goes only to evidence legs,
+//! in proportion to `w · freshness`: unmapped legs and legs past `stale` never
+//! receive it, so the cap never holds a dying leg up.
+//!
+//! **`ci`.** Share-weighted cross-venue disagreement in quadrature with each
+//! leg's half-spread × min(√(τ/ipi), 3), floored at the composite
+//! half-spread. Deliberately on the pre-kernel scale: the BTR keeper's 25 bp
+//! ci-spike trigger and the signer ceilings are calibrated to it.
+//!
+//! `confidence`: `active_count` (live, not injected) and bit 7 = final share
+//! of those legs `>= FRESH_WEIGHT_SHARE_FLOOR`, read by the signed-quote gates.
 
 // Time source: `coarsetime::Instant` is `repr(transparent) u64` with
-// `derive(Copy)`, which lets `ProviderEntry` itself be `Copy`. The previous
-// `std::time::Instant` representation is `!Copy` on macOS/Linux (it wraps a
-// non-Copy `mach_timebase_info`-derived struct / `timespec` pair), forcing
-// the hot aggregator path to `clone()` every entry per cycle
-// (≈80 k clones/s at 20 Hz × ≈400 tickers × ≈10 providers).
-//
-// Resolution is millisecond-class — the staleness math
-// (`clamp(1e-6, 300.0)` floor on inter-arrival time, half-life ≥ 1 s)
-// is unaffected by trading a nanosecond for a millisecond clock.
-//
-// `coarsetime::Duration` is API-compatible with the subset we use
-// (`from_millis`, `as_f64`, `as_secs`). We import both unqualified so the
-// rest of the file reads identically to the pre-Δ1.C version.
-use coarsetime::{Duration, Instant};
+// `derive(Copy)`, which lets `ProviderEntry` itself be `Copy` on the hot
+// aggregator path. Millisecond resolution is enough for every age here.
+use coarsetime::Duration;
+/// The clock [`ProviderEntry::last_update`] is stamped in. Re-exported so a
+/// caller outside this crate can carry an observation instant around without a
+/// direct `coarsetime` dependency: `coarse_now` alone is half the API, since a
+/// struct field or a return type has to name the type.
+pub use coarsetime::Instant;
 
 use mitch::Index;
 
@@ -32,81 +80,170 @@ use crate::agg::is_valid_tick;
 /// alpha = 0.1 -> converges to true inter-arrival time after ~10 updates.
 const IPI_ALPHA: f64 = 0.1;
 
-/// Half-life multiplier: weight halves after `IPI_K x ema_ipi` seconds.
-/// Used ONLY for the per-provider LIVENESS axis (`active_count`), never for the
-/// price weight — see [`price_half_life`].
-const IPI_K: f64 = 3.0;
+/// Join ramp length in units of the leg's `ema_ipi_secs`.
+const RAMP_IPI: f64 = 3.0;
+/// Ramp floor: a lone joining leg still prices its ticker.
+const RAMP_MIN: f64 = 1e-3;
 
-/// Half-life (seconds) of the PRICE weight, as a fraction of the staleness
-/// threshold. Uniform across every provider in a ticker, which is the whole
-/// point: normalisation divides by `w_sum`, so a decay factor applied EQUALLY
-/// to every leg cancels. A quiet interval in which all legs age together then
-/// leaves the composite exactly unchanged, instead of re-weighting it.
-///
-/// The previous price weight reused the per-provider adaptive half-life
-/// `clamp(IPI_K·ema_ipi, 1, stale/2)`. That is 1.0 s for anything ticking faster
-/// than ~0.33 s and 5.0 s for anything slower than ~1.67 s, so on a live
-/// BTC/USDT book (measured 2026-07-31: 15 venues, 0.09..3.29 frames/s) the legs
-/// decayed at rates differing by 5x. Share therefore migrated to whichever legs
-/// happened to tick last rather than to the deepest book, and the normalised
-/// share of a single venue swung by 8x..10431x within one capture. The
-/// composite's own records show the consequence: decay-weighted freshness
-/// averages 0.677 but falls to 0.548 on a downward spike, and the lowest-5%
-/// freshness records carry 7.92 bps of cross-venue dispersion against a 3.02 bps
-/// baseline. Uniform decay removes that redistribution channel; a leg that goes
-/// quiet ON ITS OWN still loses share to legs that keep ticking, which is the
-/// behaviour actually wanted.
-const PRICE_HALF_LIFE_FRACTION: f64 = 0.5;
-
-/// Price-weight half-life for a ticker. Uniform across providers by design.
+/// Liveness on the confirmation clock: 1 while `τ <= window/2`, linear to 0
+/// at `window` (`min(stale, τ_evict)`; a live book re-affirms every stale/2).
 #[inline]
-fn price_half_life(stale_threshold_secs: f64) -> f64 {
-    (stale_threshold_secs * PRICE_HALF_LIFE_FRACTION).max(1.0)
+pub fn freshness(tau: f64, window_secs: f64) -> f64 {
+    (2.0 - 2.0 * tau / window_secs.max(f64::MIN_POSITIVE)).clamp(0.0, 1.0)
 }
 
-/// Corpse horizon: a leg silent beyond this contributes nothing.
-#[inline]
-fn corpse_horizon(stale_threshold_secs: f64) -> f64 {
-    stale_threshold_secs * 6.0
+/// Per-ticker parameters of the price kernel (module header has the formula).
+/// Class constants are `(σ floor bp/√min, s_min bp, backstop s)`; a measured
+/// sigma can only raise `sigma` ([`Self::with_sigma`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Kernel {
+    /// Diffusion, fraction of mid per √s: `max(realised, class floor)`.
+    pub sigma: f64,
+    /// Half-spread floor, fraction of mid.
+    pub s_min: f64,
+    /// Backstop: a leg unconfirmed this long is evicted whatever its spread.
+    pub horizon_secs: f64,
 }
 
-/// Age of a leg that is still inside the corpse horizon, `None` once it is
-/// past it. Single source for the corpse rule: the UNMAPPED-BLOC pre-pass and
-/// the blend loop below must admit exactly the same set of legs, or the bound
-/// is computed against a different population than it is applied to.
-#[inline]
-fn live_age(entry: &ProviderEntry, now: Instant, stale_threshold_secs: f64) -> Option<f64> {
-    let age = now.duration_since(entry.last_update).as_f64();
-    (age <= corpse_horizon(stale_threshold_secs)).then_some(age)
+/// A leg is dead once its price can have diffused this many reference
+/// half-spreads since its last confirmation.
+const EVICT_SPREADS: f64 = 4.0;
+
+impl Kernel {
+    /// `cexs.pegged` pairs (USD1/USDC, USDT/USD). σ 1.5 bp/√min: a held peg
+    /// barely diffuses, so a confirmed flat book keeps its share for minutes.
+    /// s_min 1 bp: one tick at 4 dp. Backstop 15 min; at a 1 bp book the
+    /// diffusion bound evicts first (~7 min unconfirmed).
+    pub const PEGGED: Self = Self::class(1.5, 1.0, 900.0);
+    /// `cexs.crypto_majors` against a pegged quote (BTC/USDT, ETH/USD).
+    /// σ 6 bp/√min, s_min 0.5 bp (sub-bp books), backstop 60 s.
+    pub const MAJOR: Self = Self::class(6.0, 0.5, 60.0);
+    /// Every other crypto pair. σ 20 bp/√min, s_min 2 bp, backstop 60 s.
+    pub const ALT: Self = Self::class(20.0, 2.0, 60.0);
+    /// FX, metals, commodities, equities (oracle relays). σ 2 bp/√min,
+    /// s_min 0.5 bp, backstop 5 min: often one source, so it is kept through a
+    /// relay gap. Weekend close is the closed-market handling upstream, not
+    /// ageing.
+    pub const FX_METAL: Self = Self::class(2.0, 0.5, 300.0);
+
+    /// Class floors are quoted in bp per √minute.
+    const fn class(sigma_bp_sqrt_min: f64, s_min_bp: f64, horizon_secs: f64) -> Self {
+        // 1/√60.
+        const PER_SQRT_MIN: f64 = 0.129_099_444_873_580_56;
+        Self {
+            sigma: sigma_bp_sqrt_min * 1e-4 * PER_SQRT_MIN,
+            s_min: s_min_bp * 1e-4,
+            horizon_secs,
+        }
+    }
+
+    /// Class by MITCH wire bits alone, for a caller without the operator
+    /// lists: a pair with a crypto leg ages as [`Self::ALT`], FX, metals,
+    /// commodities and equities as [`Self::FX_METAL`].
+    pub fn for_wire(ticker_id: u64) -> Self {
+        use mitch::common::AssetClass::CR;
+        let t = mitch::ticker::TickerId::from_raw(ticker_id);
+        if t.base_asset_class() == CR || t.quote_asset_class() == CR {
+            Self::ALT
+        } else {
+            Self::FX_METAL
+        }
+    }
+
+    /// Set `sigma` from a measured value (fraction per √s), clamped to
+    /// `[class floor, 10 × class floor]`: a quiet measurement never slows
+    /// ageing below the floor, a garbage one cannot evict every leg at once.
+    #[must_use]
+    pub fn with_sigma(mut self, realised: f64) -> Self {
+        if realised.is_finite() {
+            self.sigma = realised.clamp(self.sigma, 10.0 * self.sigma);
+        }
+        self
+    }
+
+    /// Relative half-spread of a valid quote, floored at `s_min`.
+    #[inline]
+    fn spread(&self, e: &ProviderEntry) -> f64 {
+        let (bid, ask) = (e.index.bid, e.index.ask);
+        ((ask - bid) / (ask + bid)).max(self.s_min)
+    }
+
+    /// Confirmation age of an admissible leg: a valid tick inside the
+    /// backstop. `None` = the leg is not part of this ticker's blend.
+    #[inline]
+    fn age(&self, e: &ProviderEntry, now: Instant) -> Option<f64> {
+        let tau = now.duration_since(e.last_update).as_f64();
+        (is_valid_tick(e.index.bid, e.index.ask) && tau <= self.horizon_secs).then_some(tau)
+    }
+
+    /// `(τ, taper / (s_v² + σ²τ_eff), τ_evict)` of a leg alive against `s_ref`,
+    /// `None` past `τ_evict = max((EVICT_SPREADS·s_ref)²/σ², stale/2)`.
+    /// `τ_eff = max(τ, min(ema_ipi, τ_evict/2))`: a leg is not younger than its
+    /// own cadence, so its weight is flat between normal confirmations.
+    #[inline]
+    fn leg(
+        &self,
+        e: &ProviderEntry,
+        now: Instant,
+        s_ref: f64,
+        stale: f64,
+    ) -> Option<(f64, f64, f64)> {
+        let tau = self.age(e, now)?;
+        let var = (self.sigma * self.sigma).max(f64::MIN_POSITIVE);
+        // The BINDING bound: whichever of the diffusion age and the class
+        // backstop comes first. Tapering against the diffusion bound alone let
+        // a wide book (whose diffusion age runs past the backstop) leave at
+        // full weight, which is exactly the step the taper exists to remove.
+        let t_evict = ((EVICT_SPREADS * s_ref).powi(2) / var)
+            .max(0.5 * stale)
+            .min(self.horizon_secs);
+        let t_eff = tau.max(e.ema_ipi_secs.min(0.5 * t_evict));
+        (t_eff <= t_evict).then(|| {
+            let s = self.spread(e);
+            (tau, (1.0 - t_eff / t_evict) / (s * s + var * t_eff), t_evict)
+        })
+    }
 }
 
-/// Ceiling on the base-weight mass the UNMAPPED bloc may carry, as a fraction
-/// of the MAPPED mass: `Σ w_unmapped <= FRAC · Σ w_mapped`, enforced by scaling
-/// every unmapped leg by a common factor (so their relative order is kept and
-/// none of them is delisted).
-///
-/// Why a BLOC bound and not a per-leg constant. A `(provider, ticker)` absent
-/// from `ticker-params.json` used to fall back to `1.0` — the MEDIAN venue's
-/// weight, above the <=0.60 HHI ceiling every mapped venue is held to, so the
-/// venue we had no volume evidence for outweighed every venue we did. The
-/// obvious repair (a small per-leg constant) overshoots in the other
-/// direction: it DELISTS the tail instead of demoting it, hands a single
-/// mapped venue 93-98% of the composite, and its correct value depends on how
-/// many unmapped legs a ticker happens to have. Bounding the GROUP fixes both
-/// failure modes with one number: dilution is capped because the bloc cannot
-/// exceed `FRAC` of the mapped mass, concentration is capped because the bloc
-/// keeps a guaranteed `FRAC/(1+FRAC)` share of the blend, and adding unmapped
-/// legs subdivides that share instead of growing it.
-///
-/// 0.40 = the unmapped tail is worth at most ~29% of the composite
-/// (`0.4/1.4`), so the evidence-backed venues always hold the majority.
-///
-/// No mapped leg (`Σ w_mapped == 0`) means no bound: a fully unmapped ticker
-/// composites exactly as it did before, equal-weight. 227 of 339 live tickers
-/// are in that class (every FX pair and every metal), so this is the property
-/// the whole design is built around, not an edge case.
-///
-/// Overridable via `NXR_UNMAPPED_BLOC_FRAC`. Read once (per-cycle hot path).
+/// Water-fill over `(raw share r, excess eligibility e)`: `λ >= 0` such that
+/// `Σ min(cap, r + λ·e) = 1`. `None` when capped excess has no eligible home
+/// (every eligible leg capped, or none): the caller still CAPS every leg at
+/// `cap` and renormalises, so the cap is never skipped.
+fn water_fill<I: Iterator<Item = (f64, f64)> + Clone>(legs: I, cap: f64) -> Option<f64> {
+    let mut lam = 0.0f64;
+    loop {
+        let (mut fixed, mut free_r, mut free_e) = (0.0f64, 0.0f64, 0.0f64);
+        for (r, e) in legs.clone() {
+            if r + lam * e >= cap {
+                fixed += cap;
+            } else {
+                free_r += r;
+                free_e += e;
+            }
+        }
+        let deficit = 1.0 - fixed - free_r;
+        if deficit <= 1e-12 {
+            return Some(lam);
+        }
+        if free_e <= 0.0 {
+            return None;
+        }
+        let next = deficit / free_e;
+        // The capped set only grows with λ, so this terminates in <= n rounds.
+        if legs.clone().all(|(r, e)| r + lam * e >= cap || r + next * e <= cap * (1.0 + 1e-12)) {
+            return Some(next);
+        }
+        lam = next;
+    }
+}
+
+/// `Σ unmapped final share <= FRAC · Σ mapped final share` while the mapped
+/// mass is fresh. A bloc bound, not a per-leg constant: a small per-leg
+/// fallback delists the tail and hands a lone mapped venue 93-98% of the mark,
+/// and its right value depends on how many unmapped legs a ticker has. Adding
+/// unmapped legs subdivides the bloc instead of growing it. 0.40 = the tail
+/// holds at most ~29% (`0.4/1.4`). A fully unmapped ticker (every FX pair and
+/// metal) has no bound. Env `NXR_UNMAPPED_BLOC_FRAC`, read once.
 fn unmapped_bloc_frac() -> f64 {
     static F: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *F.get_or_init(|| {
@@ -118,28 +255,87 @@ fn unmapped_bloc_frac() -> f64 {
     })
 }
 
-/// Same concentration ceiling the OFFLINE weight policy caps a mapped venue at
-/// (`weights::policy_weights` Stage B, `NXR_MAX_WEIGHT_CONCENTRATED`, 0.60).
+/// `cexs.concentration`: the ONE ceiling on a live leg's final share, by the
+/// effective evidence count `n`, `w_max(n) = min(w_abs, w_floor + e^(-n·d))`.
 ///
-/// It is a FLOOR on the unmapped bloc, not a second ceiling: the volume scrape
-/// prices only the top pairs of each venue, so most alt tickers have exactly
-/// ONE mapped venue (live 2026-08-11: ORCA/USDT, CRV/USDT and ALGO/USDT each
-/// have one). Bounding the bloc purely at `0.40 · Σw_mapped` would hand that
-/// single venue `1/1.4 = 71.4%` of the composite, past the ceiling the same
-/// venue would have been capped at had the ticker been fully priced. Reusing
-/// the policy's own constant keeps the runtime and offline halves of the
-/// weighting from disagreeing about how concentrated a mark may be, instead of
-/// introducing an unrelated number.
-///
-/// Applied to BASE weights (pre-decay), like the offline policy: it bounds
-/// configured concentration, not the transient decay state.
-fn max_leg_share() -> f64 {
-    static C: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *C.get_or_init(|| {
-        crate::config::NxrConfig::from_env()
-            .max_weight_concentrated
-            .clamp(0.01, 1.0)
-    })
+/// Count-dependent because the danger flips with breadth: two sources where
+/// one is shallow must not be forced toward 50/50 (a fixed 0.60 put 40% on the
+/// shallow book), while twenty sources justify holding any one to ~1/4.
+/// Defaults are the least-squares fit on the owner's points (1: 0.993,
+/// 2: 0.95, 8: 0.352, 16: 0.277); this form cannot meet 2 and 8 together
+/// (`y - y^4 <= 0.47 < 0.598` for `y = e^(-2d)`), so the fit splits the miss.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Concentration {
+    /// Asymptotic floor as `n -> inf`.
+    pub w_floor: f64,
+    /// Diversification factor: decay rate per extra live leg.
+    pub d: f64,
+    /// Absolute maximum, binds at small `n`.
+    pub w_abs: f64,
+}
+
+impl Default for Concentration {
+    fn default() -> Self {
+        Self {
+            w_floor: 0.253,
+            d: 0.228,
+            w_abs: 0.99,
+        }
+    }
+}
+
+impl Concentration {
+    /// Maximum final share of any one leg among `n >= 1` effective legs.
+    #[inline]
+    pub fn w_max(&self, n: f64) -> f64 {
+        (self.w_floor + (-n.max(1.0) * self.d).exp()).min(self.w_abs)
+    }
+
+    /// `0 <= w_floor < w_abs <= 1`, `d > 0`, all finite, and `w_max(n) >= 1/n`
+    /// for every `2 <= n <= 64` (below it the cap cannot be met: forced equal
+    /// split). One leg is single-source and keeps its whole share.
+    pub fn validate(&self) -> Result<(), String> {
+        let ok = self.w_floor >= 0.0
+            && self.w_floor < self.w_abs
+            && self.w_abs <= 1.0
+            && self.d.is_finite()
+            && self.d > 0.0
+            && (2..=64).all(|n| self.w_max(n as f64) >= 1.0 / n as f64);
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "cexs.concentration {self:?}: need 0 <= w_floor < w_abs <= 1, d > 0, \
+                 w_max(n) >= 1/n for 2 <= n <= 64"
+            ))
+        }
+    }
+
+    /// The runtime config's block, read once; defaults when unreadable. An
+    /// invalid block is refused at boot (`registry_gate`).
+    pub fn get() -> Self {
+        static C: std::sync::OnceLock<Concentration> = std::sync::OnceLock::new();
+        *C.get_or_init(|| {
+            use crate::pipeline_config::{ConfigHint, PipelineYml};
+            PipelineYml::load_default(ConfigHint::Runtime)
+                .map(|p| p.cexs.concentration)
+                .ok()
+                .filter(|c| c.validate().is_ok())
+                .unwrap_or_else(|| {
+                    tracing::warn!("cexs.concentration unreadable or invalid: defaults");
+                    Concentration::default()
+                })
+        })
+    }
+}
+
+/// `anom_k` (`NXR_ANOMALY_VOL_RATIO`): a base weight counts at most this many
+/// median venues in `n`. Base weights are median-normalised, so the clip is
+/// `anom_k · median`. Read once.
+fn n_clip() -> f64 {
+    static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| crate::config::NxrConfig::from_env().anomaly_vol_ratio.max(1.0))
 }
 
 /// Per-ticker weight-composition diagnostics, computed for free inside
@@ -149,7 +345,7 @@ fn max_leg_share() -> f64 {
 /// counted weight-map misses per provider and nothing published what the legs
 /// actually ended up worth, so the effect of a weight-policy change could only
 /// be reconstructed offline. Both fields are measured on the FINAL blend
-/// weights (`base_weight · bloc_scale · decay · taper`), i.e. on real composite
+/// shares (kernel, bloc bound, water-fill cap), i.e. on real composite
 /// influence rather than on the configured inputs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WeightProfile {
@@ -167,20 +363,6 @@ pub struct WeightProfile {
     /// error of the mean; alone it is a population std-dev and grows with
     /// breadth.
     pub dispersion: f64,
-}
-
-/// Continuous fade to zero at the corpse horizon.
-///
-/// Eviction used to be a bare `continue` at `age > 6·stale`, which drops a leg's
-/// entire remaining weight in one cycle. With the uniform price half-life a leg
-/// still holds `2^-12` of its base weight at that boundary, so the step is small
-/// but it is a genuine discontinuity in the served mark, and the whole point of
-/// this pass is that a departing contributor must not step the output. Fading
-/// linearly to exactly 0.0 at the horizon makes exit continuous: the leg's share
-/// is already zero when it is finally dropped.
-#[inline]
-fn corpse_taper(age: f64, stale_threshold_secs: f64) -> f64 {
-    (1.0 - age / corpse_horizon(stale_threshold_secs)).clamp(0.0, 1.0)
 }
 
 /// No-book effective-spread reconstruction (operator 2026-07-05): when the
@@ -233,18 +415,6 @@ pub fn decode_ci_ubp(encoded: u16) -> f64 {
     mitch::common::ci_decode(encoded)
 }
 
-/// Per-provider, per-ticker TDWAP metadata.
-///
-/// Wraps a MITCH `Index` (the provider's latest aggregated quote) with the
-/// time-decay weighted average price (TDWAP) fields needed for cross-provider
-/// aggregation. No accumulator logic - forwarders aggregate raw ticks locally
-/// via `TickAccumulator` before sending to the sink.
-///
-/// All time-dependent operations accept an explicit `now: Instant`, so the
-/// same struct is used by the live path (which passes `Instant::now()`) and
-/// by backtest/replay consumers (which advance a simulated clock anchored at
-/// the first observation). Wall-clock-convenience wrappers (`new`, `update`,
-/// `inject`, `effective_weight`) call `Instant::now()` internally.
 /// Coarse monotonic "now" for callers outside this module that need to age
 /// [`ProviderEntry::last_update`] (e.g. the sink's reject-median corpse
 /// filter) without depending on `coarsetime` directly.
@@ -269,15 +439,25 @@ pub fn coarse_now_backdated(lateness_ms: u64) -> Instant {
     coarse_now() - Duration::from_millis(lateness_ms)
 }
 
+/// Per-provider, per-ticker leg state.
+///
+/// Wraps a MITCH `Index` (the provider's latest aggregated quote) with the
+/// fields the kernel and the liveness axis need. Forwarders aggregate raw
+/// ticks locally (`TickAccumulator`) before sending to the sink.
+///
+/// All time-dependent operations accept an explicit `now: Instant`, so the
+/// same struct is used by the live path (which passes `Instant::now()`) and
+/// by backtest/replay consumers (which advance a simulated clock anchored at
+/// the first observation). Wall-clock-convenience wrappers (`new`, `update`,
+/// `inject`) call `Instant::now()` internally.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderEntry {
     /// Latest per-provider aggregate (MITCH canonical type).
     pub index: Index,
     /// Volume-normalized weight from ticker-params.json (1.0 = median exchange).
     pub base_weight: f64,
-    /// Last update time (for time-decay calculation). Uses
-    /// `coarsetime::Instant` (u64 newtype) so the whole struct is `Copy`.
-    /// See module-level comment on the time-source choice.
+    /// Last CONFIRMATION: the frame time of the latest admitted frame, a new
+    /// price or a re-affirm. The kernel's `τ` runs from here.
     pub last_update: Instant,
     /// EMA of inter-arrival time in seconds (alpha = 0.1).
     /// Initialized to 5 s - crypto adapts down quickly, FX stays near actual cadence.
@@ -302,22 +482,20 @@ pub struct ProviderEntry {
     /// fails both axes — which is the correct answer to "is there a live
     /// provider observation behind this mark".
     pub injected: bool,
-    /// `true` when `base_weight` came from a real per-(provider, ticker) entry
-    /// in `ticker-params.json` (or from an explicitly configured non-CEX
-    /// provider weight), `false` when it is the coverage FALLBACK for a
-    /// (provider, ticker) the weights file never priced.
-    ///
-    /// This is the axis the UNMAPPED-BLOC BOUND in [`compute_vwap_at`] splits
-    /// on: evidence-backed legs are weighted as the policy says, and everything
-    /// with no volume evidence behind it is capped AS A GROUP at
-    /// [`unmapped_bloc_frac`] of the mapped mass. Injected legs are unmapped by
-    /// construction (a derived quote carries no venue volume), which is what
-    /// keeps a synth product from outweighing the books it is derived from.
-    ///
-    /// Default `false`. A ticker with NO mapped leg is therefore entirely
-    /// unmapped, the bloc bound does not apply, and the blend is the same
-    /// equal-weight composite it was before the bound existed.
+    /// `true` when `base_weight` is evidence: a real `ticker-params.json`
+    /// entry, or the explicit weight of a provider the volume survey never
+    /// covers (oracle relays, brokers). `false` = the coverage fallback of a
+    /// surveyed venue with no volume row. Splits the unmapped bloc bound and
+    /// the water-fill eligibility in [`compute_vwap_at`]. Default `false`.
     pub mapped: bool,
+    /// When this leg joined the blend; the join ramp runs from here. `None` =
+    /// no ramp (a derived leg that is always present).
+    pub joined: Option<Instant>,
+    /// Silence before the latest frame, seconds. A gap past the leg's own
+    /// eviction age means it was OUT of the blend and its return is a join,
+    /// which the kernel ramps: the eviction age is the kernel's to know, so the
+    /// gap is recorded here and judged there.
+    pub last_gap_secs: f64,
 }
 
 impl ProviderEntry {
@@ -336,6 +514,8 @@ impl ProviderEntry {
             ema_ipi_secs: 5.0,
             injected: false,
             mapped: false,
+            joined: Some(now),
+            last_gap_secs: 0.0,
         }
     }
 
@@ -358,10 +538,9 @@ impl ProviderEntry {
         // `coarsetime::Instant::duration_since` saturates on underflow
         // (uses `u64::saturating_sub` internally), so the previous
         // `saturating_duration_since` → `duration_since` rename is safe.
-        let ipi = now
-            .duration_since(self.last_update)
-            .as_f64()
-            .clamp(1e-6, 300.0);
+        let gap = now.duration_since(self.last_update).as_f64();
+        self.last_gap_secs = gap;
+        let ipi = gap.clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
         self.last_update = now;
         self.index = index;
@@ -390,86 +569,37 @@ impl ProviderEntry {
         self.index.vask = vask;
         self.injected = true;
     }
-
-    /// Price weight: uniform-half-life exponential decay, faded to exactly zero
-    /// at the corpse horizon.
-    ///
-    /// The half-life is a property of the TICKER ([`price_half_life`]), not of
-    /// this provider's own cadence, so a lull that ages every leg equally leaves
-    /// the normalised weight vector — and therefore the composite — unchanged.
-    #[inline]
-    pub fn effective_weight(&self, stale_threshold_secs: f64) -> f64 {
-        self.effective_weight_at(stale_threshold_secs, Instant::now())
-    }
-
-    /// Effective-weight variant with an explicit clock.
-    pub fn effective_weight_at(&self, stale_threshold_secs: f64, now: Instant) -> f64 {
-        let age = now.duration_since(self.last_update).as_f64();
-        let decay = (-age * std::f64::consts::LN_2 / price_half_life(stale_threshold_secs)).exp();
-        self.base_weight * decay.max(0.001) * corpse_taper(age, stale_threshold_secs)
-    }
 }
 
-/// Compute time-decay VWAP and confidence interval across providers for one ticker.
-/// Returns None when no entry has a non-negligible effective weight.
+/// Cross-provider composite and confidence interval for one ticker (module
+/// header: weight, eviction, cap, `ci`). `None` when no leg is alive.
 ///
-/// ## Confidence interval methodology
-///
-/// Two independent uncertainty sources are combined in quadrature:
-///
-/// 1. **Inter-provider disagreement** (sigma_disagree):
-///    Weighted standard deviation of provider mid-prices from the VWAP mid.
-///    Computed in a single pass via Welford's algorithm (algebraically
-///    identical to deviation-around-vwap_mid because weighted-mean-of-mids
-///    equals (TDWAP_bid + TDWAP_ask) / 2).
-///
-/// 2. **Staleness widening** (sigma_stale):
-///    Each provider's quote grows uncertain as time passes with no update.
-///    Modelled as a random-walk: uncertainty grows as `(ask-bid)/2 x sqrt(age / ema_ipi)`.
-///
-/// Combined: `conf_interval = sqrt(sigma_disagree^2 + sigma_stale^2)`
-///
-/// Floor: `max(conf_interval, (ask-bid)/2)` - never tighter than the spread itself.
-#[inline]
-pub fn compute_vwap<'a, I>(ticker_id: u64, entries: I, stale_threshold_secs: f64) -> Option<Index>
-where
-    I: IntoIterator<Item = &'a ProviderEntry>,
-    I::IntoIter: Clone,
-{
-    compute_vwap_at(ticker_id, entries, stale_threshold_secs, Instant::now())
-}
-
-/// Variant of [`compute_vwap`] that uses an explicit clock instead of
-/// `Instant::now()`. Live code should prefer `compute_vwap`; replay/backtest
-/// consumers (e.g. series-factory) pass a simulated `Instant` anchored at
-/// the first tick so decay is computed against data time, not wall-clock.
-///
-/// Accepts any iterator over `&ProviderEntry` so callers can pass a slice, a
-/// `HashMap::values()`, or a `SmallVec` without cloning. The iterator must be
-/// `Clone` because the UNMAPPED-BLOC bound needs the mapped/unmapped mass
-/// BEFORE the blend runs; cloning an iterator is a pointer copy, so the
-/// pre-pass costs one extra walk of the (typically 5-15 entry) leg list and no
-/// allocation.
+/// `stale_threshold_secs` drives only the liveness axis; prices are aged by
+/// `kernel`. Takes any `Clone` iterator over `&ProviderEntry` (slice,
+/// `HashMap::values()`): it is walked a few times per call, never collected.
 pub fn compute_vwap_at<'a, I>(
     ticker_id: u64,
     entries: I,
     stale_threshold_secs: f64,
+    kernel: Kernel,
     now: Instant,
 ) -> Option<Index>
 where
     I: IntoIterator<Item = &'a ProviderEntry>,
     I::IntoIter: Clone,
 {
-    compute_vwap_profiled_at(ticker_id, entries, stale_threshold_secs, now).map(|(idx, _)| idx)
+    compute_vwap_profiled_at(ticker_id, entries, stale_threshold_secs, kernel, now)
+        .map(|(idx, _)| idx)
 }
 
 /// [`compute_vwap_at`] plus the per-ticker [`WeightProfile`]. Internal: the
 /// profile reaches the aggregator through [`WeightCache::weight_profile`], so
 /// it is never recomputed and never duplicates the weighting rules.
-pub(crate) fn compute_vwap_profiled_at<'a, I>(
+pub fn compute_vwap_profiled_at<'a, I>(
     ticker_id: u64,
     entries: I,
     stale_threshold_secs: f64,
+    kernel: Kernel,
     now: Instant,
 ) -> Option<(Index, WeightProfile)>
 where
@@ -478,254 +608,228 @@ where
 {
     let entries = entries.into_iter();
 
-    // ── UNMAPPED-BLOC PRE-PASS ──────────────────────────────────────────────
-    // Σ base_weight over admissible legs, split by evidence. Same admission
-    // test as the blend below (`is_valid_tick` + `live_age`), so the bound is
-    // measured on exactly the population it is applied to.
-    let (mut mapped_bw, mut unmapped_bw, mut top_mapped_bw) = (0.0f64, 0.0f64, 0.0f64);
-    for entry in entries.clone() {
-        if !is_valid_tick(entry.index.bid, entry.index.ask)
-            || live_age(entry, now, stale_threshold_secs).is_none()
-        {
-            continue;
-        }
-        if entry.mapped {
-            mapped_bw += entry.base_weight;
-            top_mapped_bw = top_mapped_bw.max(entry.base_weight);
-        } else {
-            unmapped_bw += entry.base_weight;
+    // Reference half-spread: base-weighted mean of the admissible legs' `s_v`.
+    // It scales eviction, so "dead" means diffused past a few typical spreads
+    // of THIS book, not of some other asset's.
+    let (mut sb, mut b) = (0.0f64, 0.0f64);
+    for e in entries.clone() {
+        if kernel.age(e, now).is_some() {
+            sb += e.base_weight * kernel.spread(e);
+            b += e.base_weight;
         }
     }
-    // Common factor applied to every unmapped leg. Target bloc mass:
-    //   clamp(FRAC · Σw_mapped, w_top_mapped / c - Σw_mapped, Σw_unmapped)
-    // Upper clamp = the bloc is never INFLATED, only demoted. Lower clamp =
-    // the demotion never pushes the heaviest mapped venue past the same
-    // concentration ceiling `c` the offline policy caps it at (see
-    // `max_leg_share`); with a single mapped venue that floor is what stops the
-    // ticker collapsing into a single-venue mark. No mapped leg means no bound
-    // at all, and a fully unmapped ticker is left exactly as it was.
-    let bloc_scale = if mapped_bw > 0.0 && unmapped_bw > 0.0 {
-        let anti_concentration = (top_mapped_bw / max_leg_share() - mapped_bw).max(0.0);
-        let target = (unmapped_bloc_frac() * mapped_bw)
-            .max(anti_concentration)
-            .min(unmapped_bw);
-        target / unmapped_bw
+    if b <= 0.0 {
+        return None;
+    }
+    let s_ref = sb / b;
+    let stale = stale_threshold_secs;
+
+    // `(τ, presence, w)` of a live leg, `None` when evicted. Presence =
+    // freshness (reaching 0 no later than eviction) × join ramp: it fades a leg
+    // out of `n`, the bloc bound and the excess together. `s_ref²` keeps `w`
+    // dimensionless; it cancels in the shares.
+    let weigh = |e: &ProviderEntry| {
+        kernel.leg(e, now, s_ref, stale).map(|(tau, u, t_evict)| {
+            // A leg that was out (its last gap ran past its own eviction age)
+            // re-joins: the ramp runs from the frame that brought it back.
+            let joined = if e.last_gap_secs > t_evict {
+                Some(e.last_update)
+            } else {
+                e.joined
+            };
+            let ramp = joined.map_or(1.0, |j| {
+                let window = (RAMP_IPI * e.ema_ipi_secs).max(f64::MIN_POSITIVE);
+                (now.duration_since(j).as_f64() / window).clamp(RAMP_MIN, 1.0)
+            });
+            let g = freshness(tau, stale.min(t_evict)) * ramp;
+            (tau, g, e.base_weight * ramp * s_ref * s_ref * u)
+        })
+    };
+
+    // One pass: mass by evidence, and `n_eff` sums over mapped and over all
+    // observed legs (the latter used only when no mapped leg is live).
+    let clip = n_clip();
+    let (mut w_sum, mut w_map, mut w_map_g) = (0.0f64, 0.0f64, 0.0f64);
+    let (mut nm1, mut nm2, mut na1, mut na2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for e in entries.clone() {
+        let Some((_, g, w)) = weigh(e) else { continue };
+        w_sum += w;
+        let x = e.base_weight.min(clip) * g;
+        if e.mapped {
+            w_map += w;
+            w_map_g += w * g;
+            if !e.injected {
+                nm1 += x;
+                nm2 += x * x;
+            }
+        }
+        if !e.injected {
+            na1 += x;
+            na2 += x * x;
+        }
+    }
+    if w_sum < 1e-12 {
+        return None;
+    }
+    let any_mapped = w_map > 0.0;
+    let n = if any_mapped {
+        crate::stats::n_eff_from_sums(nm1, nm2)
     } else {
-        1.0
+        crate::stats::n_eff_from_sums(na1, na2)
+    };
+
+    // Unmapped bloc on pre-cap shares: `u = Φ·min(u_raw, B) + (1−Φ)·u_raw`,
+    // `B = FRAC/(1+FRAC)`, `Φ` = the mapped mass's presence. Linear in `Φ`, so
+    // the bound relaxes smoothly as the mapped legs fade and a dying mapped leg
+    // is never held up. Each group is rescaled as a whole.
+    let frac = unmapped_bloc_frac();
+    let u_raw = (w_sum - w_map) / w_sum;
+    let u = if any_mapped {
+        let phi = w_map_g / w_map;
+        phi * u_raw.min(frac / (1.0 + frac)) + (1.0 - phi) * u_raw
+    } else {
+        u_raw
+    };
+    let (k_map, k_un) = (
+        (1.0 - u) / (1.0 - u_raw).max(f64::MIN_POSITIVE),
+        if u_raw > 0.0 { u / u_raw } else { 1.0 },
+    );
+    // `(raw share, excess eligibility)`: only evidence legs receive the cap's
+    // excess, in proportion to share × presence.
+    let raw = |e: &ProviderEntry, g: f64, w: f64| -> (f64, f64) {
+        let r = w / w_sum;
+        if !any_mapped {
+            (r, r * g)
+        } else if e.mapped {
+            (r * k_map, r * k_map * g)
+        } else {
+            (r * k_un, 0.0)
+        }
+    };
+    let cap = Concentration::get().w_max(n);
+    let lam = water_fill(
+        entries.clone().filter_map(|e| weigh(e).map(|(_, f, w)| raw(e, f, w))),
+        cap,
+    );
+    // No eligible home for the excess: rather than skip the cap, water-fill
+    // again with EVERY leg eligible in proportion to its own share. Only a
+    // single live leg (nothing to move share to) then keeps its raw 1.0.
+    let all_eligible = lam.is_none().then(|| {
+        water_fill(
+            entries
+                .clone()
+                .filter_map(|e| weigh(e).map(|(_, g, w)| raw(e, g, w)))
+                .map(|(r, _)| (r, r)),
+            cap,
+        )
+    });
+    let share = |e: &ProviderEntry, g: f64, w: f64| {
+        let (r, x) = raw(e, g, w);
+        match (lam, all_eligible) {
+            (Some(l), _) => (r + l * x).min(cap),
+            (None, Some(Some(l))) => (r + l * r).min(cap),
+            (None, _) => r,
+        }
     };
 
     let mut w_bid_sum = 0.0f64;
     let mut w_ask_sum = 0.0f64;
-    let mut w_sum = 0.0f64;
+    let mut s_sum = 0.0f64;
     let mut total_bid_vol: u64 = 0;
     let mut total_ask_vol: u64 = 0;
     let mut accepted: u8 = 0;
     let mut rejected: u8 = 0;
-    // Count of providers with non-floored decay ≥ 0.1 — the schema-defined
-    // "active provider count" per `mitch::Index::confidence` (must be ≤ accepted).
+    // Live (`freshness > 0`), observed legs: `mitch::Index::confidence` bits 0..6.
     let mut active_count: u32 = 0;
 
-    // Welford-style weighted variance accumulator for sigma_disagree.
-    // The weighted mean of per-provider mids equals (TDWAP_bid + TDWAP_ask) / 2,
-    // so m2 / w_sum is identical to the original two-pass formulation's
-    // `w_sq_dev_sum / w_sum`.
+    // Welford-style weighted variance accumulator for the disagreement term.
     let mut mean_mid = 0.0f64;
     let mut m2 = 0.0f64;
+    let mut stale_sq_sum = 0.0f64;
 
-    let mut w_stale_sq_sum = 0.0f64;
+    // Final share held by legs that are live and observed: bit 7.
+    let mut active_share = 0.0f64;
 
-    // Weight-share accumulators. `bw_sum` = Σ base_weight over every VALID-tick
-    // provider. Two numerators:
-    //  * `active_bw_sum` = Σ base_weight over legs that are genuinely TICKING
-    //    (decay >= 0.1). `active_bw_sum/bw_sum` is the weight share the live legs
-    //    carry, and it does NOT dilute with breadth: a leg that ticked recently
-    //    contributes its FULL base_weight, so adding venues that are merely
-    //    between ticks cannot drag it down. This is what bit 7 publishes.
-    // NOT accumulated any more: Σ base_weight·decay, the legacy continuous
-    // freshness numerator. It is anti-correlated with breadth (every extra leg
-    // adds full base_weight to the denominator but only base_weight·decay to the
-    //    numerator), which is exactly why it is NOT the gate: measured 2026-07-25
-    // our deepest books scored it 0.059 (BTC-USDC, 10 venues) and 0.082
-    // (ETH-USDC), so ANY meaningful floor on it rejects the best-corroborated
-    // feeds FIRST. Do not reintroduce it as an admission axis.
-    //
-    // Both sums are on BLOC-SCALED base weight, not raw. They must be: the
-    // share feeds the signed-quote gate (`server::signed`), so measuring it on
-    // weights the composite does not actually use lets an unmapped bloc that
-    // contributes ~29% of the price move the liveness verdict as if it
-    // contributed all of it — in either direction (quiet mapped venue +
-    // ticking unmapped tail scoring healthy, or the inverse stopping signing
-    // while real venues are live).
-    let mut bw_sum = 0.0f64;
-    let mut active_bw_sum = 0.0f64;
-
-    // Blend-weight concentration, for `WeightProfile`. Measured on the FINAL
-    // weights so it reports composite influence, not configured inputs.
-    let mut w_sq_sum = 0.0f64;
-    let mut w_max = 0.0f64;
+    // Share concentration, for `WeightProfile`.
+    let mut s_sq_sum = 0.0f64;
+    let mut s_max = 0.0f64;
 
     for entry in entries {
         if !is_valid_tick(entry.index.bid, entry.index.ask) {
             rejected = rejected.saturating_add(1);
             continue;
         }
-
-        // Inline effective-weight computation so `exp` and the age read happen once.
-        // CORPSE EVICTION (audit F-01, 2026-07-04): a provider silent for
-        // > 6x the stale threshold is DEAD, not stale — exclude it from
-        // EVERYTHING (blend, freshness numerator/denominator, active count,
-        // stale-uncertainty). Before this, dead entries lingered forever
-        // (decay floored at 0.001) and their unbounded stale_unc =
-        // half_spread*sqrt(age/ipi) inflated published ci 400-1500x on
-        // healthy majors, which then propagated into every cross/synth.
-        let Some(age) = live_age(entry, now, stale_threshold_secs) else {
+        let Some((age, g, w)) = weigh(entry) else {
             continue;
         };
-        // UNMAPPED-BLOC BOUND: legs with no volume evidence behind them are
-        // demoted AS A GROUP (see `unmapped_bloc_frac`), never individually
-        // delisted — the relative order inside the bloc is untouched.
-        let base_weight = if entry.mapped {
-            entry.base_weight
-        } else {
-            entry.base_weight * bloc_scale
-        };
-        // LIVENESS half-life: per-provider, adaptive. Retained UNCHANGED because
-        // `active_count` below is a money-path gate (`server::signed`
-        // MIN_ACTIVE_PROVIDERS) and re-basing it on the uniform price half-life
-        // would silently widen the window in which a leg still counts as ticking.
-        let live_half_life = (IPI_K * entry.ema_ipi_secs).clamp(1.0, stale_threshold_secs / 2.0);
-        let live_decay = (-age * std::f64::consts::LN_2 / live_half_life).exp();
-        // PRICE half-life: uniform across the ticker, so an equal-ageing lull
-        // cancels under normalisation. See `price_half_life`.
-        let decay = (-age * std::f64::consts::LN_2 / price_half_life(stale_threshold_secs)).exp();
-        // The 0.001 floor exists so a briefly-quiet venue still contributes
-        // rather than snapping out of the blend. But it also cleared the
-        // `w <= 1e-9` cut for ANY age below corpse eviction, so a set of legs
-        // ALL past the stale threshold still produced `w_sum > 0` and was
-        // emitted as a full record — broadcast on WS and persisted with a FRESH
-        // header mts. Proven 2026-07-25: a single 59 s-old quote at
-        // `stale_threshold = 10 s` emitted, the only signal being
-        // `confidence == 0`, which is undecodable on any DTO that drops `flags`.
-        // Withhold the floor once a leg is past the stale threshold: it may
-        // still contribute if others carry the blend, but it can no longer
-        // manufacture weight on its own.
-        let decay_floored = if age > stale_threshold_secs {
-            decay
-        } else {
-            decay.max(0.001)
-        };
-        // Taper to exactly 0.0 at the corpse horizon so the `continue` above can
-        // never drop a leg that still carried weight.
-        let w = base_weight * decay_floored * corpse_taper(age, stale_threshold_secs);
-
-        // Freshness numerator/denominator: accumulate for every valid-tick
-        // provider BEFORE the weight-skip below, so floored-but-valid providers
-        // still drag freshness down via the denominator.
-        bw_sum += base_weight;
-
-        // Active provider: any with non-floored decay >= 10 percent, regardless
-        // of whether its weight contributes to TDWAP this cycle. PUBLISHED in
-        // `Index::confidence` bits 0..6 under `FLAG_CONF_ACTIVE` — it is the
-        // liveness axis the signed-quote gate reads (`accepted` counts merely
-        // NON-CORPSE legs, so it cannot see "10 accepted, 1 ticking").
-        //
-        // `!entry.injected` is what makes this axis mean OBSERVED rather than
-        // merely RECENT: `inject_at` refreshes `last_update` every cycle the
-        // triangulated product moves, so an injected leg always scores
-        // `decay ≈ 1` and used to be counted here. See `ProviderEntry::injected`.
-        // Note the asymmetry with `bw_sum` above (denominator, unconditional):
-        // an injected leg dilutes the fresh-weight share instead of inflating it.
-        if live_decay >= 0.1 && !entry.injected {
+        let sh = share(entry, g, w);
+        // `active_count` is a money-path gate (`server::signed`
+        // MIN_ACTIVE_PROVIDERS). `!injected`: `inject_at` refreshes
+        // `last_update` every cycle the triangulated product moves.
+        if g > 0.0 && !entry.injected {
             active_count = active_count.saturating_add(1);
-            active_bw_sum += base_weight;
+            active_share += sh;
         }
-
-        if w <= 1e-9 {
+        if sh <= 1e-12 {
             continue;
         }
-
         let bid = entry.index.bid;
         let ask = entry.index.ask;
         let mid = (bid + ask) * 0.5;
-        let half_spread = (ask - bid) * 0.5;
+        // Published staleness widening, on the scale consumers are calibrated
+        // to (BTR keeper 25 bp ci-spike trigger, signer ci ceilings): the
+        // leg's half-spread × √(τ/ipi), capped at 3×. The kernel's σ²τ decides
+        // weight and eviction; it does not set the interval.
+        let stale_unc = (ask - bid) * 0.5 * (age / entry.ema_ipi_secs.max(1e-6)).sqrt().min(3.0);
+        stale_sq_sum += sh * stale_unc * stale_unc;
 
-        w_bid_sum += bid * w;
-        w_ask_sum += ask * w;
-        w_sq_sum += w * w;
-        w_max = w_max.max(w);
+        w_bid_sum += bid * sh;
+        w_ask_sum += ask * sh;
+        s_sq_sum += sh * sh;
+        s_max = s_max.max(sh);
 
-        let w_new = w_sum + w;
+        let s_new = s_sum + sh;
         let delta = mid - mean_mid;
-        mean_mid += (w / w_new) * delta;
-        m2 += w * delta * (mid - mean_mid);
-        w_sum = w_new;
-
-        let ipi = entry.ema_ipi_secs.max(1e-6);
-        // Staleness multiplier CAPPED at 3.0 (audit F-04): sqrt(age/ipi) is a
-        // sane short-horizon widening but must not grow without bound between
-        // the last tick and eviction — an uncapped multiplier makes ci useless
-        // as an outlier gate (a 50bp fat-finger passes a corpse-widened band).
-        let stale_unc = half_spread * (age / ipi).sqrt().min(3.0);
-        w_stale_sq_sum += w * stale_unc * stale_unc;
+        mean_mid += (sh / s_new) * delta;
+        m2 += sh * delta * (mid - mean_mid);
+        s_sum = s_new;
 
         total_bid_vol += entry.index.vbid as u64;
         total_ask_vol += entry.index.vask as u64;
         accepted = accepted.saturating_add(1);
     }
 
-    if w_sum < 1e-12 {
+    if s_sum < 1e-12 {
         return None;
     }
 
-    let tdwap_bid = w_bid_sum / w_sum;
-    let tdwap_ask = w_ask_sum / w_sum;
+    let tdwap_bid = w_bid_sum / s_sum;
+    let tdwap_ask = w_ask_sum / s_sum;
     let vwap_mid = (tdwap_bid + tdwap_ask) * 0.5;
 
-    let sigma_disagree_sq = m2 / w_sum;
-    // DISPERSION ALONE, relative to mid, published on the profile. It is the
-    // one term of `ci` that is a property of the MARKET rather than of this
-    // node's polling: no staleness widening, no half-spread floor. The signed
-    // wire's confidence is built from it (`server::signed`), where it is
-    // divided by sqrt(n_eff) into a standard ERROR of the mean, so breadth
-    // TIGHTENS the published number instead of inflating it. `ci` itself is
-    // deliberately left alone: it is the ingest AGREEMENT gate, and a
-    // population dispersion is the right tool there.
+    let sigma_disagree_sq = m2 / s_sum;
+    // Dispersion alone, relative to mid: the market term of `ci`, no staleness
+    // widening, no half-spread floor. `server::signed` divides it by
+    // sqrt(n_eff) into a standard error of the mean.
     let profile = WeightProfile {
-        top_weight_share: (w_max / w_sum).clamp(0.0, 1.0),
-        n_eff: crate::stats::n_eff_from_sums(w_sum, w_sq_sum),
+        top_weight_share: (s_max / s_sum).clamp(0.0, 1.0),
+        n_eff: crate::stats::n_eff_from_sums(s_sum, s_sq_sum),
         dispersion: if vwap_mid > 0.0 {
             sigma_disagree_sq.max(0.0).sqrt() / vwap_mid
         } else {
             0.0
         },
     };
-    let sigma_stale_sq = w_stale_sq_sum / w_sum;
-    // NOT `stats::ci::rss`: both terms are already variances, not sigmas.
-    let raw_ci = (sigma_disagree_sq + sigma_stale_sq).sqrt();
+    // NOT `stats::ci::rss`: both terms are already variances.
+    let raw_ci = (sigma_disagree_sq + stale_sq_sum / s_sum).sqrt();
     let half_spread_agg = (tdwap_ask - tdwap_bid).abs() * 0.5;
     let conf_interval = raw_ci.max(half_spread_agg);
 
-    // `confidence` publishes the ACTIVE-provider measurement (flag
-    // FLAG_CONF_ACTIVE): bits 0..6 = `active_count` (legs genuinely ticking,
-    // decay >= 0.1), bit 7 = `fresh_weight_ok`. Independent of
-    // `accepted`/`rejected` (which stay raw COUNTS).
-    //
-    // bit 7 is the WEIGHT-AWARENESS companion to the count: `active_count` alone
-    // is weight-blind, so 2 ticking legs carrying 1% of the book would pass. It
-    // deliberately uses `active_bw_sum/bw_sum` (share of base weight held by
-    // ticking legs) and NOT the decay-weighted `wd_sum/bw_sum`: the latter falls
-    // as venues are added, so thresholding it re-creates the breadth inversion
-    // this whole gate exists to remove (it would reject BTC-USDC at 0.059 and
-    // ETH-USDC at 0.082 while admitting a single-leg feed). The active share does
-    // not dilute — a recently-ticked leg contributes its full base weight — so a
-    // healthy deep book sits near 1.0 and only genuinely dead weight pulls it
-    // down.
-    let fresh_weight_share = if bw_sum > 0.0 {
-        (active_bw_sum / bw_sum).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let fresh_weight_ok = fresh_weight_share >= crate::shard::FRESH_WEIGHT_SHARE_FLOOR;
+    // `confidence` (FLAG_CONF_ACTIVE): bits 0..6 = `active_count`, bit 7 =
+    // final share of those legs over the floor. On final shares, not base
+    // weight: it measures the influence the live legs actually have, and does
+    // not dilute with breadth.
+    let fresh_weight_ok = active_share / s_sum >= crate::shard::FRESH_WEIGHT_SHARE_FLOOR;
     let confidence = mitch::index::conf_pack_active(active_count, fresh_weight_ok);
 
     // Composite bid/ask resolution (operator ruling 2026-07-05 — NO order books,
@@ -791,19 +895,19 @@ where
 // ── Throttled TDWAP: weight-vector freeze with change-triggered refresh ─────
 //
 // Problem: on quiet markets where no provider's quote changes between
-// aggregation cycles, the staleness decay `exp(-age·ln2/HL)` keeps shifting
+// aggregation cycles, the kernel's ageing term `σ²τ` keeps shifting
 // the cross-provider weight ratios by tiny ULPs every cycle. The 5-field
 // delta-gate (bid, ask, vbid, vask, ci) on the shard writer never matches,
 // so a quiet stablecoin pair writes ~every cycle (20 Hz) instead of
 // approximately never. This defeats the entire point of the delta-gate.
 //
 // Fix: cache the *normalized* weight vector at refresh boundaries
-// (`refresh_interval_ms`, default HL/5 ≈ 1 s for the typical HL=5 s clamp).
+// (`refresh_interval_ms`, default stale/5 = 2 s at the 10 s prod threshold).
 // Between refreshes, reuse the same weight vector → composite VWAP is
 // bit-identical when raw provider quotes are bit-identical → delta-gate
 // fires only on real moves. When any provider's price/volume actually
 // changes, force a refresh on the next call so the new quote is reflected
-// immediately with up-to-date decay weights.
+// immediately with up-to-date kernel weights.
 //
 // Refresh trigger (any of):
 //   - `force_refresh = true` from caller
@@ -935,15 +1039,14 @@ impl WeightCache {
 /// in the worst case (fingerprint compare + recomputation) and slice access
 /// keeps the hot path branch-free.
 ///
-/// `refresh_interval_ms` is the maximum age of a cached weight vector. For
-/// the default crypto stale_threshold of 10 s ⇒ HL clamps at 5 s ⇒ pass
-/// `refresh_interval_ms = 1000` (HL/5) for ~13% per-provider weight drift
-/// budget. Callers should clamp `refresh_interval_ms ≥ aggregation_interval_ms`
-/// or the throttle is a no-op.
+/// `refresh_interval_ms` is the maximum age of a cached weight vector
+/// ([`default_refresh_interval_ms`]). Callers should clamp it
+/// `≥ aggregation_interval_ms` or the throttle is a no-op.
 pub fn compute_vwap_throttled(
     ticker_id: u64,
     entries: &[(u16, ProviderEntry)],
     stale_threshold_secs: f64,
+    kernel: Kernel,
     cache: &mut WeightCache,
     refresh_interval_ms: u64,
     force_refresh: bool,
@@ -952,6 +1055,7 @@ pub fn compute_vwap_throttled(
         ticker_id,
         entries,
         stale_threshold_secs,
+        kernel,
         cache,
         refresh_interval_ms,
         force_refresh,
@@ -960,10 +1064,12 @@ pub fn compute_vwap_throttled(
 }
 
 /// Throttled TDWAP with an explicit clock (for tests and replay).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_vwap_throttled_at(
     ticker_id: u64,
     entries: &[(u16, ProviderEntry)],
     stale_threshold_secs: f64,
+    kernel: Kernel,
     cache: &mut WeightCache,
     refresh_interval_ms: u64,
     force_refresh: bool,
@@ -1005,6 +1111,7 @@ pub(crate) fn compute_vwap_throttled_at(
         ticker_id,
         entries.iter().map(|(_, e)| e),
         stale_threshold_secs,
+        kernel,
         now,
     )?;
 
@@ -1028,29 +1135,20 @@ pub(crate) fn compute_vwap_throttled_at(
 /// run-to-run and the `.idx` 5-field delta-gate suppresses the redundant
 /// write. With a 1× floor (the previous behaviour) a low `stale_threshold` or
 /// a per-cycle `NXR_TDWAP_THROTTLE=0` could collapse the window to one cycle,
-/// at which point sub-ULP decay drift each cycle defeats the gate and quiet
+/// at which point sub-ULP kernel drift each cycle defeats the gate and quiet
 /// pairs write every cycle — up to ~3× the on-disk footprint. The explicit
 /// `NXR_WEIGHT_REFRESH_MS` override is clamped to this same 3× floor by the
 /// aggregator before use.
 ///
-/// **Relation to the operator's "weights update ≤ 1/5 agg freq, HL ≥ 5-10×
-/// refresh" rule (Aud-M1):** the half-life used inside `compute_vwap_at` is
-/// `clamp(IPI_K · ema_ipi, 1.0, stale/2)` — for the typical clamped case
-/// `HL = stale/2`. With `refresh = stale/5` this yields `HL/refresh = 2.5`,
-/// short of the stated 5-10× target. The 2.5× ratio is the production
-/// trade-off: refresh frequency is bounded below by `aggregation_interval_ms`
-/// (50 ms hot loop), and pushing refresh to `stale/10` would put it under
-/// the agg cycle on tight-HL pairs. Per-provider weight drift between
-/// refreshes is therefore up to `1 - exp(-1/2.5 · ln2) ≈ 24%`. This is
-/// acceptable for the delta-gate (composite weight ratio drift on a quiet
-/// market still produces a bit-identical Index because the cached composite
-/// is replayed verbatim — see `compute_vwap_throttled_at`) but should be
-/// audited if `stale_threshold_secs` is ever pushed below 5 s in prod.
+/// Deferral cost: between refreshes an UNCHANGED quote's kernel ageing waits
+/// for the next boundary (<= 2 s at prod defaults, against eviction horizons of
+/// ~7 s for majors up to minutes for pegged pairs). A price move never waits:
+/// it breaks the fingerprint.
 ///
 /// Examples (agg=200ms prod default, 3× floor = 600ms):
-/// - Production crypto (stale=10s, agg=200ms): refresh = 2000 ms, HL ≤ 5 s.
+/// - Production crypto (stale=10s, agg=200ms): refresh = 2000 ms.
 /// - Aggressive FX (stale=2s, agg=200ms): refresh = max(400, 600) = 600 ms.
-/// - Pathological tight HL (stale=0.2s, agg=200ms): refresh = max(40, 600) =
+/// - Pathological tight stale (0.2s, agg=200ms): refresh = max(40, 600) =
 ///   600 ms — the 3× floor keeps the throttle effective (the old 1× floor
 ///   would have dropped to per-cycle here and defeated the delta-gate).
 #[inline]
@@ -1062,6 +1160,16 @@ pub fn default_refresh_interval_ms(stale_threshold_secs: f64, aggregation_interv
     let min_refresh_ms = (aggregation_interval_ms as f64) * 3.0;
     let clamped = hl_over_5_ms.max(min_refresh_ms);
     clamped.min(u64::MAX as f64) as u64
+}
+
+/// `n_eff` over clipped base weights of fresh legs, as `compute_vwap_at` counts it.
+#[cfg(test)]
+fn n_of(bs: &[f64]) -> f64 {
+    let (a, q) = bs
+        .iter()
+        .map(|b| b.min(n_clip()))
+        .fold((0.0, 0.0), |(a, q), x| (a + x, q + x * x));
+    crate::stats::n_eff_from_sums(a, q)
 }
 
 #[cfg(test)]
@@ -1104,7 +1212,7 @@ mod injected_leg_liveness_tests {
         let now = Instant::now();
         let entries = [injected_entry(75.0, now), injected_entry(75.1, now)];
 
-        let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, now)
+        let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now)
             .expect("injected legs still produce a PRICE — only liveness is withheld");
 
         assert_eq!(
@@ -1138,8 +1246,8 @@ mod injected_leg_liveness_tests {
             ProviderEntry::new_at(leg(75.0), 1.0, now),
             injected_entry(75.1, now),
         ];
-        let snap =
-            compute_vwap_at(448509915440349184, entries.iter(), 10.0, now).expect("has a price");
+        let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now)
+            .expect("has a price");
         assert_eq!(
             mitch::index::conf_active_count(snap.confidence),
             1,
@@ -1213,7 +1321,7 @@ mod conf_input_tests {
                 ProviderEntry::new_at(leg(100.0), 1.0, at),
                 ProviderEntry::new_at(leg(100.0), 1.0, at),
             ];
-            let (idx, p) = compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, now)
+            let (idx, p) = compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now)
                 .expect("legs blend");
             (p, decode_ci_ubp(idx.ci))
         };
@@ -1240,7 +1348,7 @@ mod conf_input_tests {
                 .iter()
                 .map(|m| ProviderEntry::new_at(leg(*m), 1.0, now))
                 .collect();
-            compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, now)
+            compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now)
                 .expect("legs blend")
                 .1
         };
@@ -1287,17 +1395,83 @@ mod unmapped_bloc_tests {
             .iter()
             .enumerate()
             .map(|(i, (w, mapped))| {
-                ProviderEntry::new_at(leg(100.0 + i as f64), *w, now).with_mapped(*mapped)
+                let mut e =
+                    ProviderEntry::new_at(leg(100.0 + i as f64), *w, now).with_mapped(*mapped);
+                e.joined = None;
+                e
             })
             .collect();
-        compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, now)
+        compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now)
             .expect("legs blend")
             .1
     }
 
+    /// Owner calibration: ~0.99 alone, falling with breadth to ~0.41 at 8.
+    #[test]
+    fn w_max_decays_with_the_live_leg_count() {
+        let c = Concentration::default();
+        c.validate().unwrap();
+        assert!((c.w_max(1.0) - 0.99).abs() < 1e-12, "the curve passes w_abs at n=1");
+        assert!((c.w_max(2.0) - 0.887).abs() < 1e-3, "n=2 {}", c.w_max(2.0));
+        assert!((c.w_max(8.0) - 0.414).abs() < 1e-3, "n=8 {}", c.w_max(8.0));
+        assert!((c.w_max(16.0) - 0.279).abs() < 1e-3, "n=16 {}", c.w_max(16.0));
+        assert_eq!(c.w_max(0.0), c.w_max(1.0), "n < 1 reads as one leg");
+        for n in 1..64 {
+            let n = n as f64;
+            assert!(c.w_max(n + 1.0) < c.w_max(n) || c.w_max(n) == c.w_abs, "n={n}");
+            assert!(c.w_max(n) > c.w_floor);
+        }
+        assert!(Concentration { d: 0.0, ..c }.validate().is_err());
+        assert!(Concentration { w_floor: 0.99, ..c }.validate().is_err());
+        assert!(Concentration { w_abs: 0.4, w_floor: 0.1, ..c }.validate().is_err());
+        // w_max(3) = 0.01 + e^-3 = 0.06 < 1/3: the cap could not be met.
+        assert!(Concentration { w_floor: 0.01, d: 1.0, w_abs: 0.99 }.validate().is_err());
+    }
+
+    /// Two sources, one shallow (99/1 by volume): the deep one is held to
+    /// `w_max(n_eff)`, not forced to 50/50. A 60/40 pair is under the cap and
+    /// keeps its volume-proportional split. One leg keeps the whole mark.
+    #[test]
+    fn two_sources_one_shallow_keep_the_deep_book() {
+        let now = Instant::now();
+        let pair = |a: f64, b: f64| {
+            let legs = [a, b].map(|w| ProviderEntry::new_at(leg(100.0), w, now).with_mapped(true));
+            compute_vwap_profiled_at(1, legs.iter(), 10.0, Kernel::ALT, now).unwrap().1
+        };
+        let cap = Concentration::get().w_max(n_of(&[99.0, 1.0]));
+        assert!(cap > Concentration::get().w_max(2.0));
+        assert!((pair(99.0, 1.0).top_weight_share - cap).abs() < 1e-9);
+        assert!((pair(60.0, 40.0).top_weight_share - 0.60).abs() < 1e-9);
+        let one = [ProviderEntry::new_at(leg(100.0), 1.0, now)];
+        let p = compute_vwap_profiled_at(1, one.iter(), 10.0, Kernel::ALT, now).unwrap().1;
+        assert_eq!(p.top_weight_share, 1.0);
+    }
+
+    /// Wash volume: one venue with 50x the volume counts `anom_k` venues in
+    /// `n`, not 50, and is held at `w_max(n_eff)` with the clip applied.
+    #[test]
+    fn wash_volume_venue_counts_at_most_anom_k_in_n() {
+        let mut legs = vec![(50.0, true)];
+        legs.extend(std::iter::repeat_n((1.0, true), 7));
+        let p = profile_of(&legs);
+        let bs: Vec<f64> = legs.iter().map(|(b, _)| *b).collect();
+        let cap = Concentration::get().w_max(n_of(&bs));
+        assert!((p.top_weight_share - cap).abs() < 1e-9, "{}", p.top_weight_share);
+    }
+
+    /// Dust venues: twenty 0.01-weight listings add ~0.4 to `n`, not 20, so
+    /// they cannot pull the cap down and pull the excess onto themselves.
+    #[test]
+    fn dust_venues_do_not_inflate_n() {
+        let mut legs = vec![(1.0, true)];
+        legs.extend(std::iter::repeat_n((0.01, true), 20));
+        let p = profile_of(&legs);
+        assert!(n_of(&legs.iter().map(|l| l.0).collect::<Vec<_>>()) < 1.5);
+        assert!(p.top_weight_share > 0.8, "dust took the mark: {}", p.top_weight_share);
+    }
+
     /// NON-NEGOTIABLE: a ticker with no mapped leg has no bound applied and
-    /// composites exactly as it always did. 227 of 339 live tickers are in this
-    /// class (every FX pair, every metal).
+    /// composites exactly as it always did (every FX pair, every metal).
     #[test]
     fn fully_unmapped_ticker_is_unchanged() {
         let now = Instant::now();
@@ -1306,57 +1480,67 @@ mod unmapped_bloc_tests {
             .iter()
             .map(|m| ProviderEntry::new_at(leg(*m), 1.0, now))
             .collect();
-        // Same legs declared MAPPED: the bound cannot apply either way, so the
-        // two composites must be bit-identical. That equality is the property
-        // "the bound never touches a fully-unmapped ticker".
         let mapped: Vec<ProviderEntry> = unmapped.iter().map(|e| e.with_mapped(true)).collect();
         let (a, pa) =
-            compute_vwap_profiled_at(448509915440349184, unmapped.iter(), 10.0, now).unwrap();
+            compute_vwap_profiled_at(448509915440349184, unmapped.iter(), 10.0, Kernel::ALT, now)
+                .unwrap();
         let (b, _) =
-            compute_vwap_profiled_at(448509915440349184, mapped.iter(), 10.0, now).unwrap();
+            compute_vwap_profiled_at(448509915440349184, mapped.iter(), 10.0, Kernel::ALT, now)
+                .unwrap();
         assert_eq!(a.bid.to_bits(), b.bid.to_bits());
         assert_eq!(a.ask.to_bits(), b.ask.to_bits());
-        // Equal weights: exactly 5 effective venues, each holding one fifth.
         assert!((pa.n_eff - 5.0).abs() < 1e-9, "n_eff {}", pa.n_eff);
         assert!((pa.top_weight_share - 0.2).abs() < 1e-9);
         assert!((a.mid() - 102.0).abs() < 1e-6, "equal-weight mean");
     }
 
-    /// The failure the per-leg constant caused: with ONE mapped venue (the
-    /// live shape of ORCA/USDT, CRV/USDT and ALGO/USDT, whose volume rows the
-    /// CMC scrape covers for a single exchange each) a small per-leg fallback
-    /// hands that venue 93-98% of the composite. The bloc bound must keep it at
-    /// the same concentration ceiling the offline policy would have capped it
-    /// at, and must keep real breadth in the mark.
+    /// One mapped venue among k unpriced legs: the bloc holds exactly
+    /// `FRAC/(1+FRAC)` of the FINAL shares whatever k, and unmapped legs do
+    /// not count in `n`, so dust listings cannot lower the mapped venue's cap.
     #[test]
-    fn single_mapped_venue_never_becomes_a_single_venue_mark() {
-        for n_unmapped in [1_usize, 2, 4, 8, 16] {
+    fn unmapped_bloc_is_bounded_on_final_shares() {
+        let frac = unmapped_bloc_frac();
+        for k in [1_usize, 2, 4, 8, 16] {
             let mut legs = vec![(1.0, true)];
-            legs.extend(std::iter::repeat_n((1.0, false), n_unmapped));
+            legs.extend(std::iter::repeat_n((1.0, false), k));
             let p = profile_of(&legs);
-            assert!(
-                p.top_weight_share <= max_leg_share() + 1e-9,
-                "{n_unmapped} unmapped: top share {} breaches the {} ceiling",
-                p.top_weight_share,
-                max_leg_share()
-            );
-            if n_unmapped >= 2 {
-                assert!(p.n_eff >= 2.0, "{n_unmapped} unmapped: n_eff {}", p.n_eff);
-            }
+            let top = 1.0 / (1.0 + frac);
+            assert!((p.top_weight_share - top).abs() < 1e-9, "k={k}: {}", p.top_weight_share);
         }
     }
 
-    /// The other direction: an unmapped bloc can never dilute a priced book.
-    /// The old `1.0` fallback let 8 unpriced legs outvote a mapped venue 8:1.
+    /// The bloc bound relaxes as the mapped venue goes quiet: its share falls
+    /// continuously from `1/(1+FRAC)` to its own kernel weight and out, it is
+    /// never held up by the bound.
     #[test]
-    fn unmapped_bloc_cannot_outvote_the_mapped_mass() {
-        let mut legs = vec![(1.0, true)];
-        legs.extend(std::iter::repeat_n((1.0, false), 8));
-        let p = profile_of(&legs);
-        // Mapped mass = 1.0; bloc is held to max(0.40, anti-concentration) of
-        // it, so the mapped venue keeps the majority of the blend.
-        assert!(p.top_weight_share >= 0.5, "share {}", p.top_weight_share);
-        assert!(p.top_weight_share <= max_leg_share() + 1e-9);
+    fn a_quiet_mapped_leg_is_not_held_up_by_the_bloc() {
+        let t0 = Instant::now();
+        let mut mapped = ProviderEntry::new_at(leg(101.0), 1.0, t0).with_mapped(true);
+        mapped.joined = None;
+        let mut legs: Vec<ProviderEntry> = (0..4)
+            .map(|_| {
+                let mut e = ProviderEntry::new_at(leg(100.0), 1.0, t0);
+                e.joined = None;
+                e
+            })
+            .collect();
+        legs.push(mapped);
+        let frac = unmapped_bloc_frac();
+        let mut prev = 1.0 / (1.0 + frac);
+        for ms in (0..=12_000u64).step_by(100) {
+            let now = t0 + Duration::from_millis(ms);
+            for e in legs.iter_mut().take(4) {
+                e.update_at(e.index, now);
+            }
+            let sh = compute_vwap_at(1, legs.iter(), 10.0, Kernel::ALT, now).unwrap().mid() - 100.0;
+            if ms <= 4_500 {
+                assert!((sh - 1.0 / (1.0 + frac)).abs() < 1e-6, "t+{ms}: fresh bound {sh}");
+            }
+            assert!(sh <= prev + 1e-9, "t+{ms} ms: mapped share rose {prev} -> {sh}");
+            assert!(prev - sh < 0.02, "t+{ms} ms: mapped share stepped {prev} -> {sh}");
+            prev = sh;
+        }
+        assert!(prev.abs() < 1e-9, "evicted mapped leg still holds {prev}");
     }
 
     /// A ticker with enough mapped mass is left ALONE: the bound must not
@@ -1396,15 +1580,15 @@ mod unmapped_bloc_tests {
     #[test]
     fn fresh_weight_share_is_measured_on_the_weights_actually_used() {
         let now = Instant::now();
-        // Quiet mapped venue: silent long enough that live_decay < 0.1, but
-        // still inside the corpse horizon so it holds its weight in bw_sum.
+        // Quiet mapped venue: silent long enough that live_decay < 0.1.
         let quiet =
             ProviderEntry::new_at(leg(100.0), 1.0, coarse_now_backdated(30_000)).with_mapped(true);
         let mut entries = vec![quiet];
         entries.extend(
             (0..5).map(|i| ProviderEntry::new_at(leg(100.0 + f64::from(i) * 0.01), 1.0, now)),
         );
-        let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, now).unwrap();
+        let snap =
+            compute_vwap_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now).unwrap();
         assert_eq!(
             mitch::index::conf_active_count(snap.confidence),
             5,
@@ -1429,7 +1613,8 @@ mod unmapped_bloc_tests {
         entries.extend(
             (0..5).map(|i| ProviderEntry::new_at(leg(100.0 + f64::from(i) * 0.01), 1.0, stale)),
         );
-        let snap = compute_vwap_at(448509915440349184, entries.iter(), 10.0, now).unwrap();
+        let snap =
+            compute_vwap_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now).unwrap();
         assert_eq!(mitch::index::conf_active_count(snap.confidence), 1);
         assert!(
             u32::from(mitch::index::conf_active_count(snap.confidence)) < 2,
@@ -1521,8 +1706,10 @@ mod tests {
         let idx = MitchIndex::new(1, bid, ask, 0, vbid, vask, 1, 1, 1, 0);
         let mut e = ProviderEntry::new_at(idx, base_weight, now);
         // Anchor ema_ipi to a stable value so successive `update_at` calls in
-        // the same test don't move the half-life around between cycles.
+        // the same test do not move the cadence between cycles; no join ramp
+        // unless a test sets one.
         e.ema_ipi_secs = 1.0;
+        e.joined = None;
         e
     }
 
@@ -1564,8 +1751,8 @@ mod tests {
                     )
                 })
                 .collect();
-            let out =
-                compute_vwap_at(1, entries.iter().map(|(_, e)| e), 30.0, t0).expect("composite");
+            let out = compute_vwap_at(1, entries.iter().map(|(_, e)| e), 30.0, Kernel::ALT, t0)
+                .expect("composite");
             assert_eq!(
                 out.flags & crate::shard::FLAG_CONF_ACTIVE,
                 crate::shard::FLAG_CONF_ACTIVE,
@@ -1594,14 +1781,24 @@ mod tests {
         let entries: Vec<(u16, ProviderEntry)> = vec![(1, p_a), (2, p_b)];
 
         let mut cache = WeightCache::new();
-        let first = compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t0)
-            .expect("first call must produce a composite");
+        let first =
+            compute_vwap_throttled_at(42, &entries, 10.0, Kernel::ALT, &mut cache, 1000, false, t0)
+                .expect("first call must produce a composite");
 
         // 18 cycles at 50ms each = 900ms elapsed, still within the 1000ms refresh.
         for step in 1..=18u64 {
             let now = t0 + Duration::from_millis(step * 50);
-            let cur = compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, now)
-                .expect("cached replay must produce a composite");
+            let cur = compute_vwap_throttled_at(
+                42,
+                &entries,
+                10.0,
+                Kernel::ALT,
+                &mut cache,
+                1000,
+                false,
+                now,
+            )
+            .expect("cached replay must produce a composite");
             assert!(
                 idx_eq_bytewise(first, cur),
                 "cycle {step}: replay diverged from refresh; expected {first:?} got {cur:?}",
@@ -1623,7 +1820,8 @@ mod tests {
 
         let mut cache = WeightCache::new();
         let first =
-            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 200, false, t0).unwrap();
+            compute_vwap_throttled_at(42, &entries, 10.0, Kernel::ALT, &mut cache, 200, false, t0)
+                .unwrap();
 
         // 300ms later — well past the 200ms refresh interval.
         // Both providers age equally so normalized weights are unchanged in
@@ -1631,7 +1829,8 @@ mod tests {
         // and the cached_index timestamp updates.
         let t1 = t0 + Duration::from_millis(300);
         let refreshed =
-            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 200, false, t1).unwrap();
+            compute_vwap_throttled_at(42, &entries, 10.0, Kernel::ALT, &mut cache, 200, false, t1)
+                .unwrap();
         // The composite VWAP itself is invariant under uniform aging when
         // the same multiplicative decay applies to both providers, but the
         // refresh DID run — we verify the cache timestamp moved.
@@ -1652,7 +1851,8 @@ mod tests {
         let p_a = mk_entry(100.00, 100.00, 1_000, 1_000, 1.0, t0);
         let p_b = mk_entry(100.10, 100.10, 1_000, 1_000, 1.0, t0);
         let entries: Vec<(u16, ProviderEntry)> = vec![(1, p_a), (2, p_b)];
-        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, t0).expect("composite");
+        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, Kernel::ALT, t0)
+            .expect("composite");
         // Copy packed fields to locals before use (packed struct → no field refs).
         let (bid, ask) = (idx.bid, idx.ask);
         // mid ~100.05, and a real (non-degenerate) spread synthesized from the
@@ -1679,7 +1879,8 @@ mod tests {
         let t0 = Instant::now();
         let p = mk_entry(100.00, 100.00, 1_000, 1_000, 1.0, t0);
         let entries: Vec<(u16, ProviderEntry)> = vec![(1, p)];
-        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, t0).expect("composite");
+        let idx = compute_vwap_at(7, entries.iter().map(|(_, e)| e), 10.0, Kernel::ALT, t0)
+            .expect("composite");
         let (bid, ask) = (idx.bid, idx.ask);
         assert_eq!(
             bid.to_bits(),
@@ -1700,7 +1901,8 @@ mod tests {
 
         let mut cache = WeightCache::new();
         let first =
-            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t0).unwrap();
+            compute_vwap_throttled_at(42, &entries, 10.0, Kernel::ALT, &mut cache, 1000, false, t0)
+                .unwrap();
 
         // 100ms in — well within refresh window. Push a new price into B.
         let t1 = t0 + Duration::from_millis(100);
@@ -1710,7 +1912,8 @@ mod tests {
         );
 
         let post_change =
-            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t1).unwrap();
+            compute_vwap_throttled_at(42, &entries, 10.0, Kernel::ALT, &mut cache, 1000, false, t1)
+                .unwrap();
         assert!(
             post_change.bid > first.bid + 1.0,
             "VWAP must respond to a 5-unit move on provider B; first={first:?} post={post_change:?}",
@@ -1727,7 +1930,8 @@ mod tests {
 
         let mut cache = WeightCache::new();
         let _first =
-            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t0).unwrap();
+            compute_vwap_throttled_at(42, &entries, 10.0, Kernel::ALT, &mut cache, 1000, false, t0)
+                .unwrap();
         let cached_before_join = cache.cached_index.unwrap();
 
         // Add provider B 100ms later.
@@ -1736,7 +1940,8 @@ mod tests {
         entries.push((2, p_b));
 
         let after_join =
-            compute_vwap_throttled_at(42, &entries, 10.0, &mut cache, 1000, false, t1).unwrap();
+            compute_vwap_throttled_at(42, &entries, 10.0, Kernel::ALT, &mut cache, 1000, false, t1)
+                .unwrap();
         assert_ne!(
             cached_before_join.bid.to_bits(),
             after_join.bid.to_bits(),
@@ -1744,13 +1949,13 @@ mod tests {
         );
     }
 
-    /// A quiet interval must not move the mark.
+    /// A quiet interval moves the mark only through legs that fall OVERDUE.
     ///
-    /// Every leg ages together and no quote changes, so the composite is pure
-    /// re-weighting. Under the old per-provider half-life the legs decayed at
-    /// rates differing by up to 5x, share migrated to whichever leg last ticked,
-    /// and the composite walked across a lull on its own. With one half-life per
-    /// ticker the decay factor is common to every leg and cancels in `w_sum`.
+    /// Every leg ages together and no quote changes. Inside every leg's own
+    /// cadence (`τ_eff = max(τ, ema_ipi)`) nothing re-weights, so the mark is
+    /// exactly still; past it, the fast legs' silence is evidence and they
+    /// fade toward the slow ones, a bounded drift, never a walk to the last
+    /// leg that ticked.
     #[test]
     fn quiet_interval_does_not_move_the_composite() {
         let t0 = Instant::now();
@@ -1772,31 +1977,22 @@ mod tests {
             e.ema_ipi_secs = *ipi;
             legs.push((i as u16 + 1, e));
         }
-        let first = compute_vwap_at(1, legs.iter().map(|(_, e)| e), 10.0, t0).expect("composite");
-        let first_mid = first.mid();
-        // Walk 9 s of total silence: no leg updates, all ages advance together.
+        let mid_at = |ms: u64| {
+            let now = t0 + Duration::from_millis(ms);
+            compute_vwap_at(1, legs.iter().map(|(_, e)| e), 10.0, Kernel::ALT, now)
+                .expect("composite")
+                .mid()
+        };
+        let first_mid = mid_at(0);
+        assert_eq!(mid_at(200).to_bits(), first_mid.to_bits(), "inside every cadence: still");
         for step in 1..=90u64 {
-            let now = t0 + Duration::from_millis(step * 100);
-            let cur =
-                compute_vwap_at(1, legs.iter().map(|(_, e)| e), 10.0, now).expect("composite");
-            let drift_bps = ((cur.mid() - first_mid) / first_mid).abs() * 1e4;
-            assert!(
-                drift_bps < 0.01,
-                "t+{} ms: composite drifted {drift_bps:.4} bps on a quiet book \
-                 (mid {} -> {}); decay must cancel under normalisation",
-                step * 100,
-                first_mid,
-                cur.mid(),
-            );
+            let drift_bps = ((mid_at(step * 100) - first_mid) / first_mid).abs() * 1e4;
+            assert!(drift_bps < 0.5, "t+{} ms: drifted {drift_bps:.4} bps", step * 100);
         }
     }
 
-    /// A departing contributor must not step the mark.
-    ///
-    /// One leg goes silent and ages all the way through corpse eviction while the
-    /// rest keep ticking. Its share must fall to zero CONTINUOUSLY: the bare
-    /// `continue` at the corpse horizon used to discard whatever weight the leg
-    /// still held, printing a step into the served mark at exactly 6x stale.
+    /// A departing contributor must not step the mark: its weight is tapered
+    /// to exactly zero at eviction, so the cycle that drops it moves nothing.
     #[test]
     fn provider_dropout_does_not_step_the_composite() {
         let t0 = Instant::now();
@@ -1808,53 +2004,390 @@ mod tests {
             (2u16, mk_entry(63_701.5, 63_702.5, 1_000, 1_000, 1.0, t0)),
             (3u16, mk_entry(63_062.0, 63_063.0, 1_000, 1_000, 1.0, t0)),
         ];
-        let mut prev = compute_vwap_at(1, legs.iter().map(|(_, e)| e), STALE, t0)
-            .expect("composite")
-            .mid();
-        let mut worst: f64 = 0.0;
-        // 70 s at 200 ms: past the 60 s corpse horizon.
-        for step in 1..=350u64 {
-            let now = t0 + Duration::from_millis(step * 200);
-            // Legs 1 and 2 keep ticking; leg 3 is silent from t0 onwards.
+        let mid = |legs: &[(u16, ProviderEntry)], now| {
+            compute_vwap_at(1, legs.iter().map(|(_, e)| e), STALE, Kernel::ALT, now)
+                .expect("composite")
+                .mid()
+        };
+        let mut prev = mid(&legs, t0);
+        let mut last_share = f64::INFINITY;
+        let mut evicted_step = None;
+        for step in 1..=150u64 {
+            let now = t0 + Duration::from_millis(step * 100);
             for (_, e) in legs.iter_mut().take(2) {
                 e.update_at(e.index, now);
             }
-            let cur = compute_vwap_at(1, legs.iter().map(|(_, e)| e), STALE, now)
-                .expect("composite")
-                .mid();
-            let step_bps = ((cur - prev) / prev).abs() * 1e4;
-            worst = worst.max(step_bps);
+            let cur = mid(&legs, now);
+            // Share of the departing leg, from where the mid sits between it
+            // and the survivors: must fall monotonically.
+            let share = (63_701.0 - cur) / (63_701.0 - 63_062.5);
             assert!(
-                step_bps < 1.0,
-                "t+{} ms (age {:.1} s): departing leg stepped the composite by \
-                 {step_bps:.3} bps ({prev} -> {cur})",
-                step * 200,
-                (step * 200) as f64 / 1000.0,
+                share <= last_share + 1e-12,
+                "share rose at t+{} ms",
+                step * 100
             );
+            if share.abs() < 1e-12 && evicted_step.is_none() {
+                evicted_step = Some(((cur - prev) / prev).abs() * 1e4);
+            }
+            last_share = share;
             prev = cur;
         }
-        // And it really did leave: the composite must end on the survivors.
+        let step_bps = evicted_step.expect("the silent leg must be evicted");
         assert!(
-            (prev - 63_701.0).abs() < 1.0,
-            "after eviction the composite must be the survivors' blend, got {prev}"
+            step_bps < 0.05,
+            "eviction stepped the mark {step_bps:.4} bps"
         );
         assert!(
-            worst > 0.0,
-            "test must actually exercise a moving composite"
+            (prev - 63_701.0).abs() < 1e-6,
+            "survivors' blend, got {prev}"
         );
     }
 
-    /// The corpse taper reaches exactly zero at the horizon, so the `continue`
-    /// that follows can never discard live weight.
+    /// Confirmation keeps a quiet dominant book in the mark: Binance USD1/USDC
+    /// flat for 300 s, re-affirmed every 5 s, against thinner books that keep
+    /// moving. Its share stays pinned at the `w_max(n_eff)` cap throughout.
     #[test]
-    fn corpse_taper_reaches_zero_at_the_horizon() {
-        let stale = 10.0;
-        assert_eq!(corpse_taper(corpse_horizon(stale), stale), 0.0);
-        assert_eq!(corpse_taper(0.0, stale), 1.0);
-        assert!(corpse_taper(corpse_horizon(stale) * 0.99, stale) < 0.02);
-        // Uniform by construction: the price half-life must not read ema_ipi.
-        assert_eq!(price_half_life(10.0), 5.0);
-        assert_eq!(price_half_life(1.0), 1.0, "floored so decay cannot explode");
+    fn quiet_confirmed_dominant_venue_keeps_its_share() {
+        let t0 = Instant::now();
+        let book = |bid: f64, ask: f64, bw: f64, at| mk_entry(bid, ask, 1_000, 1_000, bw, at);
+        let mut legs = vec![(1u16, book(0.9992, 0.9993, 3.0, t0))];
+        legs.extend((0..4).map(|i| (i + 2, book(0.9990, 0.9996, 0.5, t0))));
+        for step in 1..=300u64 {
+            let now = t0 + Duration::from_secs(step);
+            if step % 5 == 0 {
+                let idx = legs[0].1.index;
+                legs[0].1.update_at(idx, now);
+            }
+            for (_, e) in legs.iter_mut().skip(1) {
+                let mut idx = e.index;
+                idx.bid += if step % 2 == 0 { 1e-4 } else { -1e-4 };
+                e.update_at(idx, now);
+            }
+            let (_, p) =
+                compute_vwap_profiled_at(1, legs.iter().map(|(_, e)| e), 10.0, Kernel::PEGGED, now)
+                    .expect("composite");
+            let cap = Concentration::get().w_max(n_of(&[3.0, 0.5, 0.5, 0.5, 0.5]));
+            assert!(
+                (p.top_weight_share - cap).abs() < 1e-9,
+                "t+{step} s: share {}",
+                p.top_weight_share
+            );
+        }
+    }
+
+    /// No frames at all: the interval widens with the leg's age, and the leg is
+    /// evicted at the class backstop even when its spread is too wide for the
+    /// diffusion test to fire first.
+    #[test]
+    fn dead_venue_widens_then_is_evicted_at_the_horizon() {
+        let t0 = Instant::now();
+        let dead = [mk_entry(0.9950, 1.0050, 1_000, 1_000, 1.0, t0)];
+        let at = |secs: u64| {
+            compute_vwap_at(
+                1,
+                dead.iter(),
+                10.0,
+                Kernel::PEGGED,
+                t0 + Duration::from_secs(secs),
+            )
+        };
+        let ci = |secs| decode_ci_ubp(at(secs).expect("alive").ci);
+        assert!(
+            ci(600) > ci(0),
+            "ci must widen as the leg ages: {} vs {}",
+            ci(600),
+            ci(0)
+        );
+        assert!(at(899).is_some());
+        assert!(
+            at(901).is_none(),
+            "past the 15 min backstop the ticker has no mark"
+        );
+    }
+
+    /// A thin venue quoting a razor spread cannot take the mark: its kernel
+    /// weight is floored at `s_min` and its final share capped at `w_max(n_eff)`.
+    #[test]
+    fn thin_tight_venue_never_passes_the_cap() {
+        let t0 = Instant::now();
+        let thin = mk_entry(100.0, 100.000_01, 10, 10, 0.5, t0);
+        let deep = mk_entry(99.97, 100.03, 1_000, 1_000, 1.0, t0);
+        for age_ms in (0..8_000u64).step_by(250) {
+            let now = t0 + Duration::from_millis(age_ms);
+            let mut fresh = thin;
+            fresh.update_at(thin.index, now);
+            let legs = [fresh, deep];
+            let (_, p) = compute_vwap_profiled_at(1, legs.iter(), 10.0, Kernel::ALT, now)
+                .expect("composite");
+            assert!(
+                p.top_weight_share <= Concentration::get().w_max(n_of(&[0.5, 1.0])) + 1e-9,
+                "age {age_ms}: {}",
+                p.top_weight_share
+            );
+        }
+    }
+
+    /// Two legs, one stops confirming: once past its confirmation window it is
+    /// not held at the cap's `1 - w_max(2)` floor, it fades on its own kernel
+    /// weight.
+    #[test]
+    fn a_dying_leg_is_not_held_up_by_the_cap() {
+        let t0 = Instant::now();
+        let mut live = mk_entry(0.9999, 1.0000, 1_000, 1_000, 1.0, t0);
+        let dying = mk_entry(0.9997, 0.9998, 1_000, 1_000, 1.0, t0);
+        let share_of_dying = |live: &ProviderEntry, now| {
+            let legs = [*live, dying];
+            let idx = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).expect("mark");
+            (0.99995 - idx.mid()) / (0.99995 - 0.99975)
+        };
+        let mut prev = 0.5 + 1e-9;
+        for secs in (5u64..=300).step_by(5) {
+            let now = t0 + Duration::from_secs(secs);
+            live.update_at(live.index, now);
+            let sh = share_of_dying(&live, now);
+            assert!(sh <= prev + 1e-12, "t+{secs} s: share rose to {sh}");
+            prev = sh;
+        }
+        assert!(prev < 0.2, "dying leg still holds {prev} after 300 s");
+    }
+
+    /// Healthy pegged book: ci stays on the half-spread scale (0.05 bp for a
+    /// 5 dp USDC/USDT book), not the kernel's 1 bp spread floor.
+    #[test]
+    fn healthy_pegged_ci_is_on_the_spread_scale() {
+        let t0 = Instant::now();
+        let legs = [
+            mk_entry(0.99990, 0.99991, 1_000, 1_000, 1.0, t0),
+            mk_entry(0.99990, 0.99991, 1_000, 1_000, 1.0, t0),
+        ];
+        let idx = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).expect("mark");
+        let ci_bp = decode_ci_ubp(idx.ci) / 1e4;
+        assert!(ci_bp > 0.02 && ci_bp < 0.1, "ci {ci_bp} bp");
+    }
+
+    /// Two legs at the same cadence, one just confirmed and one about to: the
+    /// weight is flat inside the cadence, so the mark does not hop to the
+    /// last leg that confirmed. Past its cadence a leg decays as before.
+    #[test]
+    fn weight_is_flat_between_normal_updates() {
+        let t0 = Instant::now();
+        let k = Kernel::FX_METAL.with_sigma(4.0 * Kernel::FX_METAL.sigma);
+        let leg = |mid: f64, age_ms: u64| {
+            let mut e = mk_entry(mid - 0.005, mid + 0.005, 10, 10, 1.0, t0);
+            e.ema_ipi_secs = 1.4;
+            e.last_update = t0 - Duration::from_millis(age_ms);
+            e
+        };
+        let mid = |a: u64, b: u64| {
+            compute_vwap_at(1, [leg(100.0, a), leg(100.1, b)].iter(), 10.0, k, t0).unwrap().mid()
+        };
+        assert!((mid(0, 1_300) - 100.05).abs() < 1e-9, "flat inside the cadence");
+        assert!((mid(1_300, 0) - 100.05).abs() < 1e-9);
+        assert!(mid(0, 3_000) < 100.05 - 1e-4, "past the cadence the older leg fades");
+    }
+
+    /// The floor on final shares: the live legs carry at least 0.20 of the
+    /// mark. Of ten equal pegged legs, two still confirming clear it from the
+    /// moment the other eight pass `stale` (those keep only their decaying
+    /// kernel share, never the cap's excess); one alone does not at the
+    /// crossing, and gains influence only as the silent ones decay (the
+    /// breadth gate, `active_count >= 2`, still refuses it).
+    #[test]
+    fn fresh_weight_floor_is_two_of_ten() {
+        let t0 = Instant::now();
+        for (live, ok) in [(2usize, true), (1, false)] {
+            let mut legs: Vec<ProviderEntry> =
+                (0..10).map(|_| mk_entry(0.99990, 0.99991, 1_000, 1_000, 1.0, t0)).collect();
+            for secs in (5u64..=300).step_by(5) {
+                let now = t0 + Duration::from_secs(secs);
+                for e in legs.iter_mut().take(live) {
+                    e.update_at(e.index, now);
+                }
+                if secs <= 10 {
+                    continue;
+                }
+                let idx = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap();
+                assert_eq!(mitch::index::conf_active_count(idx.confidence) as usize, live);
+                let bit = mitch::index::conf_fresh_weight_ok(idx.confidence);
+                if ok || secs <= 15 {
+                    assert_eq!(bit, ok, "{live} of 10 live at t+{secs} s");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn measured_sigma_is_clamped_to_ten_floors() {
+        let k = Kernel::MAJOR;
+        assert_eq!(k.with_sigma(0.0).sigma, k.sigma);
+        assert_eq!(k.with_sigma(1.0).sigma, 10.0 * k.sigma);
+        assert_eq!(k.with_sigma(3.0 * k.sigma).sigma, 3.0 * k.sigma);
+    }
+
+    #[test]
+    fn water_fill_caps_and_renormalises() {
+        let rs = [0.8, 0.1, 0.1];
+        let lam = water_fill(rs.iter().map(|r| (*r, *r)), 0.6).unwrap();
+        let shares: Vec<f64> = rs.iter().map(|r| (r + lam * r).min(0.6)).collect();
+        assert!((shares[0] - 0.6).abs() < 1e-12);
+        assert!((shares[1] - 0.2).abs() < 1e-12);
+        // An ineligible leg (e = 0) keeps its raw share; the excess goes elsewhere.
+        let legs = [(0.8, 0.8), (0.1, 0.0), (0.1, 0.1)];
+        let lam = water_fill(legs.iter().copied(), 0.6).unwrap();
+        let sh: Vec<f64> = legs.iter().map(|(r, e)| (r + lam * e).min(0.6)).collect();
+        assert!((sh[1] - 0.1).abs() < 1e-12 && (sh[2] - 0.3).abs() < 1e-12, "{sh:?}");
+        // No eligible home for the excess: raw shares stand.
+        assert!(water_fill([(1.0, 1.0)].into_iter(), 0.6).is_none());
+        assert_eq!(water_fill([(0.5, 0.5), (0.5, 0.5)].into_iter(), 0.6), Some(0.0));
+    }
+
+    /// The cap is never skipped: with the excess having no eligible home (a
+    /// stale peer, an unmapped one) every leg becomes eligible in proportion
+    /// to its own share, and only a single live leg keeps the whole mark.
+    #[test]
+    fn the_cap_holds_when_no_leg_is_eligible_for_the_excess() {
+        let t0 = Instant::now();
+        let mut legs = [
+            mk_entry(0.99995, 1.00005, 1_000, 1_000, 50.0, t0).with_mapped(true),
+            mk_entry(0.99965, 0.99975, 1_000, 1_000, 1.0, t0),
+        ];
+        // The peer is unmapped AND past its window: ineligible on both counts.
+        let now = t0 + Duration::from_secs(8);
+        legs[0].update_at(legs[0].index, now);
+        let (_, p) = compute_vwap_profiled_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap();
+        let cap = Concentration::get().w_max(1.0);
+        assert!(p.top_weight_share <= cap + 1e-9, "top {}", p.top_weight_share);
+        let one = [mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, t0)];
+        let (_, p1) = compute_vwap_profiled_at(1, one.iter(), 10.0, Kernel::PEGGED, t0).unwrap();
+        assert_eq!(p1.top_weight_share, 1.0, "one live leg is the whole mark");
+    }
+
+    /// A leg that was evicted and comes back ramps in again: the re-join is
+    /// keyed on its own eviction age, not on a flat timeout.
+    #[test]
+    fn a_returning_leg_ramps_in_again() {
+        let t0 = Instant::now();
+        let mut legs = [
+            mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, t0),
+            mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, t0),
+            mk_entry(0.99965, 0.99975, 1_000, 1_000, 1.0, t0),
+        ];
+        let mid_at = |legs: &[ProviderEntry; 3], now| {
+            compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap().mid()
+        };
+        // The odd leg goes silent past the PEGGED eviction age while the other
+        // two keep confirming, then it returns.
+        let gone = t0 + Duration::from_secs(600);
+        for s in (5..=600).step_by(5) {
+            let at = t0 + Duration::from_secs(s);
+            for e in legs.iter_mut().take(2) {
+                e.update_at(e.index, at);
+            }
+        }
+        let before = mid_at(&legs, gone);
+        legs[2].update_at(legs[2].index, gone);
+        let back = mid_at(&legs, gone);
+        assert!(
+            ((back - before) / before).abs() * 1e4 < 0.2,
+            "a returning leg stepped the mark {:.3} bp",
+            ((back - before) / before).abs() * 1e4
+        );
+        // ...and it is fully back once the ramp completes.
+        let later = gone + Duration::from_secs(60);
+        for s in (5..=60).step_by(5) {
+            let at = gone + Duration::from_secs(s);
+            for e in legs.iter_mut() {
+                e.update_at(e.index, at);
+            }
+        }
+        let full = mid_at(&legs, later);
+        assert!(full < before - 1e-5 && full > 0.99975, "ramped in: {full}");
+    }
+
+    /// A leg crossing `τ = stale` fades out of `n` continuously, so the cap on
+    /// the dominant leg moves smoothly: no mark step at the crossing.
+    #[test]
+    fn a_leg_crossing_stale_does_not_step_the_mark() {
+        let t0 = Instant::now();
+        let book = |bid: f64, ask: f64, bw: f64| {
+            let mut e = mk_entry(bid, ask, 1_000, 1_000, bw, t0).with_mapped(true);
+            e.joined = None;
+            e
+        };
+        // A dominant book held at the cap, two peers 1 bp off, and a leg 3 bp
+        // off that stops confirming: `n` falls 2.8 -> 2.3 as it crosses stale.
+        let mut legs = [
+            book(0.99995, 1.00005, 50.0),
+            book(0.99985, 0.99995, 1.0),
+            book(0.99985, 0.99995, 1.0),
+            book(0.99965, 0.99975, 1.0),
+        ];
+        let (_, p0) = compute_vwap_profiled_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).unwrap();
+        let cap = Concentration::get().w_max(n_of(&[50.0, 1.0, 1.0, 1.0]));
+        assert!((p0.top_weight_share - cap).abs() < 1e-9);
+        let mid0 = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).unwrap().mid();
+        let mut prev = mid0;
+        let mut worst = 0.0f64;
+        for ms in (0..=20_000u64).step_by(200) {
+            let now = t0 + Duration::from_millis(ms);
+            for e in legs.iter_mut().take(3) {
+                e.update_at(e.index, now);
+            }
+            let mid = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap().mid();
+            worst = worst.max(((mid - prev) / prev).abs() * 1e4);
+            prev = mid;
+        }
+        let total = ((prev - mid0) / mid0).abs() * 1e4;
+        assert!(total > 0.1, "the crossing moved nothing: {total:.3} bp");
+        assert!(
+            worst < 0.1 && worst < total / 4.0,
+            "a stale crossing stepped the mark {worst:.4} bp of {total:.3}"
+        );
+    }
+
+    /// A leg joining 3 bp off a stable pegged mark ramps in over ~3 ema_ipi:
+    /// no single cycle moves the mark by more than a fraction of its final
+    /// displacement.
+    #[test]
+    fn a_joining_leg_ramps_in() {
+        let t0 = Instant::now();
+        let mut legs: Vec<ProviderEntry> = (0..2)
+            .map(|_| {
+                let mut e = mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, t0).with_mapped(true);
+                e.joined = None;
+                e
+            })
+            .collect();
+        let mid0 = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).unwrap().mid();
+        let mut joiner = mk_entry(0.99965, 0.99975, 1_000, 1_000, 1.0, t0).with_mapped(true);
+        joiner.joined = Some(t0);
+        legs.push(joiner);
+        let mut prev = mid0;
+        let mut worst = 0.0f64;
+        for ms in (0..=6_000u64).step_by(200) {
+            let now = t0 + Duration::from_millis(ms);
+            for e in legs.iter_mut() {
+                e.update_at(e.index, now);
+            }
+            let mid = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap().mid();
+            worst = worst.max(((mid - prev) / prev).abs() * 1e4);
+            prev = mid;
+        }
+        let total = ((prev - mid0) / mid0).abs() * 1e4;
+        assert!(total > 0.9, "the joiner never entered: {total:.3} bp");
+        assert!(worst < 0.2, "joining stepped the mark {worst:.3} bp of {total:.3}");
+    }
+
+    /// A σ high enough to evict inside one re-affirm interval does not: a leg
+    /// confirmed every stale/2 stays in the blend.
+    #[test]
+    fn eviction_never_lands_inside_a_reaffirm_interval() {
+        let t0 = Instant::now();
+        let k = Kernel::ALT.with_sigma(10.0 * Kernel::ALT.sigma);
+        let e = mk_entry(100.0, 100.02, 1_000, 1_000, 1.0, t0);
+        let at = |s: u64| compute_vwap_at(1, [e].iter(), 10.0, k, t0 + Duration::from_secs(s));
+        assert!(at(4).is_some(), "evicted before stale/2");
+        assert!(at(6).is_none(), "past max(diffusion, stale/2) the leg is gone");
     }
 
     #[test]

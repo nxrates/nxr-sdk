@@ -488,8 +488,10 @@ pub struct SignedQuotesYml {
     /// Required minimum accepted provider count on every direct/bridge leg.
     /// Must be >= 2. Provider identity authentication is a separate layer.
     pub min_accepted_providers: u8,
-    /// Required minimum composite freshness in bps (1..=10_000), derived from
-    /// the Index confidence freshness byte on every direct/bridge leg.
+    /// RETIRED: gated only legacy `FLAG_CONF_FRESHNESS` records, which the
+    /// signer now refuses outright. Still accepted so deployed ConfigMaps parse
+    /// under `deny_unknown_fields`; read by nothing. Drop with the key.
+    #[serde(default)]
     pub min_composite_freshness_bps: u16,
     /// Peer replicas for k-of-n co-signing (exclude self). Every URL is pinned
     /// to the exact signer address expected in its response.
@@ -1143,10 +1145,13 @@ pub struct CtraderProviderYml {
     #[serde(default)]
     pub fix_sender_comp_id: String,
     /// Canonical "BASE/QUOTE" → broker-side cTrader symbol name (e.g.
-    /// "XAU/USD" → "XAUUSD"). Symbol IDs are NOT configured: they differ per
-    /// broker, so they are resolved at connect via ProtoOASymbolsListReq.
+    /// "XAU/USD" → "XAUUSD"), or a LIST of spellings when the broker's own
+    /// name for an instrument is not settled (`US500-PERP` vs `SP500-PERP`):
+    /// the first one the broker actually lists wins and the rest cost nothing.
+    /// Symbol IDs are NOT configured: they differ per broker, so they are
+    /// resolved at connect via ProtoOASymbolsListReq.
     #[serde(default)]
-    pub symbols: BTreeMap<String, String>,
+    pub symbols: BTreeMap<String, BrokerSymbol>,
     /// Endpoint host: `demo.ctraderapi.com` or `live.ctraderapi.com`.
     /// Demo and live are fully separate account systems.
     #[serde(default)]
@@ -1155,6 +1160,26 @@ pub struct CtraderProviderYml {
     /// cTrader UI). Selects one `ctidTraderAccountId` out of the token grant.
     #[serde(default)]
     pub trader_login: i64,
+}
+
+/// One broker-side symbol name, or the spellings to try for it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum BrokerSymbol {
+    One(String),
+    Any(Vec<String>),
+}
+
+impl BrokerSymbol {
+    /// The spellings, in config order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Self::One(s) => std::slice::from_ref(s),
+            Self::Any(v) => v.as_slice(),
+        }
+        .iter()
+        .map(String::as_str)
+    }
 }
 
 /// `runtime:` block — forwarder + server tuning knobs. All `Option<…>`
@@ -1270,20 +1295,40 @@ impl PipelineYml {
         for sym in &self.cexs.cross_pairs {
             out.insert(sym.to_uppercase());
         }
-        for prov in self.oracles.providers.values() {
-            for sym in prov.symbols.keys() {
-                out.insert(sym.to_uppercase());
-            }
-        }
-        // Broker symbols count too: this set is what the aggregator admits, so a
-        // section missing here is silently dropped as `unknown_ticker` no matter
-        // how healthy the forwarder is.
-        for prov in self.ctrader.providers.values() {
-            for sym in prov.symbols.keys() {
-                out.insert(sym.to_uppercase());
-            }
-        }
+        // Oracle and broker symbols count too: this set is what the aggregator
+        // admits, so a section missing here is silently dropped as
+        // `unknown_ticker` no matter how healthy the forwarder is. The
+        // state-only `:PERP` rows are NOT here: `configured_perp_symbols`.
+        out.extend(self.relay_manifest(false));
         out
+    }
+
+    /// The `<X>:PERP` rows of `oracles.providers.*` / `ctrader.providers.*`:
+    /// STATE-ONLY ids, excluded from [`Self::configured_symbols`] and
+    /// [`Self::relay_symbols`] for the same reason an `NXR_SYMBOLS` perp entry
+    /// is excluded from the served list (`core::main::split_perp_symbols`):
+    /// a perp is a parity/derived leg and nothing else, never served, never
+    /// published as an asset, never sharded, never an auto-cross leg. It still
+    /// has to be ADMITTED at the UDP gate, which is the one thing this set is
+    /// for.
+    pub fn configured_perp_symbols(&self) -> std::collections::BTreeSet<String> {
+        self.relay_manifest(true)
+    }
+
+    /// Every symbol declared by a relay forwarder (`oracles` + `ctrader`),
+    /// uppercased, split on the one axis every caller splits it on: `perp` =
+    /// the state-only `:PERP` rows, `!perp` = everything that is served and
+    /// sharded. One iteration behind `configured_symbols`, `relay_symbols` and
+    /// `configured_perp_symbols`.
+    fn relay_manifest(&self, perp: bool) -> std::collections::BTreeSet<String> {
+        self.oracles
+            .providers
+            .values()
+            .flat_map(|p| p.symbols.keys())
+            .chain(self.ctrader.providers.values().flat_map(|p| p.symbols.keys()))
+            .map(|s| s.to_uppercase())
+            .filter(|s| crate::is_perp_symbol(s) == perp)
+            .collect()
     }
 
     /// Every symbol a RELAY forwarder observes directly: `oracles.providers.*`
@@ -1298,18 +1343,8 @@ impl PipelineYml {
     /// that is ALSO listed as a cross stays here: observed beats derived, the
     /// same precedence `composed_gate_set` applies.
     pub fn relay_symbols(&self) -> std::collections::BTreeSet<String> {
-        let mut out = std::collections::BTreeSet::new();
-        for prov in self.oracles.providers.values() {
-            for sym in prov.symbols.keys() {
-                out.insert(sym.to_uppercase());
-            }
-        }
-        for prov in self.ctrader.providers.values() {
-            for sym in prov.symbols.keys() {
-                out.insert(sym.to_uppercase());
-            }
-        }
-        out
+        // A perp leg gets no `.idx`: see `configured_perp_symbols`.
+        self.relay_manifest(false)
     }
 
     /// Relay provider names (`oracles.providers` ∪ `ctrader.providers` keys).
@@ -1407,8 +1442,9 @@ pub struct ExchangeYml {
     /// `XBT → BTC`, Bitfinex `UST → USDT`). `format_symbol` walks the same
     /// map in reverse. Was hardcoded `.replace("XBT","BTC")` and
     /// `("UST","USDT")` literal arrays in `kraken.rs` / `bitfinex.rs`
-    /// (phase 59.R3.C2.O3, 2026-05-30). Distinct from the top-level
-    /// `cexs.aliases` map which the weights scraper uses globally.
+    /// (phase 59.R3.C2.O3, 2026-05-30). Wins over the top-level
+    /// `cexs.aliases`, which applies to every venue (weights survey and the
+    /// forwarder's codec alike).
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
     /// Historical-archive URL template(s) used by `series-factory` sources.
@@ -1701,6 +1737,11 @@ pub struct CexsYml {
     /// FX major currency symbols. Was: `series_factory::nxr_calibrate::FX_MAJORS`.
     #[serde(default)]
     pub fx_majors: Vec<String>,
+    /// Metal-backed tokens (XAUT, PAXG): wire class CR, but they price like
+    /// the metal. Selects the FX/metal price kernel (`tdwap::Kernel`), not the
+    /// crypto one. Empty = `asset_class::DEFAULT_METAL_BACKED`.
+    #[serde(default)]
+    pub metal_backed: Vec<String>,
     /// All scrape-able assets (input list for the weights scraper).
     #[serde(default)]
     pub assets: Vec<String>,
@@ -1722,12 +1763,15 @@ pub struct CexsYml {
     /// (`docs/internal/storage-quote.md`).
     #[serde(default)]
     pub storage: StorageYml,
+    /// The one cap on a live leg's final share (`tdwap::Concentration`).
+    #[serde(default)]
+    pub concentration: crate::tdwap::Concentration,
 }
 
-/// `cexs.storage:` block: per-asset market ranking, weight caps and the published
+/// `cexs.storage:` block: per-asset market ranking and the published
 /// storage denomination. Genuinely YAML-sourced: no env indirection, no Rust
-/// literal that outranks the file (the mistake `max_weight_per_source` and
-/// friends still carry).
+/// literal that outranks the file (the mistake the retired env-only weight
+/// caps made).
 ///
 /// Serde ignores unknown keys, so a ConfigMap still carrying the retired
 /// `pivot:` key falls back to defaults rather than failing: roll the ConfigMap
@@ -1740,12 +1784,6 @@ pub struct StorageYml {
     /// Trust floor per market, either side.
     #[serde(default)]
     pub min_market_volume_usd: Option<f64>,
-    /// Weight cap at `n == min_providers_for_cap`.
-    #[serde(default)]
-    pub max_weight_at_min_markets: Option<f64>,
-    /// Weight cap at `n >= max_markets_per_asset`.
-    #[serde(default)]
-    pub max_weight_at_max_markets: Option<f64>,
     /// PUBLISHED denomination for every CR asset: it decides the ticker_id, and
     /// therefore the `.idx`/`.s10` directory name, so it is fixed for the
     /// process. Every market of an asset is converted straight into it.
@@ -1760,36 +1798,160 @@ pub struct StorageYml {
     pub storage_quote_overrides: std::collections::BTreeMap<String, String>,
     /// PARITY LEGS, keyed by base asset: another instrument's price joins the
     /// asset's storage vector at 1:1, converted over its own bridge at epoch -1
-    /// like any market and held to the same HHI ceiling. `XAUT: [XAU/USD]`
-    /// blends spot gold into the token's mark; `QQQ: [binance QQQB/USDT]`
-    /// carries the 24/7 tokenised book into an RTH-only equity. A closed
+    /// like any market and held to the same `w_max(n)` cap. `XAUT: [XAU/USD]`
+    /// blends spot gold into the token's mark; `QQQ: [NDX/USD]`
+    /// carries the index, rebased (`multiplier`), into an RTH-only equity. A closed
     /// market goes stale and drops out by the ordinary freshness gate. The
     /// asset's published id is unchanged: a leg is an input, never an output.
     #[serde(default)]
     pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
+    /// Weight multiplier on a tokenised WRAPPER book (an EQ asset's surveyed
+    /// markets), on top of its survey weight. The ladder for an ETF is cash
+    /// relay (1.0) > index-derived leg (`ParityLegYml::weight`) > perp-derived
+    /// ~ wrapper: the cash book tracks spot best, the index CFD next, and a
+    /// wrapper carries a premium and twice the tracking noise (measured
+    /// 2026-09-23: QQQ wrapper basis sd 1.1 bp vs 0.7 for the index leg,
+    /// SPY 3.3 vs 1.3, wrapper premium +7 bp on SPY).
+    #[serde(default)]
+    pub wrapper_weight: Option<f64>,
+    /// Band of a tokenised WRAPPER book (an EQ asset's surveyed markets) in
+    /// the deviation guard, in bp. Absent = the class band. A wrapper is a
+    /// claim on the same underlying, so its honest premium is small and a wide
+    /// one is a broken claim, not a market.
+    #[serde(default)]
+    pub wrapper_max_dev_bps: Option<f64>,
+    /// Per base asset class (`EQ`): how far, in bp, a mark with no fresh
+    /// external reference (relay book or derived leg) may drift from the last
+    /// mark that had one. Past it the id stops publishing and goes stale
+    /// instead of following wrapper books alone. Absent class = no bound.
+    #[serde(default)]
+    pub unanchored_drift_bps: BTreeMap<String, f64>,
 }
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at
 /// epoch -1 and weighted as a relay venue; present = that venue's book for
-/// `pair`, weighted from the survey like any surveyed market.
+/// `pair`, weighted from the survey like any surveyed market. A perp leg names
+/// its own id (`XAU/USDT:PERP`), so no book kind is needed to tell it apart.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ParityLegYml {
     pub pair: String,
     #[serde(default)]
     pub provider: Option<String>,
     /// Multiplier on the leg's base weight (relay median for a composite, the
-    /// survey's for a venue book) before the HHI ceiling. 1.0 = one median
+    /// survey's for a venue book). 1.0 = one median
     /// venue; 0.5 halves a two-leg blend's exposure to a wrapper premium.
     #[serde(default = "parity_weight_default")]
     pub weight: f64,
-    /// Drop the leg for the cycle when its converted mid sits further than
-    /// this from the asset's own fresh epoch -1 mark. Absent = no gate. A leg
-    /// alone (no fresh mark to compare against) always carries.
+    /// ABSOLUTE share of the asset's vector this leg claims, in (0, 1); the
+    /// other legs split the rest by their own weights, then `w_max(n)` binds on
+    /// the final shares. `weight` cannot express a fixed split: one median venue among
+    /// 19 CEX books is ~0.05 whatever the multiplier, and the same multiplier
+    /// is 0.5 of a two-leg blend. Ignored when set with `weight` (share wins).
+    #[serde(default)]
+    pub share: Option<f64>,
+    /// The leg's band in the storage deviation guard: dropped when its
+    /// converted mid sits further than this from the median of the other
+    /// legs (never the mark). Absent = the class band. On a derived leg the
+    /// gate is on the RESIDUAL after rebasing, at half the band while seeded.
     #[serde(default)]
     pub max_dev_bps: Option<f64>,
+    /// DERIVED leg: the leg enters at `price x seed x exp(-b)`, `b` learned as
+    /// the median 1-minute log-ratio `ln(leg x seed / reference)` over common
+    /// quoting minutes. Rebases a perp onto its cash reference (`b` ~ bps) or
+    /// an index composite onto its ETF (`seed` ~ 1/41, `b` the correction).
+    #[serde(default)]
+    pub multiplier: Option<MultiplierYml>,
+}
+
+impl Default for ParityLegYml {
+    fn default() -> Self {
+        Self {
+            pair: String::new(),
+            provider: None,
+            weight: 1.0,
+            share: None,
+            max_dev_bps: None,
+            multiplier: None,
+        }
+    }
+}
+
+/// Basis / multiplier estimator knobs for a derived parity leg. Every window
+/// is in COMMON minutes (both the leg and the reference fresh): a weekend does
+/// not advance it, so Friday's estimate carries until `max_stale_h`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct MultiplierYml {
+    pub learn: LearnWindow,
+    /// Ring length, hours of common minutes (6.5 = one RTH session, 24 = a
+    /// stationary basis). At most 168.
+    pub window_h: f64,
+    /// Common minutes filled before the ring's median is used; below it the
+    /// persisted value carries if younger than `max_stale_h`, else the leg is
+    /// refused (`reason="warmup"`).
+    #[serde(default = "mult_min_overlap")]
+    pub min_overlap_min: usize,
+    /// `|b|` is clamped to this, in bps of log-ratio (300 = 3% either side of
+    /// `seed`).
+    #[serde(default = "mult_cap_bps")]
+    pub cap_bps: f64,
+    /// Regime reset: >= 20 of the last 30 common minutes further than
+    /// `max(3 x MAD(ring), reset_bps)` from `b`, on one side, replace the ring
+    /// with those 30. 8 bps (the QQQ/SPY rows) catches an ETF ex-div step
+    /// (QQQ ~15, SPY ~30 per quarter) the 6.5 h window takes 3 h to half-absorb.
+    #[serde(default = "mult_reset_bps")]
+    pub reset_bps: f64,
+    /// Age of the last common minute past which the leg is refused
+    /// (`reason="basis_stale"`). 96 h covers Good Friday (Thu 20:00 -> Mon
+    /// 13:30 UTC = 89.5 h).
+    #[serde(default = "mult_max_stale_h")]
+    pub max_stale_h: f64,
+    /// Prior multiplier the estimator corrects (1.0 for a basis, ~1/41 for
+    /// QQQ from NDX): `cap_bps` bounds the CORRECTION, so the seed must be
+    /// within it of the truth.
+    #[serde(default = "mult_seed")]
+    pub seed: f64,
+    /// What `b` is measured against: `relay` (default) = the asset's own
+    /// CFD/relay books on its id, `survey` = the median of its surveyed CEX
+    /// books this cycle (XAUT, which has no relay). Never the published mark
+    /// (contains the leg: self-chasing), never another parity leg.
+    #[serde(default, rename = "ref")]
+    pub reference: BasisRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearnWindow {
+    /// Rolling ring over the last `window_h` of common minutes.
+    RollingCommon,
+    /// The first `window_h` of common minutes after each session open (a gap
+    /// > 4 h), frozen until the next open. Noisier (opening auction).
+    DailyOpenVwap,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BasisRef {
+    #[default]
+    Relay,
+    Survey,
 }
 
 fn parity_weight_default() -> f64 {
+    1.0
+}
+fn mult_min_overlap() -> usize {
+    60
+}
+fn mult_cap_bps() -> f64 {
+    300.0
+}
+fn mult_reset_bps() -> f64 {
+    30.0
+}
+fn mult_max_stale_h() -> f64 {
+    96.0
+}
+fn mult_seed() -> f64 {
     1.0
 }
 
@@ -2029,6 +2191,65 @@ mod tests {
             "overrides must stay empty: they are for an asset with no USD route, not tuning"
         );
         assert_eq!(storage.storage_quote_for("BTC"), "USD");
+    }
+
+    /// U3/U4 grammar: an absolute share, a derived leg with its defaults, a
+    /// perp venue leg, and the shipped rows.
+    #[test]
+    fn parity_leg_share_and_multiplier_parse() {
+        let y: StorageYml = serde_yml::from_str(concat!(
+            "parity_legs:\n",
+            "  XAUT: [{pair: XAU/USD, share: 0.35, max_dev_bps: 60, multiplier: {learn: rolling_common, window_h: 24, cap_bps: 100, ref: survey}}]\n",
+            "  QQQ: [{pair: NDX/USD, multiplier: {learn: daily_open_vwap, window_h: 6.5, seed: 0.024339}},\n",
+            "        {pair: QQQ/USDT:PERP, provider: binance_futures, weight: 0.5}]\n",
+        ))
+        .expect("parse");
+        let xau = &y.parity_legs["XAUT"][0];
+        assert_eq!(xau.share, Some(0.35));
+        assert_eq!(xau.weight, 1.0);
+        let m = xau.multiplier.unwrap();
+        assert_eq!(
+            (m.learn, m.reference),
+            (LearnWindow::RollingCommon, BasisRef::Survey)
+        );
+        assert_eq!(
+            (
+                m.min_overlap_min,
+                m.cap_bps,
+                m.reset_bps,
+                m.max_stale_h,
+                m.seed
+            ),
+            (60, 100.0, 30.0, 96.0, 1.0)
+        );
+        let q = &y.parity_legs["QQQ"];
+        let m = q[0].multiplier.unwrap();
+        assert_eq!(
+            (m.learn, m.reference, m.cap_bps),
+            (LearnWindow::DailyOpenVwap, BasisRef::Relay, 300.0)
+        );
+        assert!((m.seed - 0.024339).abs() < 1e-12);
+        assert_eq!((q[1].pair.as_str(), q[1].weight), ("QQQ/USDT:PERP", 0.5));
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.yml");
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            let y: PipelineYml = serde_yml::from_str(&raw).expect("config.yml parses");
+            let legs = &y.cexs.storage.parity_legs;
+            assert_eq!(legs["XAUT"][0].share, Some(0.35));
+            assert_eq!(y.cexs.concentration, crate::tdwap::Concentration::default());
+            assert!(
+                legs.values()
+                    .flatten()
+                    .all(|l| !l.pair.starts_with("QQQB") && !l.pair.starts_with("SPYB")),
+                "wrappers are survey markets of the ETF, never a leg"
+            );
+            for a in ["QQQ", "SPY"] {
+                assert!(
+                    legs[a].iter().any(|l| l.multiplier.is_some()),
+                    "{a} needs its index-derived leg"
+                );
+            }
+        }
     }
 
     fn cal() -> CalibrationYml {

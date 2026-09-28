@@ -1985,6 +1985,19 @@ impl StorageYml {
                 .keys()
                 .any(|k| k.eq_ignore_ascii_case(&format!("{base}/{quote}")))
     }
+
+    /// `(provider, leg pair)` of every pair-keyed row's venue leg (`USDT/KRW`
+    /// @ upbit into `USD/KRW`). The venue's other books in the leg's quote carry
+    /// the local premium the basis absorbs for this leg alone: they are
+    /// subscribed only as the leg and never enter a composite.
+    pub fn fx_leg_books(&self) -> Vec<(String, String)> {
+        self.parity_legs
+            .iter()
+            .filter(|(k, _)| k.contains('/'))
+            .flat_map(|(_, legs)| legs)
+            .filter_map(|l| Some((l.provider.as_ref()?.to_ascii_lowercase(), l.pair.to_ascii_uppercase())))
+            .collect()
+    }
 }
 
 /// `cexs.scraper:` block — endpoints + selectors for CEX volume scraping.

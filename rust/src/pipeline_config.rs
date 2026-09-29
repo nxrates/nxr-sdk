@@ -1826,6 +1826,12 @@ pub struct StorageYml {
     /// instead of following wrapper books alone. Absent class = no bound.
     #[serde(default)]
     pub unanchored_drift_bps: BTreeMap<String, f64>,
+    /// Quotes whose books trade at a local premium (`KRW`: 1-3%, time-varying).
+    /// Surveyed for volume, but a book in one enters a composite ONLY as a
+    /// configured venue parity leg (de-meaned by its learned basis), never as
+    /// a raw market, and the forwarder subscribes no other book in it.
+    #[serde(default)]
+    pub local_quotes: Vec<String>,
 }
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at
@@ -1990,12 +1996,17 @@ impl StorageYml {
     /// @ upbit into `USD/KRW`). The venue's other books in the leg's quote carry
     /// the local premium the basis absorbs for this leg alone: they are
     /// subscribed only as the leg and never enter a composite.
+    /// Also every venue leg quoted in a `local_quotes` currency (`MON/KRW` @
+    /// upbit into MON).
     pub fn fx_leg_books(&self) -> Vec<(String, String)> {
+        let local = |pair: &str| {
+            crate::split_pair(pair).is_some_and(|(_, q)| self.local_quotes.iter().any(|l| l.eq_ignore_ascii_case(q)))
+        };
         self.parity_legs
             .iter()
-            .filter(|(k, _)| k.contains('/'))
-            .flat_map(|(_, legs)| legs)
-            .filter_map(|l| Some((l.provider.as_ref()?.to_ascii_lowercase(), l.pair.to_ascii_uppercase())))
+            .flat_map(|(k, legs)| legs.iter().map(move |l| (k, l)))
+            .filter(|(k, l)| k.contains('/') || local(&l.pair))
+            .filter_map(|(_, l)| Some((l.provider.as_ref()?.to_ascii_lowercase(), l.pair.to_ascii_uppercase())))
             .collect()
     }
 }

@@ -2214,6 +2214,33 @@ impl Default for BackfillDiskYml {
 mod tests {
     use super::*;
 
+    /// A venue leg in a `local_quotes` currency is scoped like a pair-keyed
+    /// row's; a composite leg (no provider) and a USD venue leg are not.
+    #[test]
+    fn fx_leg_books_cover_local_quote_legs() {
+        let leg = |pair: &str, provider: Option<&str>| ParityLegYml {
+            pair: pair.into(),
+            provider: provider.map(Into::into),
+            ..ParityLegYml::default()
+        };
+        let s = StorageYml {
+            local_quotes: vec!["krw".into()],
+            parity_legs: BTreeMap::from([
+                ("USD/KRW".into(), vec![leg("USDT/KRW", Some("upbit"))]),
+                ("MON".into(), vec![leg("mon/krw", Some("Bithumb"))]),
+                ("NDX".into(), vec![leg("NDX/USD:PERP", Some("pepperstone"))]),
+                ("XAUT".into(), vec![leg("XAU/USD", None)]),
+            ]),
+            ..StorageYml::default()
+        };
+        let mut books = s.fx_leg_books();
+        books.sort();
+        assert_eq!(
+            books,
+            [("bithumb".to_string(), "MON/KRW".to_string()), ("upbit".into(), "USDT/KRW".into())]
+        );
+    }
+
     /// The deployed `config.yml` must actually reach `StorageYml`. These two keys
     /// sat in the YAML with no field behind them, so serde dropped them and the
     /// file asserted a storage policy the code never applied. Parse the REAL

@@ -70,15 +70,6 @@ pub struct PipelineYml {
     pub network: NetworkYml,
     #[serde(default)]
     pub server: ServerYml,
-    /// Synth-pair registry. Currently:
-    ///   - `initial_pairs`: launch synth-pair list (was: hardcoded
-    ///     `sdk/rust/src/synth/pairs.rs::INITIAL_SYNTH_PAIRS`).
-    #[serde(default)]
-    pub synths: SynthsYml,
-    /// Stablecoin allowlist for the FX/metal/stablecoin auto-cross
-    /// triangulator (`core::triangulator::build_auto_cross_rules`).
-    #[serde(default)]
-    pub triangulation: TriangulationYml,
     /// Runtime tuning knobs for the forwarders, fx provider server, and core
     /// REST/WS layer. Phase 59.R3.C2.O5 (2026-05-30) — was hardcoded
     /// `const FORWARDER_HEARTBEAT_SECS / PROVIDER_STALE_SECS / FRAME_BUF_MAX
@@ -1181,15 +1172,6 @@ pub const DEFAULT_RUNTIME_HEALTH_STALE_SECS: u64 = 20;
 pub const DEFAULT_RUNTIME_DAILY_REFRESH_OFFSET_SECS: u64 = 30;
 pub const DEFAULT_RUNTIME_WS_FLUSH_MS: u64 = 200;
 
-/// `synths:` block — optional manual override for synth-pipeline pairs.
-/// Leave `initial_pairs` empty: the live kernel derives crosses from
-/// `cexs.cross_pairs` via [`crate::synth::cross_expand`].
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct SynthsYml {
-    #[serde(default)]
-    pub initial_pairs: Vec<SynthPairYml>,
-}
-
 /// YAML-side mirror of [`crate::synth::pairs::SynthPairSpec`] — owned strings
 /// so deserialization works without `'static` lifetime gymnastics.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1197,25 +1179,6 @@ pub struct SynthPairYml {
     pub synth_sym: String,
     pub base_sym: String,
     pub quote_sym: String,
-}
-
-/// `triangulation:` block — the ONE piece of the auto-cross-triangulation
-/// eligibility test that can't be derived from existing ticker_id metadata.
-/// FX (any currency pair) and CM-spot (metals/commodities, excluding futures
-/// like expirable gold contracts) are both auto-detected from the ticker_id's
-/// own asset-class + instrument-type bits (see
-/// `core::triangulator::build_auto_cross_rules`) — zero config needed there.
-/// Stablecoins are all `AssetClass::CR` (same class as BTC/ETH/...), which
-/// carries no sub-class distinguishing "pegged to USD" from "not" - hence
-/// this explicit, small, YAML-owned list rather than a Rust-hardcoded one.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct TriangulationYml {
-    /// Base symbols (no "/USD" suffix) of USD-pegged stablecoins eligible for
-    /// automatic cross-triangulation against every other eligible leg
-    /// (FX majors, metals, other stablecoins). Each must already be
-    /// registered as `<SYM>/USD` under some oracle provider's `symbols:`.
-    #[serde(default)]
-    pub stablecoins: Vec<String>,
 }
 
 /// Source of the default `NXR_CONFIG` fallback path. Determines what
@@ -1664,8 +1627,7 @@ pub struct CexsYml {
     /// USD-pegged subset of `assets`: a PRICE property, not universe membership.
     /// Selects the tight ingest band plus absolute peg anchor, the peg-tight
     /// signed-quote ci ceiling, and it is the only thing that makes
-    /// `signed_quotes.single_source` legal on a feed. Distinct from
-    /// `triangulation.stablecoins`, which selects auto-cross leg eligibility.
+    /// `signed_quotes.single_source` legal on a feed.
     #[serde(default)]
     pub pegged: Vec<String>,
     /// Tokens pegged to a NON-USD fiat, as `TOKEN: ISO4217`. Deliberately NOT
@@ -2187,11 +2149,12 @@ mod tests {
             Some("USD"),
             "config.yml declares storage_quote but StorageYml did not read it"
         );
-        assert!(
-            storage.storage_quote_overrides.is_empty(),
-            "overrides must stay empty: they are for an asset with no USD route, not tuning"
-        );
         assert_eq!(storage.storage_quote_for("BTC"), "USD");
+        // Overrides are home-currency instruments only: no crypto asset.
+        for asset in storage.storage_quote_overrides.keys() {
+            assert!(!y.cexs.assets.iter().any(|a| a.eq_ignore_ascii_case(asset)), "{asset} is a crypto asset");
+        }
+        assert_eq!(storage.storage_quote_for("GER40"), "EUR");
     }
 
     /// U3/U4 grammar: an absolute share, a derived leg with its defaults, a

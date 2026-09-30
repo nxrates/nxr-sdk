@@ -1077,27 +1077,77 @@ pub struct IdxShardWriter {
     cur_day_end_ms: i64,
 }
 
-/// May `ticker_id` own a stored series? Every stored series is quoted in USD
-/// (`<asset>/USD`); every other pair is a cross inferred on read. Allowed
-/// exceptions, whose natural quote is not USD: a home-currency index
-/// (`DAX/EUR`, `NKY/JPY`) and USD-base FX (`USD/JPY`, pending owner ruling).
-pub fn storable_series(ticker_id: u64) -> bool {
-    use mitch::common::AssetClass;
+/// How `ticker_id` may own a stored series under the storage policy
+/// (`cexs.storage`: one default quote plus per-asset overrides): `Some(true)`
+/// = `<asset>/<its stored quote>`, `Some(false)` = the same pair inverted
+/// (`USD/JPY` stores JPY), `None` = refused, a cross composed on read.
+pub fn stored_orientation(ticker_id: u64) -> Option<bool> {
+    orientation_in(storage_policy(), ticker_id)
+}
+
+/// The process's storage policy (`cexs.storage` of the runtime config, read
+/// once: a denomination names directories, so it never changes live).
+pub fn storage_policy() -> &'static crate::pipeline_config::StorageYml {
+    static POLICY: std::sync::OnceLock<crate::pipeline_config::StorageYml> = std::sync::OnceLock::new();
+    POLICY.get_or_init(|| {
+        crate::pipeline_config::PipelineYml::load_default(crate::pipeline_config::ConfigHint::Runtime)
+            .map(|p| p.cexs.storage)
+            .unwrap_or_default()
+    })
+}
+
+/// [`stored_orientation`] under an explicit policy.
+pub fn orientation_in(policy: &crate::pipeline_config::StorageYml, ticker_id: u64) -> Option<bool> {
     use mitch::ticker::TickerId;
-    static USD: std::sync::OnceLock<(AssetClass, u16)> = std::sync::OnceLock::new();
-    let usd = *USD.get_or_init(|| {
-        let t = TickerId::from_raw(crate::resolve_ticker_id("EUR/USD"));
-        (t.quote_asset_class(), t.quote_asset_id())
-    });
-    let t = TickerId::from_raw(crate::series_canonical_ticker_id(ticker_id));
-    let (base, quote) = ((t.base_asset_class(), t.base_asset_id()), (t.quote_asset_class(), t.quote_asset_id()));
-    quote == usd || (quote.0 == AssetClass::FX && (base == usd || base.0 == AssetClass::IP))
+    type Asset = (mitch::common::AssetClass, u16);
+    let sides = |id: u64| {
+        let t = TickerId::from_raw(id);
+        ((t.base_asset_class(), t.base_asset_id()), (t.quote_asset_class(), t.quote_asset_id()))
+    };
+    let pair_sides = |b: &str, q: &str| crate::try_resolve_ticker_id(&format!("{b}/{q}")).map(sides);
+    let default = policy.storage_quote.as_deref().unwrap_or("USD");
+    let default_key: Asset = pair_sides("BTC", default)?.1;
+    let overrides: Vec<(Asset, Asset)> = policy
+        .storage_quote_overrides
+        .iter()
+        .filter_map(|(a, q)| pair_sides(a, q))
+        .collect();
+    let stored = |a: Asset| overrides.iter().find(|(b, _)| *b == a).map_or(default_key, |(_, q)| *q);
+    let (b, q) = sides(crate::series_canonical_ticker_id(ticker_id));
+    if b == q {
+        None
+    } else if q == stored(b) {
+        Some(true)
+    } else if b == stored(q) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// `B/Q` → `Q/B`, same instrument type and sub-type.
+pub fn inverse_ticker_id(ticker_id: u64) -> Option<u64> {
+    let t = mitch::ticker::TickerId::from_raw(ticker_id);
+    mitch::ticker::TickerId::new(
+        t.instrument_type(),
+        t.quote_asset_class(),
+        t.quote_asset_id(),
+        t.base_asset_class(),
+        t.base_asset_id(),
+        t.sub_type(),
+    )
+    .map_or(None, |t| Some(t.raw))
+}
+
+/// May `ticker_id` own a stored series ([`stored_orientation`])?
+pub fn storable_series(ticker_id: u64) -> bool {
+    stored_orientation(ticker_id).is_some()
 }
 
 fn ensure_storable(ticker_id: u64) -> Result<()> {
     anyhow::ensure!(
         storable_series(ticker_id),
-        "refused: {ticker_id} is not a USD-quoted series (crosses compose on read)"
+        "refused: {ticker_id} is not a stored-quote series (crosses compose on read)"
     );
     Ok(())
 }
@@ -2226,17 +2276,23 @@ mod tests {
 
 #[cfg(test)]
 mod storable_tests {
-    use super::storable_series;
+    use super::orientation_in;
 
     /// 09-30 audit: signers wrote `AUD/USDC`, core `QQQ/USDT`, `GHO/USDT`.
+    /// Default USD plus one override (`GER40` → EUR) is the whole policy.
     #[test]
-    fn only_usd_quoted_series_and_named_exceptions_store() {
-        let id = crate::resolve_ticker_id;
-        for ok in ["BTC/USD", "MON/USD", "EUR/USD", "NVDA/USD", "XAU/USD", "USD/JPY", "GER40/EUR", "HK50/HKD"] {
-            assert!(storable_series(id(ok)), "{ok}");
+    fn only_the_policy_quote_stores() {
+        let mut policy = crate::pipeline_config::StorageYml::default();
+        policy.storage_quote_overrides.insert("GER40".into(), "EUR".into());
+        let o = |s: &str| orientation_in(&policy, crate::resolve_ticker_id(s));
+        for fwd in ["BTC/USD", "MON/USD", "EUR/USD", "NVDA/USD", "XAU/USD", "QCAD/USD", "GER40/EUR"] {
+            assert_eq!(o(fwd), Some(true), "{fwd}");
         }
-        for no in ["USD/USDC", "AUD/USDC", "CAD/USDC", "QQQ/USDT", "GHO/USDT", "BTC/USDT", "BTC/EUR", "EUR/GBP", "USDT/BRL", "ETH/BTC"] {
-            assert!(!storable_series(id(no)), "{no}");
+        for inv in ["USD/JPY", "USD/KRW", "USD/USDC"] {
+            assert_eq!(o(inv), Some(false), "{inv}");
+        }
+        for no in ["AUD/USDC", "CAD/USDC", "QQQ/USDT", "GHO/USDT", "BTC/USDT", "BTC/EUR", "EUR/GBP", "USDT/BRL", "ETH/BTC", "GER40/USD", "HK50/HKD"] {
+            assert_eq!(o(no), None, "{no}");
         }
     }
 }

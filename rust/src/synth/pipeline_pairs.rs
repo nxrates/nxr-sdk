@@ -11,5 +11,5 @@ use crate::synth::cross_expand::{all_crypto_crosses, expand_cross_pairs};
 /// declaration.
 pub fn synth_pipeline_pairs(yml: &PipelineYml) -> Vec<SynthPairYml> {
     let crosses = all_crypto_crosses(&yml.cexs.assets);
-    expand_cross_pairs(&crosses, &yml.series.pipeline.pairs, &yml.cexs.storage.storage_quote_for(""))
+    expand_cross_pairs(&crosses, &yml.series.pipeline.pairs, &yml.cexs.storage.hub())
 }

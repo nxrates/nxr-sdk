@@ -890,6 +890,11 @@ pub struct SignedFeedYml {
     /// PEGGED-ONLY, enforced structurally at boot (`signed.rs` refuses a
     /// `single_source` feed whose symbol is not in the pegged class) — never by
     /// convention. See that validator for the safety argument.
+    ///
+    /// A composed row (a pair inferred from stored tickers, e.g. `USDS-USDC`)
+    /// ignores it: its floor is 2 live providers on its weakest leg, 1 when one
+    /// venue holds ≥ `SOLO_LIVE_SHARE` of live depth, or the row's declared
+    /// `min_active_providers` (`signed.rs::min_active_floor`).
     #[serde(default)]
     pub single_source: bool,
     /// When true, a failed `own_view` omits this feed from the signed blob instead
@@ -1869,13 +1874,16 @@ fn mult_seed() -> f64 {
 }
 
 impl StorageYml {
-    /// Storage quote for `asset`: its override, else the global, else `USD`.
+    /// The storage hub: the default stored quote (`storage_quote`, else USD).
+    pub fn hub(&self) -> String {
+        self.storage_quote.as_deref().unwrap_or("USD").to_ascii_uppercase()
+    }
+
+    /// Storage quote for `asset`: its override, else the hub.
     pub fn storage_quote_for(&self, asset: &str) -> String {
         self.storage_quote_overrides
             .get(&asset.to_ascii_uppercase())
-            .or(self.storage_quote.as_ref())
-            .cloned()
-            .unwrap_or_else(|| "USD".to_string())
+            .map_or_else(|| self.hub(), |q| q.to_ascii_uppercase())
     }
 
     /// Storage pair for a `parity_legs` key: a key naming a pair (`USD/KRW`,
@@ -1889,14 +1897,61 @@ impl StorageYml {
         }
     }
 
-    /// `base/quote` is a storage primary: the base's storage denomination, or
-    /// a pair-keyed `parity_legs` row.
-    pub fn is_storage_primary(&self, base: &str, quote: &str) -> bool {
-        quote.eq_ignore_ascii_case(&self.storage_quote_for(base))
-            || self
-                .parity_legs
-                .keys()
-                .any(|k| k.eq_ignore_ascii_case(&format!("{base}/{quote}")))
+    /// THE definition of a stored series. `Some(true)`: `<asset>/<its stored
+    /// quote>`. `Some(false)`: USD-base FX (`USD/JPY`), the market convention,
+    /// stored inverted because the hub is the base. `None`: a cross, composed
+    /// on read and never stored.
+    pub fn orientation(&self, ticker_id: u64) -> Option<bool> {
+        use mitch::ticker::TickerId;
+        type Asset = (mitch::common::AssetClass, u16);
+        let sides = |id: u64| -> (Asset, Asset) {
+            let t = TickerId::from_raw(id);
+            ((t.base_asset_class(), t.base_asset_id()), (t.quote_asset_class(), t.quote_asset_id()))
+        };
+        let hub = sides(crate::try_resolve_ticker_id(&format!("BTC/{}", self.hub()))?).1;
+        let stored = |a: Asset| {
+            self.storage_quote_overrides
+                .iter()
+                .filter_map(|(k, q)| crate::try_resolve_ticker_id(&format!("{k}/{q}")).map(sides))
+                .find(|(b, _)| *b == a)
+                .map_or(hub, |(_, q)| q)
+        };
+        let (b, q) = sides(crate::series_canonical_ticker_id(ticker_id));
+        if b == q {
+            None
+        } else if q == stored(b) {
+            Some(true)
+        } else if b == hub && q.0 == mitch::common::AssetClass::FX && stored(q) == hub {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Refuse a policy that cannot mean what it says: the hub and every
+    /// override pair resolve, keys are upper-case asset symbols, and no crypto
+    /// asset (`cexs.assets`) is overridden off the hub.
+    pub fn validate(&self, assets: &[String]) -> anyhow::Result<()> {
+        let hub = self.hub();
+        anyhow::ensure!(
+            crate::try_resolve_ticker_id(&format!("BTC/{hub}")).is_some(),
+            "storage_quote {hub} does not resolve"
+        );
+        for (k, q) in &self.storage_quote_overrides {
+            anyhow::ensure!(
+                *k == k.to_ascii_uppercase() && *q == q.to_ascii_uppercase(),
+                "storage_quote_overrides {k}: {q} must be upper-case"
+            );
+            anyhow::ensure!(
+                crate::try_resolve_ticker_id(&format!("{k}/{q}")).is_some(),
+                "storage_quote_overrides {k}: {k}/{q} does not resolve"
+            );
+            anyhow::ensure!(
+                !assets.iter().any(|a| a.eq_ignore_ascii_case(k)),
+                "storage_quote_overrides {k}: a crypto asset is stored in the hub"
+            );
+        }
+        Ok(())
     }
 
     /// `(provider, leg pair)` of every pair-keyed row's venue leg (`USDT/KRW`

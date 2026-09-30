@@ -1077,65 +1077,47 @@ pub struct IdxShardWriter {
     cur_day_end_ms: i64,
 }
 
-/// How `ticker_id` may own a stored series under the storage policy
-/// (`cexs.storage`: one default quote plus per-asset overrides): `Some(true)`
-/// = `<asset>/<its stored quote>`, `Some(false)` = the same pair inverted
-/// (`USD/JPY` stores JPY), `None` = refused, a cross composed on read.
+/// [`StorageYml::orientation`](crate::pipeline_config::StorageYml::orientation)
+/// under the process policy.
 pub fn stored_orientation(ticker_id: u64) -> Option<bool> {
-    orientation_in(storage_policy(), ticker_id)
+    storage_policy().orientation(ticker_id)
 }
 
-/// The process's storage policy (`cexs.storage`, read once: a denomination
-/// names directories, so it never changes live). The runtime config, else the
-/// binary-local one; with neither on disk the default (`storage_quote` alone).
-/// A config that exists but does not parse aborts: a wrong policy would
-/// silently refuse series.
+static POLICY: std::sync::OnceLock<crate::pipeline_config::StorageYml> = std::sync::OnceLock::new();
+
+/// Install the process's storage policy from its boot config, validated. A
+/// denomination names directories, so it is fixed for the process.
+pub fn init_storage_policy(pl: &crate::pipeline_config::PipelineYml) -> Result<()> {
+    pl.cexs.storage.validate(&pl.cexs.assets)?;
+    POLICY
+        .set(pl.cexs.storage.clone())
+        .map_err(|_| anyhow::anyhow!("storage policy already installed"))
+}
+
+/// The process's storage policy. A binary that did not install one (offline
+/// tools) reads the runtime config, else the binary-local one, validated;
+/// neither on disk, or invalid, aborts: a wrong policy silently refuses or
+/// admits series. Debug builds (tests) fall back to the hub alone.
 pub fn storage_policy() -> &'static crate::pipeline_config::StorageYml {
     use crate::pipeline_config::{ConfigHint, PipelineYml};
-    static POLICY: std::sync::OnceLock<crate::pipeline_config::StorageYml> = std::sync::OnceLock::new();
     POLICY.get_or_init(|| {
-        let Some(path) = [ConfigHint::Runtime, ConfigHint::Bin]
+        let path = [ConfigHint::Runtime, ConfigHint::Bin]
             .into_iter()
             .map(PipelineYml::resolve_path)
-            .find(|p| p.exists())
-        else {
-            warn!("no pipeline config on disk: storage policy = default quote, no overrides");
+            .find(|p| p.exists());
+        let Some(path) = path else {
+            assert!(cfg!(debug_assertions), "storage policy: no pipeline config on disk");
+            warn!("no pipeline config on disk: storage policy = hub only (debug build)");
             return Default::default();
         };
-        match PipelineYml::load(&path) {
-            Ok(p) => p.cexs.storage,
-            Err(e) => panic!("storage policy: {} does not parse: {e:#}", path.display()),
-        }
+        let pl = PipelineYml::load(&path)
+            .unwrap_or_else(|e| panic!("storage policy: {} does not parse: {e:#}", path.display()));
+        pl.cexs
+            .storage
+            .validate(&pl.cexs.assets)
+            .unwrap_or_else(|e| panic!("storage policy: {e:#}"));
+        pl.cexs.storage
     })
-}
-
-/// [`stored_orientation`] under an explicit policy.
-pub fn orientation_in(policy: &crate::pipeline_config::StorageYml, ticker_id: u64) -> Option<bool> {
-    use mitch::ticker::TickerId;
-    type Asset = (mitch::common::AssetClass, u16);
-    let sides = |id: u64| {
-        let t = TickerId::from_raw(id);
-        ((t.base_asset_class(), t.base_asset_id()), (t.quote_asset_class(), t.quote_asset_id()))
-    };
-    let pair_sides = |b: &str, q: &str| crate::try_resolve_ticker_id(&format!("{b}/{q}")).map(sides);
-    let default = policy.storage_quote.as_deref().unwrap_or("USD");
-    let default_key: Asset = pair_sides("BTC", default)?.1;
-    let overrides: Vec<(Asset, Asset)> = policy
-        .storage_quote_overrides
-        .iter()
-        .filter_map(|(a, q)| pair_sides(a, q))
-        .collect();
-    let stored = |a: Asset| overrides.iter().find(|(b, _)| *b == a).map_or(default_key, |(_, q)| *q);
-    let (b, q) = sides(crate::series_canonical_ticker_id(ticker_id));
-    if b == q {
-        None
-    } else if q == stored(b) {
-        Some(true)
-    } else if b == stored(q) {
-        Some(false)
-    } else {
-        None
-    }
 }
 
 /// `B/Q` → `Q/B`, same instrument type and sub-type.
@@ -2289,7 +2271,6 @@ mod tests {
 
 #[cfg(test)]
 mod storable_tests {
-    use super::orientation_in;
 
     /// 09-30 audit: signers wrote `AUD/USDC`, core `QQQ/USDT`, `GHO/USDT`.
     /// Default USD plus one override (`GER40` → EUR) is the whole policy.
@@ -2297,14 +2278,14 @@ mod storable_tests {
     fn only_the_policy_quote_stores() {
         let mut policy = crate::pipeline_config::StorageYml::default();
         policy.storage_quote_overrides.insert("GER40".into(), "EUR".into());
-        let o = |s: &str| orientation_in(&policy, crate::resolve_ticker_id(s));
+        let o = |s: &str| policy.orientation(crate::resolve_ticker_id(s));
         for fwd in ["BTC/USD", "MON/USD", "EUR/USD", "NVDA/USD", "XAU/USD", "QCAD/USD", "GER40/EUR"] {
             assert_eq!(o(fwd), Some(true), "{fwd}");
         }
-        for inv in ["USD/JPY", "USD/KRW", "USD/USDC"] {
+        for inv in ["USD/JPY", "USD/KRW"] {
             assert_eq!(o(inv), Some(false), "{inv}");
         }
-        for no in ["AUD/USDC", "CAD/USDC", "QQQ/USDT", "GHO/USDT", "BTC/USDT", "BTC/EUR", "EUR/GBP", "USDT/BRL", "ETH/BTC", "GER40/USD", "HK50/HKD"] {
+        for no in ["USD/USDC", "USD/GER40", "AUD/USDC", "CAD/USDC", "QQQ/USDT", "GHO/USDT", "BTC/USDT", "BTC/EUR", "EUR/GBP", "USDT/BRL", "ETH/BTC", "GER40/USD", "HK50/HKD"] {
             assert_eq!(o(no), None, "{no}");
         }
     }

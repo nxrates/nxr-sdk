@@ -311,7 +311,7 @@ mod tests {
     fn decode_round_trip_batch() {
         let input: Vec<WsIndex> = (0..8)
             .map(|i| WsIndex {
-                epoch_ms: 1_700_000_000_000 + i as u64 * 100,
+                epoch_ms: 1_700_000_000_000 + i * 100,
                 ticker: 1000 + i,
                 mid: 100.0 + i as f64,
                 bid: 99.5 + i as f64,

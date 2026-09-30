@@ -103,6 +103,7 @@ impl IndexRecord {
     fn rejected(&self) -> u8 { self.inner.index.rejected }
 
     /// Wire-format bytes (56 B).
+    #[allow(clippy::wrong_self_convention)] // ponytail: Python-visible name, pyclass cannot take self by value
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         pyo3::types::PyBytes::new_bound(py, bytemuck::bytes_of(&self.inner))
     }
@@ -201,6 +202,7 @@ impl Bar {
     #[getter]
     fn kind(&self) -> u8 { self.inner.kind }
 
+    #[allow(clippy::wrong_self_convention)] // ponytail: Python-visible name, pyclass cannot take self by value
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         pyo3::types::PyBytes::new_bound(py, bytemuck::bytes_of(&self.inner))
     }
@@ -247,6 +249,7 @@ impl Tick {
     #[getter]
     fn mid(&self) -> f64 { (self.inner.bid + self.inner.ask) / 2.0 }
 
+    #[allow(clippy::wrong_self_convention)] // ponytail: Python-visible name, pyclass cannot take self by value
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         pyo3::types::PyBytes::new_bound(py, bytemuck::bytes_of(&self.inner))
     }

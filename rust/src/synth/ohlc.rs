@@ -21,18 +21,13 @@ use std::collections::HashMap;
 use super::paths::SynthPath;
 
 /// Per-leg variance estimator selector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VarianceEstimator {
     /// Parkinson (1980) — range-only, drift-biased.
     Parkinson,
     /// Rogers-Satchell (1991) — drift-robust. **Default.**
+    #[default]
     RogersSatchell,
-}
-
-impl Default for VarianceEstimator {
-    fn default() -> Self {
-        Self::RogersSatchell
-    }
 }
 
 /// Minimal OHLC tuple (no timestamp).
@@ -146,7 +141,7 @@ pub fn reconstruct_synth_ohlc<F: Fn(usize, usize) -> f64>(
             var += 2.0 * (e[i] as f64) * (e[j] as f64) * rij * (v[i] * v[j]).sqrt();
         }
     }
-    if !(var >= V_FLOOR) {
+    if var.partial_cmp(&V_FLOOR).is_none_or(|o| o.is_lt()) {
         var = V_FLOOR;
     }
 

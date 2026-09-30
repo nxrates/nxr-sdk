@@ -2103,7 +2103,7 @@ impl CalibrationYml {
                 self.mult_bounds[0], MULT_LOWER_BOUND
             ));
         }
-        if !(self.mult_bounds[1] > self.mult_bounds[0]) {
+        if self.mult_bounds[1].partial_cmp(&self.mult_bounds[0]).is_none_or(|o| o.is_le()) {
             return Err(format!(
                 "calibration.mult_bounds[1]={} must be > mult_bounds[0]={} (it seeds the \
                  bisection's INITIAL upper bracket; the search auto-expands it upward as needed)",
@@ -2665,7 +2665,7 @@ mod tests {
         );
 
         // Absent pair ⇒ no override ⇒ normal fit path.
-        assert!(y.renko_k_overrides.get("ETH/USDT").is_none());
+        assert!(!y.renko_k_overrides.contains_key("ETH/USDT"));
 
         // Default (field omitted) ⇒ empty map.
         let c = cal();

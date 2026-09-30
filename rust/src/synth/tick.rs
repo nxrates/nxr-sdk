@@ -96,7 +96,7 @@ pub fn compose_legs(legs: &[(i8, LegTick)]) -> Option<SynthTick> {
     }
 
     // Degeneracy guard: crossed / non-positive quote → conf=0 (signal stale).
-    if !(ask >= bid) || bid <= 0.0 || ask <= 0.0 {
+    if ask.partial_cmp(&bid).is_none_or(|o| o.is_lt()) || bid <= 0.0 || ask <= 0.0 {
         conf = 0;
     }
 

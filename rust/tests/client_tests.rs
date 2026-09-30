@@ -87,7 +87,7 @@ async fn tickers_detail_typed_parse_and_cache() {
     assert_eq!(d1.tickers[0].ticker_id, 435315551398526976);
     assert_eq!(d1.tickers[0].kinds["idx"].stride_bytes, 56);
     assert_eq!(d1.tickers[0].kinds["idx"].shards.status, ShardStatus::Live);
-    assert_eq!(d1.tickers[1].native, false);
+    assert!(!d1.tickers[1].native);
     assert_eq!(d1.tickers[1].alias_of.as_deref(), Some("ETH/BTC"));
     let legs = d1.tickers[1].synth_legs.as_ref().unwrap();
     assert_eq!(legs.len(), 2);

@@ -204,10 +204,10 @@ impl MulticastSubscriber {
         if let Ok(mut g) = self.rx.lock() {
             g.take();
         }
-        if let Ok(mut g) = self.join.lock() {
-            if let Some(j) = g.take() {
-                let _ = j.join();
-            }
+        if let Ok(mut g) = self.join.lock()
+            && let Some(j) = g.take()
+        {
+            let _ = j.join();
         }
     }
 

@@ -341,11 +341,6 @@ impl NxrClient {
         }
     }
 
-    /// Default-endpoint constructor — `NxrClient::default()` ≡ `NxrClient::new(DEFAULT_BASE_URL)`.
-    pub fn default() -> Self {
-        Self::new(DEFAULT_BASE_URL)
-    }
-
     /// Attach an API key (`X-NXR-Key`) for paid plan access.
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         let k = key.into();
@@ -426,7 +421,7 @@ impl NxrClient {
     /// `GET /v1/tickers/detail` — the REGISTERED inventory (cached).
     ///
     /// Unparameterised, so it serves the registered subset that carries `kinds`
-    /// + shard status. There is no whole-universe JSON body: use
+    /// and shard status. There is no whole-universe JSON body: use
     /// [`Self::tickers_ids`] for the id universe and
     /// [`Self::tickers_detail_for`] for rich rows on specific tickers.
     pub async fn tickers_detail(&self) -> Result<TickersDetailResponse> {
@@ -703,7 +698,7 @@ impl NxrClient {
                 }
             );
         }
-        Ok(r.bytes().await.with_context(|| format!("bytes {}", path))?)
+        r.bytes().await.with_context(|| format!("bytes {}", path))
     }
 }
 
@@ -949,8 +944,10 @@ pub fn decode_packed_ids(bytes: &[u8]) -> Result<Vec<u64>> {
         );
     }
     Ok(bytes
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect())
 }
 

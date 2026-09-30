@@ -335,6 +335,7 @@ impl RenkoGenerator {
     }
 
     #[inline]
+    #[allow(clippy::too_many_arguments)] // ponytail: hot-path scalar args, a params struct costs a copy per tick
     fn emit_bar<F>(
         &mut self,
         open_ts: i64,
@@ -392,6 +393,7 @@ impl RenkoGenerator {
     /// Feed one IndexRecord-derived observation. Drives brick detection AND
     /// accumulates microstructure (RV/BV/drift/OFI/spread/quality) so the
     /// emitted Bar carries the enrichment block.
+    #[allow(clippy::too_many_arguments)] // ponytail: hot-path scalar args, a params struct costs a copy per tick
     pub fn feed_index_record<F>(
         &mut self,
         ts: i64,

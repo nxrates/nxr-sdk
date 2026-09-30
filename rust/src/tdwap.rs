@@ -1617,7 +1617,7 @@ mod unmapped_bloc_tests {
             compute_vwap_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now).unwrap();
         assert_eq!(mitch::index::conf_active_count(snap.confidence), 1);
         assert!(
-            u32::from(mitch::index::conf_active_count(snap.confidence)) < 2,
+            mitch::index::conf_active_count(snap.confidence) < 2,
             "one ticking leg must fail MIN_ACTIVE_PROVIDERS regardless of weight share"
         );
     }

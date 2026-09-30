@@ -12,6 +12,7 @@
 //! Caveman: zero-copy where possible, fail loud on bad input.
 
 #![allow(unsafe_op_in_unsafe_fn)] // pyo3 macros expand to unsafe blocks already gated by the harness
+#![allow(clippy::useless_conversion)] // ponytail: pyo3 0.22 #[pyfunction]/#[pymethods] expansion false positive on PyResult, drop on pyo3 >= 0.23
 
 mod decoders;
 mod resolve;

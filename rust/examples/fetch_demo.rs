@@ -4,7 +4,6 @@
 
 use std::time::Instant;
 
-use bytemuck;
 use nxr_sdk::ipc::record::IndexRecord;
 use serde::Deserialize;
 

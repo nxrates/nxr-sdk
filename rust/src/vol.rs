@@ -32,6 +32,7 @@ const MIN_BLEND_BINS: usize = 48;
 ///
 /// Bins are typically 30 minutes wide. Implementors provide O(1) length and
 /// O(1) sigma lookup, plus binary-search-style timestamp-to-index mapping.
+#[allow(clippy::len_without_is_empty)] // ponytail: bins are never queried for emptiness
 pub trait VolSource {
     /// Number of bins stored.
     fn len(&self) -> usize;
@@ -479,6 +480,7 @@ impl LiveVolRing {
         finalized
     }
 
+    #[allow(clippy::too_many_arguments)] // ponytail: hot-path scalar args, a params struct costs a copy per tick
     fn touch_bin(
         &mut self,
         bs: i64,
@@ -791,7 +793,7 @@ mod tests {
         let n_spike = 6usize; // ~3 h of spike bins
 
         let mut sigmas = vec![calm_sigma; n_calm];
-        sigmas.extend(std::iter::repeat(spike_sigma).take(n_spike));
+        sigmas.extend(std::iter::repeat_n(spike_sigma, n_spike));
         let src = VecVolSource(sigmas);
 
         // Short blend windows so the test runs without 180 days of data, but the
@@ -873,8 +875,8 @@ mod tests {
     #[test]
     fn spike_responsive_never_below_blend() {
         let mut sigmas = vec![0.004_f64; 300];
-        sigmas.extend(std::iter::repeat(0.02_f64).take(5)); // spike
-        sigmas.extend(std::iter::repeat(0.004_f64).take(50)); // calm recovery
+        sigmas.extend(std::iter::repeat_n(0.02_f64, 5)); // spike
+        sigmas.extend(std::iter::repeat_n(0.004_f64, 50)); // calm recovery
         let src = VecVolSource(sigmas);
 
         let cfg_off = VolConfig {

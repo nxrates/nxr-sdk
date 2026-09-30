@@ -1085,14 +1085,27 @@ pub fn stored_orientation(ticker_id: u64) -> Option<bool> {
     orientation_in(storage_policy(), ticker_id)
 }
 
-/// The process's storage policy (`cexs.storage` of the runtime config, read
-/// once: a denomination names directories, so it never changes live).
+/// The process's storage policy (`cexs.storage`, read once: a denomination
+/// names directories, so it never changes live). The runtime config, else the
+/// binary-local one; with neither on disk the default (`storage_quote` alone).
+/// A config that exists but does not parse aborts: a wrong policy would
+/// silently refuse series.
 pub fn storage_policy() -> &'static crate::pipeline_config::StorageYml {
+    use crate::pipeline_config::{ConfigHint, PipelineYml};
     static POLICY: std::sync::OnceLock<crate::pipeline_config::StorageYml> = std::sync::OnceLock::new();
     POLICY.get_or_init(|| {
-        crate::pipeline_config::PipelineYml::load_default(crate::pipeline_config::ConfigHint::Runtime)
-            .map(|p| p.cexs.storage)
-            .unwrap_or_default()
+        let Some(path) = [ConfigHint::Runtime, ConfigHint::Bin]
+            .into_iter()
+            .map(PipelineYml::resolve_path)
+            .find(|p| p.exists())
+        else {
+            warn!("no pipeline config on disk: storage policy = default quote, no overrides");
+            return Default::default();
+        };
+        match PipelineYml::load(&path) {
+            Ok(p) => p.cexs.storage,
+            Err(e) => panic!("storage policy: {} does not parse: {e:#}", path.display()),
+        }
     })
 }
 

@@ -1207,8 +1207,8 @@ impl ConfigHint {
 }
 
 impl PipelineYml {
-    /// Every symbol the config declares directly: `cexs.cross_pairs` plus every
-    /// `oracles.providers.<p>.symbols` key, uppercased. Does NOT include derived
+    /// Every symbol the config declares directly: every relay (oracle and
+    /// broker) symbol, uppercased. Does NOT include derived
     /// auto-cross outputs (those come from `build_auto_cross_rules`, whose owner
     /// is the aggregator) nor the `NXR_SYMBOLS` env base list.
     ///
@@ -1222,9 +1222,6 @@ impl PipelineYml {
     /// need no volume for the fit — were never candidates (found 2026-07-25).
     pub fn configured_symbols(&self) -> std::collections::BTreeSet<String> {
         let mut out = std::collections::BTreeSet::new();
-        for sym in &self.cexs.cross_pairs {
-            out.insert(sym.to_uppercase());
-        }
         // Oracle and broker symbols count too: this set is what the aggregator
         // admits, so a section missing here is silently dropped as
         // `unknown_ticker` no matter how healthy the forwarder is. The
@@ -1591,8 +1588,7 @@ pub struct RateLimitsYml {
 /// hardcoded `const` arrays in `core/`, `weights/`, `series-factory/bin/*`
 /// now read from these fields (operator mandate 2026-05-29: NO hardcoded
 /// vars; consolidated config). Empty `Vec` = falls back to sdk default
-/// when callsite needs one (e.g. bridge_stables defaults to FNV-frozen
-/// audit list).
+/// when the callsite needs one.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CexsYml {
     /// Min 24h USD volume for a volatile asset to be eligible (weights scraper).
@@ -1647,10 +1643,6 @@ pub struct CexsYml {
     /// entry. Values are compared case-insensitively.
     #[serde(default)]
     pub fiat_pegged: BTreeMap<String, String>,
-    /// Bridge-quoted stables (subset of `pegged` used for synth-USD
-    /// derivation). If empty, callers fall back to `pegged`.
-    #[serde(default)]
-    pub bridge_stables: Vec<String>,
     /// USD fiat quote aliases recognized by the synth-injection builder as
     /// the "raw USD" leg (distinct from on-chain stables). Was: hardcoded
     /// `"USD"` literal at `core/src/weights.rs:226` (phase 59.R3.C5.A3,
@@ -1674,12 +1666,6 @@ pub struct CexsYml {
     /// All scrape-able assets (input list for the weights scraper).
     #[serde(default)]
     pub assets: Vec<String>,
-    /// Cross-currency / cross-base crypto pairs forwarded by upstream providers
-    /// (e.g. `BTC/EUR`, `ETH/BTC`, `KZT/USDT`). Was: `core::main::CRYPTO_CROSS_PAIRS`
-    /// (phase 59.R2C.2). The core sink pre-registers ticker IDs for each pair
-    /// in `symbol_map` so they round-trip through the REST/WS API.
-    #[serde(default)]
-    pub cross_pairs: Vec<String>,
     /// Per-exchange metadata. Keyed by lowercase exchange name (e.g. `binance`).
     /// Mitch IDs canonical here (phase 59.R2C.3 dropped the Rust mirror).
     /// URLs canonical here (phase 59.R2C.4 dropped the per-handler hardcode).
@@ -1718,11 +1704,9 @@ pub struct StorageYml {
     /// process. Every market of an asset is converted straight into it.
     /// Absent = `USD`.
     pub storage_quote: Option<String>,
-    /// Per-asset exceptions, keyed by base asset symbol. Keep EMPTY: it exists
-    /// for an asset with no credible route to the storage quote, not as a
-    /// tuning surface. An unreachable storage quote must fail loudly at boot
-    /// rather than publish in a foreign denomination, which would put two units
-    /// in one series.
+    /// Per-asset stored quote, keyed by base asset symbol: a home-currency
+    /// instrument (`GER40: EUR`). With `storage_quote` this is the whole storage
+    /// policy; every other pair is inferred on read (`nxr_sdk::shard`).
     #[serde(default)]
     pub storage_quote_overrides: std::collections::BTreeMap<String, String>,
     /// PARITY LEGS, keyed by base asset: another instrument's price joins the
@@ -2687,7 +2671,6 @@ mod tests {
              \x20 vol: { ema_period: 1, winsorize_pct: [0.05, 0.95], winsorize_min_samples: 1 }\n\
              \x20 calibration: { target_bpd: 300, min_window_days: 30, mult_bounds: [0.05, 4.0] }\n\
              \x20 pipeline: { bootstrap_days: 1 }\n\
-             cexs:\n  cross_pairs: [\"ETH/BTC\"]\n\
              oracles:\n  providers:\n    pyth:\n      symbols:\n        XAU/USD: \"1\"\n\
              ctrader:\n  providers:\n    pepperstone:\n      symbols:\n        eur/usd: EURUSD\n",
         )
@@ -2695,7 +2678,7 @@ mod tests {
 
         let all = y.configured_symbols();
         assert!(all.contains("EUR/USD"), "broker symbol must be served");
-        assert!(all.contains("ETH/BTC") && all.contains("XAU/USD"));
+        assert!(all.contains("XAU/USD"));
 
         let relay = y.relay_symbols();
         assert!(

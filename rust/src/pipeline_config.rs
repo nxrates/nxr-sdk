@@ -1265,8 +1265,7 @@ impl PipelineYml {
 
     /// Every symbol a RELAY forwarder observes directly: `oracles.providers.*`
     /// (`nxr-oracle`) plus `ctrader.providers.*` (`nxr-ctrader`). This is
-    /// `configured_symbols()` minus the cross-only remainder of
-    /// `cexs.cross_pairs`, and it is the half that gets a persisted `.idx`.
+    /// `configured_symbols()`, the half that gets a persisted `.idx`.
     ///
     /// Used by the offline tools that must not touch a cross: a cross is a pure
     /// function of its legs, is composed on read, and is gated out of the sink

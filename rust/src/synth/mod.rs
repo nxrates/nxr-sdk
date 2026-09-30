@@ -59,7 +59,6 @@ pub mod pipeline_pairs;
 pub mod replay;
 pub mod rolling;
 pub mod tick;
-pub mod triangulation_rules;
 
 pub use compose::compose_cross_s10;
 pub use idx_source::{DEFAULT_EPHEMERAL_CAPACITY, EphemeralIdxSource};

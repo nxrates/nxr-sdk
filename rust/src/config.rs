@@ -140,8 +140,8 @@ impl NxrConfig {
             indexes_dir,
             // Forwarder subscription manifest. POLICY (operator 2026-06-02,
             // amended 2026-07-08): NO VOLATILE crypto symbol is quoted vs USD
-            // natively — `<crypto>/USD` stays SYNTH `<crypto>/USDT × USDT/USD`
-            // (see `synth::triangulation_rules`, USDT/USD-anchored). Native
+            // natively — `<crypto>/USD` is the storage mark derived from every
+            // surveyed market (`core::storage`). Native
             // `/USD` tickers are the CEX fiat-book anchors USDT/USD + USDC/USD
             // (kraken/binance/bitstamp/gemini/coinbase, listed here). The Pyth
             // grant covers 7 feeds (`config.yml oracles.providers.pyth.symbols`);

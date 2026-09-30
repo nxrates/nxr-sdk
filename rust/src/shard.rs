@@ -1077,6 +1077,31 @@ pub struct IdxShardWriter {
     cur_day_end_ms: i64,
 }
 
+/// May `ticker_id` own a stored series? Every stored series is quoted in USD
+/// (`<asset>/USD`); every other pair is a cross inferred on read. Allowed
+/// exceptions, whose natural quote is not USD: a home-currency index
+/// (`DAX/EUR`, `NKY/JPY`) and USD-base FX (`USD/JPY`, pending owner ruling).
+pub fn storable_series(ticker_id: u64) -> bool {
+    use mitch::common::AssetClass;
+    use mitch::ticker::TickerId;
+    static USD: std::sync::OnceLock<(AssetClass, u16)> = std::sync::OnceLock::new();
+    let usd = *USD.get_or_init(|| {
+        let t = TickerId::from_raw(crate::resolve_ticker_id("EUR/USD"));
+        (t.quote_asset_class(), t.quote_asset_id())
+    });
+    let t = TickerId::from_raw(crate::series_canonical_ticker_id(ticker_id));
+    let (base, quote) = ((t.base_asset_class(), t.base_asset_id()), (t.quote_asset_class(), t.quote_asset_id()));
+    quote == usd || (quote.0 == AssetClass::FX && (base == usd || base.0 == AssetClass::IP))
+}
+
+fn ensure_storable(ticker_id: u64) -> Result<()> {
+    anyhow::ensure!(
+        storable_series(ticker_id),
+        "refused: {ticker_id} is not a USD-quoted series (crosses compose on read)"
+    );
+    Ok(())
+}
+
 impl IdxShardWriter {
     /// Open the writer for `ticker_id` under `data_root`. `gate` toggles the
     /// delta-only-append behavior (off = append every record, for parity with
@@ -1093,6 +1118,7 @@ impl IdxShardWriter {
     /// caller can decide to skip the ticker (offline tools) vs hard-fail
     /// (live aggregator — a second instance starting up means a deploy bug).
     pub fn open_with(data_root: &Path, ticker_id: u64, gate: bool, manifest: bool) -> Result<Self> {
+        ensure_storable(ticker_id)?;
         let dir = idx_dir(data_root, ticker_id);
         fs::create_dir_all(&dir)
             .with_context(|| format!("create_dir_all {}", dir.display()))?;
@@ -1457,6 +1483,7 @@ impl BarShardWriter {
         ext: &'static str,
         manifest: bool,
     ) -> Result<Self> {
+        ensure_storable(ticker_id)?;
         let dir = bars_dir(data_root, ticker_id);
         fs::create_dir_all(&dir)
             .with_context(|| format!("create_dir_all {}", dir.display()))?;
@@ -1652,6 +1679,11 @@ impl Drop for BarShardWriter {
 
 #[cfg(test)]
 mod tests {
+    /// Fixture id: writers store USD-quoted series only (`storable_series`);
+    /// each test has its own root, so one id serves all.
+    fn t(_n: u64) -> u64 {
+        crate::resolve_ticker_id("BTC/USD")
+    }
     use super::*;
     use crate::mitch::header::MitchHeader;
     use crate::mitch::common::message_type;
@@ -1691,7 +1723,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let t0 = t_recent_day_start();
         {
-            let mut w = IdxShardWriter::open(&root, 703, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(703), true).unwrap();
             assert!(w.append(&rec_vol(t0, 100.0, 101.0, 5, 5, 10)).unwrap()); // first
             assert!(w.append(&rec_vol(t0 + 100, 100.0, 101.0, 9, 5, 10)).unwrap()); // vbid Δ → kept
             assert!(w.append(&rec_vol(t0 + 200, 100.0, 101.0, 9, 9, 10)).unwrap()); // vask Δ → kept
@@ -1699,7 +1731,7 @@ mod tests {
             assert!(!w.append(&rec_vol(t0 + 400, 100.0, 101.0, 9, 9, 22)).unwrap()); // identical → dropped
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 703);
+        let dir = idx_dir(&root, t(703));
         let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 4); // 4 distinct observations kept, 1 identical dropped
         let _ = fs::remove_dir_all(&root);
@@ -1758,13 +1790,13 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let t0 = t_recent_day_start();
         {
-            let mut w = IdxShardWriter::open(&root, 700, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(700), true).unwrap();
             assert!(w.append(&rec(t0, 100.0, 101.0)).unwrap()); // first: written
             assert!(!w.append(&rec(t0 + 100, 100.0, 101.0)).unwrap()); // same: gated (sentinel not yet due)
             assert!(w.append(&rec(t0 + 200, 100.5, 101.5)).unwrap()); // moved: written
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 700);
+        let dir = idx_dir(&root, t(700));
         let shards = list_shards(&dir, "idx").unwrap();
         assert_eq!(shards.len(), 1);
         let recs = read_shard_aligned::<IndexRecord>(&shards[0].1).unwrap();
@@ -1780,13 +1812,13 @@ mod tests {
         let day1 = t_recent_day_start() - MS_PER_DAY;
         let day2 = day1 + 86_400_000;
         {
-            let mut w = IdxShardWriter::open(&root, 701, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(701), true).unwrap();
             assert!(w.append(&rec(day1, 100.0, 101.0)).unwrap());
             // Same quote but next day → still written (new shard).
             assert!(w.append(&rec(day2, 100.0, 101.0)).unwrap());
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 701);
+        let dir = idx_dir(&root, t(701));
         assert_eq!(list_shards(&dir, "idx").unwrap().len(), 2);
         let _ = fs::remove_dir_all(&root);
     }
@@ -1801,7 +1833,7 @@ mod tests {
         let day1 = t_recent_day_start() - MS_PER_DAY;
         let day2 = day1 + MS_PER_DAY;
         {
-            let mut w = IdxShardWriter::open(&root, 704, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(704), true).unwrap();
             // day1 first (chrono path: no window yet) → shard A
             assert!(w.append(&rec(day1, 100.0, 101.0)).unwrap());
             // day1 mid (fast path in-window) price move → same shard A
@@ -1816,7 +1848,7 @@ mod tests {
             assert!(w.append(&rec(day2 + MS_PER_HOUR, 100.7, 101.7)).unwrap());
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 704);
+        let dir = idx_dir(&root, t(704));
         let shards = list_shards(&dir, "idx").unwrap();
         assert_eq!(shards.len(), 2, "two daily shards");
         let a = read_shard_aligned::<IndexRecord>(&shards[0].1).unwrap();
@@ -1832,18 +1864,18 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let t0 = t_recent_day_start();
         {
-            let mut w = IdxShardWriter::open(&root, 702, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(702), true).unwrap();
             w.append(&rec(t0, 100.0, 101.0)).unwrap();
             w.flush().unwrap();
         }
         {
             // Restart: same quote should be gated (seeded from tail), not re-written.
             // +100ms keeps us well under SENTINEL_INTERVAL_MS so no sentinel fires.
-            let mut w = IdxShardWriter::open(&root, 702, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(702), true).unwrap();
             assert!(!w.append(&rec(t0 + 100, 100.0, 101.0)).unwrap());
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 702);
+        let dir = idx_dir(&root, t(702));
         let recs = read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 1);
         let _ = fs::remove_dir_all(&root);
@@ -1860,7 +1892,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let t0 = t_recent_day_start();
         {
-            let mut w = IdxShardWriter::open(&root, 705, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(705), true).unwrap();
             // Distinct bid/ask each row so the delta gate keeps all of them -
             // need a shard meaningfully larger than the tail window below.
             for i in 0..200i64 {
@@ -1869,7 +1901,7 @@ mod tests {
             }
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 705);
+        let dir = idx_dir(&root, t(705));
         let path = list_shards(&dir, "idx").unwrap()[0].1.clone();
 
         let full = read_shard_aligned::<IndexRecord>(&path).unwrap();
@@ -1901,14 +1933,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let t0 = t_recent_day_start();
         {
-            let mut w = IdxShardWriter::open(&root, 707, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(707), true).unwrap();
             for i in 0..200i64 {
                 let px = 100.0 + i as f64 * 0.01;
                 w.append(&rec(t0 + i * 100, px, px + 1.0)).unwrap();
             }
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 707);
+        let dir = idx_dir(&root, t(707));
         let path = list_shards(&dir, "idx").unwrap()[0].1.clone();
 
         let full = read_shard_aligned::<IndexRecord>(&path).unwrap();
@@ -1940,12 +1972,12 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let t0 = t_recent_day_start();
         {
-            let mut w = IdxShardWriter::open(&root, 706, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(706), true).unwrap();
             w.append(&rec(t0, 100.0, 101.0)).unwrap();
             w.append(&rec(t0 + 100, 100.5, 101.5)).unwrap();
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 706);
+        let dir = idx_dir(&root, t(706));
         let path = list_shards(&dir, "idx").unwrap()[0].1.clone();
 
         // Window (10 records) far larger than the actual file (2 records).
@@ -1968,7 +2000,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let t0 = t_recent_day_start();
         {
-            let mut w = IdxShardWriter::open(&root, 704, true).unwrap();
+            let mut w = IdxShardWriter::open(&root, t(704), true).unwrap();
             assert!(w.append(&rec(t0, 100.0, 101.0)).unwrap()); // first: written
             // Half-interval later, unchanged quote → still gated, no sentinel.
             assert!(!w
@@ -1980,7 +2012,7 @@ mod tests {
                 .unwrap());
             w.flush().unwrap();
         }
-        let dir = idx_dir(&root, 704);
+        let dir = idx_dir(&root, t(704));
         let recs =
             read_shard_aligned::<IndexRecord>(&list_shards(&dir, "idx").unwrap()[0].1).unwrap();
         assert_eq!(recs.len(), 2);
@@ -1998,7 +2030,7 @@ mod tests {
         // R1 H1: future ts > now+60s is a hard error (mis-routes shard date).
         let root = std::env::temp_dir().join("nxr_shard_future_ts_test");
         let _ = fs::remove_dir_all(&root);
-        let mut w = IdxShardWriter::open(&root, 705, true).unwrap();
+        let mut w = IdxShardWriter::open(&root, t(705), true).unwrap();
         let future = crate::now_ms() as i64 + 5 * MS_PER_MIN; // +5min
         let r = rec(future, 100.0, 101.0);
         assert!(w.append(&r).is_err());
@@ -2105,7 +2137,7 @@ mod tests {
         let t0 = t_recent_day_start();
         let mut bars: Vec<Bar> = Vec::new();
         {
-            let mut w = BarShardWriter::open(&root, 900, "s10").unwrap();
+            let mut w = BarShardWriter::open(&root, t(900), "s10").unwrap();
             for i in 0..5i64 {
                 let ts = t0 + i * 10_000; // 10 s buckets
                 let mts = crate::mitch::timestamp::from_epoch_ms(ts);
@@ -2123,12 +2155,12 @@ mod tests {
             w.flush().unwrap();
         }
         // Reopen: shards should already exist, last_ts_ms reports the last bar.
-        let w2 = BarShardWriter::open(&root, 900, "s10").unwrap();
+        let w2 = BarShardWriter::open(&root, t(900), "s10").unwrap();
         let last = w2.last_ts_ms().unwrap();
         assert_eq!(last, Some(t0 + 4 * 10_000));
         drop(w2);
         // Direct shard read must match the written sequence byte-for-byte.
-        let dir = bars_dir(&root, 900);
+        let dir = bars_dir(&root, t(900));
         let shards = list_shards(&dir, "s10").unwrap();
         assert_eq!(shards.len(), 1);
         let recs = read_shard_aligned::<Bar>(&shards[0].1).unwrap();
@@ -2176,12 +2208,12 @@ mod tests {
         routed.kind = BarKind::Renko as u8;
 
         {
-            let mut w = BarShardWriter::open(&root, 704, "renko").unwrap();
+            let mut w = BarShardWriter::open(&root, t(704), "renko").unwrap();
             w.append_routed(&routed, route_ms).unwrap();
             w.flush().unwrap();
         }
 
-        let dir = bars_dir(&root, 704);
+        let dir = bars_dir(&root, t(704));
         let shards = list_shards(&dir, "renko").unwrap();
         assert_eq!(shards.len(), 1);
         let recs = read_shard_aligned::<Bar>(&shards[0].1).unwrap();
@@ -2189,5 +2221,22 @@ mod tests {
         assert_eq!(recs[0].close_time_ms(), close_ms);
         assert!(recs[0].open_time_ms() <= recs[0].close_time_ms());
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod storable_tests {
+    use super::storable_series;
+
+    /// 09-30 audit: signers wrote `AUD/USDC`, core `QQQ/USDT`, `GHO/USDT`.
+    #[test]
+    fn only_usd_quoted_series_and_named_exceptions_store() {
+        let id = crate::resolve_ticker_id;
+        for ok in ["BTC/USD", "MON/USD", "EUR/USD", "NVDA/USD", "XAU/USD", "USD/JPY", "GER40/EUR", "HK50/HKD"] {
+            assert!(storable_series(id(ok)), "{ok}");
+        }
+        for no in ["USD/USDC", "AUD/USDC", "CAD/USDC", "QQQ/USDT", "GHO/USDT", "BTC/USDT", "BTC/EUR", "EUR/GBP", "USDT/BRL", "ETH/BTC"] {
+            assert!(!storable_series(id(no)), "{no}");
+        }
     }
 }

@@ -103,6 +103,11 @@ pub struct Kernel {
     pub s_min: f64,
     /// Backstop: a leg unconfirmed this long is evicted whatever its spread.
     pub horizon_secs: f64,
+    /// Level = share-weighted median of leg mids, not the mean (pegged class).
+    /// Pegged venues sit 0.5-2 bp apart at 1 bp ticks: a mean wanders between
+    /// those levels as shares age, a median moves only when half the share
+    /// reprices, and one venue cannot pull it at all.
+    pub median: bool,
 }
 
 /// A leg is dead once its price can have diffused this many reference
@@ -114,7 +119,7 @@ impl Kernel {
     /// barely diffuses, so a confirmed flat book keeps its share for minutes.
     /// s_min 1 bp: one tick at 4 dp. Backstop 15 min; at a 1 bp book the
     /// diffusion bound evicts first (~7 min unconfirmed).
-    pub const PEGGED: Self = Self::class(1.5, 1.0, 900.0);
+    pub const PEGGED: Self = Self { median: true, ..Self::class(1.5, 1.0, 900.0) };
     /// `cexs.crypto_majors` against a pegged quote (BTC/USDT, ETH/USD).
     /// σ 6 bp/√min, s_min 0.5 bp (sub-bp books), backstop 60 s.
     pub const MAJOR: Self = Self::class(6.0, 0.5, 60.0);
@@ -134,6 +139,7 @@ impl Kernel {
             sigma: sigma_bp_sqrt_min * 1e-4 * PER_SQRT_MIN,
             s_min: s_min_bp * 1e-4,
             horizon_secs,
+            median: false,
         }
     }
 
@@ -753,6 +759,8 @@ where
     // Share concentration, for `WeightProfile`.
     let mut s_sq_sum = 0.0f64;
     let mut s_max = 0.0f64;
+    // `(mid, share)` of every contributing leg, for `kernel.median` only.
+    let mut mids: Vec<(f64, f64)> = Vec::new();
 
     for entry in entries {
         if !is_valid_tick(entry.index.bid, entry.index.ask) {
@@ -783,6 +791,9 @@ where
         let stale_unc = (ask - bid) * 0.5 * (age / entry.ema_ipi_secs.max(1e-6)).sqrt().min(3.0);
         stale_sq_sum += sh * stale_unc * stale_unc;
 
+        if kernel.median {
+            mids.push((mid, sh));
+        }
         w_bid_sum += bid * sh;
         w_ask_sum += ask * sh;
         s_sq_sum += sh * sh;
@@ -845,6 +856,8 @@ where
     //     disagreeing venues; a single no-book venue stays collapsed so the bar
     //     builder emits NaN + FLAG_NO_BOOK (honest absence, never fabricated).
     let sigma_disagree = sigma_disagree_sq.max(0.0).sqrt();
+    // Median level: the share-weighted spread is kept, only the centre moves.
+    let shift = if kernel.median { weighted_median(&mut mids) - vwap_mid } else { 0.0 };
     let (final_bid, final_ask) = if tdwap_ask < tdwap_bid {
         (vwap_mid, vwap_mid)
     } else if tdwap_ask > tdwap_bid {
@@ -855,6 +868,7 @@ where
     } else {
         (vwap_mid, vwap_mid)
     };
+    let (final_bid, final_ask) = (final_bid + shift, final_ask + shift);
 
     let ci = if vwap_mid > 0.0 {
         encode_ci_ubp((conf_interval / vwap_mid) * 1e8)
@@ -890,6 +904,30 @@ where
         },
         profile,
     ))
+}
+
+/// Share-weighted median of `(mid, share)`, `shares > 0`, non-empty.
+///
+/// Interpolated between the mass centres of adjacent legs (`C_{i-1} + w_i/2`),
+/// so the level is continuous in both prices and shares: a plain lower median
+/// steps a whole venue gap whenever ageing carries the half-mass point across
+/// a leg boundary.
+fn weighted_median(mids: &mut [(f64, f64)]) -> f64 {
+    mids.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let half = 0.5 * mids.iter().map(|m| m.1).sum::<f64>();
+    let (mut c, mut prev) = (0.0f64, None::<(f64, f64)>);
+    for &(m, w) in mids.iter() {
+        let centre = c + 0.5 * w;
+        if centre >= half {
+            return match prev {
+                Some((pm, pc)) => pm + (m - pm) * (half - pc) / (centre - pc),
+                None => m,
+            };
+        }
+        prev = Some((m, centre));
+        c += w;
+    }
+    mids[mids.len() - 1].0
 }
 
 // ── Throttled TDWAP: weight-vector freeze with change-triggered refresh ─────
@@ -1367,6 +1405,42 @@ mod conf_input_tests {
 }
 
 #[cfg(test)]
+mod median_tests {
+    use super::*;
+
+    fn legs(mids: &[(f64, f64)], now: Instant) -> Vec<ProviderEntry> {
+        mids.iter()
+            .map(|&(mid, w)| {
+                let idx = Index::new(1, mid - 1e-5, mid + 1e-5, 16, 1_000, 1_000, 10, 1, 1, 0);
+                let mut e = ProviderEntry::new_at(idx, w, now).with_mapped(true);
+                e.joined = None;
+                e
+            })
+            .collect()
+    }
+
+    /// One venue cannot pull a pegged median; the mean follows it by its share.
+    #[test]
+    fn pegged_median_ignores_one_off_venue() {
+        let now = Instant::now();
+        let e = legs(&[(1.0, 1.0), (1.0001, 1.0), (1.0002, 1.0), (1.0050, 1.0)], now);
+        let mid = |k: Kernel| compute_vwap_at(1, e.iter(), 10.0, k, now).unwrap().mid();
+        assert!((mid(Kernel { median: false, ..Kernel::PEGGED }) - 1.0).abs() > 10e-4, "mean moves ~12 bp");
+        assert!((mid(Kernel::PEGGED) - 1.00015).abs() < 0.2e-4, "median stays inside the cluster");
+    }
+
+    /// Continuous in shares: a small share change moves the level a little,
+    /// never a whole venue gap.
+    #[test]
+    fn interpolated_median_is_continuous() {
+        let a = weighted_median(&mut [(1.0, 0.5), (1.0002, 0.5)]);
+        let b = weighted_median(&mut [(1.0, 0.51), (1.0002, 0.49)]);
+        assert!((a - b).abs() < 0.1e-4, "{a} {b}");
+        assert_eq!(weighted_median(&mut [(1.0, 1.0)]), 1.0);
+    }
+}
+
+#[cfg(test)]
 mod unmapped_bloc_tests {
     use super::*;
 
@@ -1626,6 +1700,9 @@ mod unmapped_bloc_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PEGGED weighting under the mean: these pin the kernel, not the level.
+    const WEIGHTS: Kernel = Kernel { median: false, ..Kernel::PEGGED };
 
     #[test]
     fn ci_roundtrip_preserves_order_of_magnitude() {
@@ -2273,7 +2350,7 @@ mod tests {
             mk_entry(0.99965, 0.99975, 1_000, 1_000, 1.0, t0),
         ];
         let mid_at = |legs: &[ProviderEntry; 3], now| {
-            compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap().mid()
+            compute_vwap_at(1, legs.iter(), 10.0, WEIGHTS, now).unwrap().mid()
         };
         // The odd leg goes silent past the PEGGED eviction age while the other
         // two keep confirming, then it returns.
@@ -2322,10 +2399,10 @@ mod tests {
             book(0.99985, 0.99995, 1.0),
             book(0.99965, 0.99975, 1.0),
         ];
-        let (_, p0) = compute_vwap_profiled_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).unwrap();
+        let (_, p0) = compute_vwap_profiled_at(1, legs.iter(), 10.0, WEIGHTS, t0).unwrap();
         let cap = Concentration::get().w_max(n_of(&[50.0, 1.0, 1.0, 1.0]));
         assert!((p0.top_weight_share - cap).abs() < 1e-9);
-        let mid0 = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).unwrap().mid();
+        let mid0 = compute_vwap_at(1, legs.iter(), 10.0, WEIGHTS, t0).unwrap().mid();
         let mut prev = mid0;
         let mut worst = 0.0f64;
         for ms in (0..=20_000u64).step_by(200) {
@@ -2333,7 +2410,7 @@ mod tests {
             for e in legs.iter_mut().take(3) {
                 e.update_at(e.index, now);
             }
-            let mid = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap().mid();
+            let mid = compute_vwap_at(1, legs.iter(), 10.0, WEIGHTS, now).unwrap().mid();
             worst = worst.max(((mid - prev) / prev).abs() * 1e4);
             prev = mid;
         }
@@ -2358,7 +2435,7 @@ mod tests {
                 e
             })
             .collect();
-        let mid0 = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).unwrap().mid();
+        let mid0 = compute_vwap_at(1, legs.iter(), 10.0, WEIGHTS, t0).unwrap().mid();
         let mut joiner = mk_entry(0.99965, 0.99975, 1_000, 1_000, 1.0, t0).with_mapped(true);
         joiner.joined = Some(t0);
         legs.push(joiner);
@@ -2369,7 +2446,7 @@ mod tests {
             for e in legs.iter_mut() {
                 e.update_at(e.index, now);
             }
-            let mid = compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, now).unwrap().mid();
+            let mid = compute_vwap_at(1, legs.iter(), 10.0, WEIGHTS, now).unwrap().mid();
             worst = worst.max(((mid - prev) / prev).abs() * 1e4);
             prev = mid;
         }

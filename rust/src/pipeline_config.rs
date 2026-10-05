@@ -1023,6 +1023,12 @@ pub struct SignedFeedYml {
     /// Set `0.0` to disable (raw encode).
     #[serde(default)]
     pub mark_grid_bps: Option<f64>,
+    /// Signer emit deadband, bps of the last EMITTED mark: a build re-encodes
+    /// the last emitted value until the live mark is at least this far from it,
+    /// then emits the live mark as is (no averaging, no lag past `eps`).
+    /// Absent or `0.0` = off. Producer-only: cosign checks the raw mark.
+    #[serde(default)]
+    pub deadband_bps: Option<f64>,
 }
 
 impl SignedFeedYml {

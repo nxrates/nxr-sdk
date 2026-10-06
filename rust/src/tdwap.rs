@@ -7,7 +7,7 @@
 //! ## Weight of leg `v` ([`Kernel`], [`compute_vwap_at`])
 //!
 //! ```text
-//! w_v = b_v · r_v · s_ref² / (s_v² + σ²·τ_v) · (1 − τ_v / τ_evict)
+//! w_v = b_v · r_v · s_ref² / (s_v² + σ²·τ_v + ρ_v) · (1 − τ_v / τ_evict)
 //! shares = w / Σw, unmapped bloc bounded, water-filled at w_max(n_eff)
 //! ```
 //!
@@ -22,6 +22,9 @@
 //!   half the eviction age): weight is flat between normal confirmations and
 //!   decays only past them, so the mark does not hop to the last leg that
 //!   confirmed. `σ` = max(measured `.vol` sigma, class floor) per √s.
+//! - `ρ_v`: the caller's measured disagreement of the leg, relative² (0 for a
+//!   venue book): it lowers the leg's share, never `n_eff`, `s_ref`, `τ_evict`
+//!   or the cap value.
 //!
 //! **Confirmation clock.** `τ_v` runs from `last_update`, stamped by every
 //! frame the core admits: a new price, or a forwarder re-affirm of an
@@ -206,7 +209,7 @@ impl Kernel {
         let t_eff = tau.max(e.ema_ipi_secs.min(0.5 * t_evict));
         (t_eff <= t_evict).then(|| {
             let s = self.spread(e);
-            (tau, (1.0 - t_eff / t_evict) / (s * s + var * t_eff), t_evict)
+            (tau, (1.0 - t_eff / t_evict) / (s * s + var * t_eff + e.resid), t_evict)
         })
     }
 }
@@ -502,6 +505,9 @@ pub struct ProviderEntry {
     /// which the kernel ramps: the eviction age is the kernel's to know, so the
     /// gap is recorded here and judged there.
     pub last_gap_secs: f64,
+    /// `ρ_v`: squared relative distance of the leg from its caller's
+    /// reference, added to the kernel's variance. 0 = none measured.
+    pub resid: f64,
 }
 
 impl ProviderEntry {
@@ -522,6 +528,7 @@ impl ProviderEntry {
             mapped: false,
             joined: Some(now),
             last_gap_secs: 0.0,
+            resid: 0.0,
         }
     }
 
@@ -912,7 +919,7 @@ where
 /// so the level is continuous in both prices and shares: a plain lower median
 /// steps a whole venue gap whenever ageing carries the half-mass point across
 /// a leg boundary.
-fn weighted_median(mids: &mut [(f64, f64)]) -> f64 {
+pub fn weighted_median(mids: &mut [(f64, f64)]) -> f64 {
     mids.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let half = 0.5 * mids.iter().map(|m| m.1).sum::<f64>();
     let (mut c, mut prev) = (0.0f64, None::<(f64, f64)>);
@@ -1566,6 +1573,31 @@ mod unmapped_bloc_tests {
         assert!((pa.n_eff - 5.0).abs() < 1e-9, "n_eff {}", pa.n_eff);
         assert!((pa.top_weight_share - 0.2).abs() < 1e-9);
         assert!((a.mid() - 102.0).abs() < 1e-6, "equal-weight mean");
+    }
+
+    /// `ρ_v` is precision only: legs 4 bp off with ρ = (4 bp)² lose most of
+    /// their pull on the mean and stay in the blend.
+    #[test]
+    fn resid_lowers_a_legs_pull_and_keeps_it() {
+        let now = Instant::now();
+        let run = |rho: f64| {
+            let es: Vec<ProviderEntry> = [100.0_f64, 100.0, 100.0, 100.0, 100.04, 100.04]
+                .iter()
+                .map(|m| {
+                    let mut e = ProviderEntry::new_at(leg(*m), 1.0, now).with_mapped(true);
+                    if *m > 100.0 {
+                        e.resid = rho;
+                    }
+                    e
+                })
+                .collect();
+            compute_vwap_profiled_at(448509915440349184, es.iter(), 10.0, Kernel::MAJOR, now).unwrap()
+        };
+        let ((a, _), (b, pb)) = (run(0.0), run(4e-4f64.powi(2)));
+        assert!((a.mid() - 100.04 / 3.0 - 200.0 / 3.0).abs() < 1e-9, "unweighted mean {}", a.mid());
+        assert!(b.mid() - 100.0 < 0.3 * (a.mid() - 100.0), "pull {} vs {}", b.mid(), a.mid());
+        assert_eq!(b.accepted, 6, "a disagreeing leg is down-weighted, never dropped");
+        assert!(pb.n_eff > 4.0, "n_eff {}", pb.n_eff);
     }
 
     /// One mapped venue among k unpriced legs: the bloc holds exactly

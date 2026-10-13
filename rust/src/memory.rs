@@ -126,13 +126,11 @@ pub(crate) fn available_memory_bytes() -> Option<u64> {
     {
         let text = std::fs::read_to_string("/proc/meminfo").ok()?;
         for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                if let Some(kb_str) = rest.split_whitespace().next() {
-                    if let Ok(kb) = kb_str.parse::<u64>() {
-                        return Some(kb * 1024);
-                    }
+            if let Some(rest) = line.strip_prefix("MemAvailable:")
+                && let Some(kb_str) = rest.split_whitespace().next()
+                && let Ok(kb) = kb_str.parse::<u64>() {
+                    return Some(kb * 1024);
                 }
-            }
         }
         None
     }
@@ -351,13 +349,11 @@ fn process_rss_bytes(pid: u32) -> Option<u64> {
     {
         let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
         for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                if let Some(kb_str) = rest.split_whitespace().next() {
-                    if let Ok(kb) = kb_str.parse::<u64>() {
-                        return Some(kb * 1024);
-                    }
+            if let Some(rest) = line.strip_prefix("VmRSS:")
+                && let Some(kb_str) = rest.split_whitespace().next()
+                && let Ok(kb) = kb_str.parse::<u64>() {
+                    return Some(kb * 1024);
                 }
-            }
         }
         None
     }

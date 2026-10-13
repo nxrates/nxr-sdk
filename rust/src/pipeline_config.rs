@@ -1052,8 +1052,8 @@ pub struct OraclesYml {
     pub providers: BTreeMap<String, OracleProviderYml>,
 }
 
-/// Anonymous app API; enabling this replaces the Lazer transport and manifest.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Anonymous app source; legacy bridge rosters remain registered.
+#[derive(Clone, Deserialize, Serialize)]
 pub struct PythPublicYml {
     #[serde(default)]
     pub enabled: bool,
@@ -1061,19 +1061,26 @@ pub struct PythPublicYml {
     pub poll_secs: u64,
     #[serde(default = "pyth_stale_secs")]
     pub stale_secs: u64,
-    #[serde(default = "pyth_weight")]
-    pub weight: f64,
+    #[serde(default = "pyth_proxies_env")]
+    pub proxies_env: String,
     #[serde(default)]
     pub proxies: Vec<String>,
     #[serde(default)]
     pub symbols: Vec<String>,
 }
+impl std::fmt::Debug for PythPublicYml {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PythPublicYml").field("enabled", &self.enabled)
+            .field("poll_secs", &self.poll_secs).field("stale_secs", &self.stale_secs)
+            .field("proxy_count", &self.proxies.len()).field("symbols", &self.symbols).finish()
+    }
+}
 fn pyth_poll_secs() -> u64 { 30 }
 fn pyth_stale_secs() -> u64 { 90 }
-fn pyth_weight() -> f64 { 1.0 }
+fn pyth_proxies_env() -> String { "INSTANTPROXIES_URLS".to_owned() }
 impl Default for PythPublicYml {
     fn default() -> Self {
-        Self { enabled: false, poll_secs: 30, stale_secs: 90, weight: 1.0, proxies: Vec::new(), symbols: Vec::new() }
+        Self { enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new() }
     }
 }
 
@@ -1289,7 +1296,6 @@ impl PipelineYml {
         self.oracles
             .providers
             .values()
-            .filter(|_| !self.oracles.public_api.enabled)
             .flat_map(|p| p.symbols.keys())
             .chain(self.oracles.public_api.symbols.iter().filter(|_| self.oracles.public_api.enabled))
             .chain(self.ctrader.providers.values().flat_map(|p| p.symbols.keys()))
@@ -1323,9 +1329,8 @@ impl PipelineYml {
         self.oracles
             .providers
             .keys()
-            .filter(|_| !self.oracles.public_api.enabled)
             .map(String::as_str)
-            .chain(self.oracles.public_api.enabled.then_some("pyth"))
+            .chain(self.oracles.public_api.enabled.then_some("pyth_app"))
             .chain(self.ctrader.providers.keys().map(String::as_str))
             .map(str::to_owned)
             .collect()
@@ -1342,6 +1347,16 @@ impl PipelineYml {
             .with_context(|| format!("read pipeline yaml {}", path.display()))?;
         let parsed = serde_yml::from_str::<Self>(&s)
             .with_context(|| format!("parse pipeline yaml {}", path.display()))?;
+        if parsed.oracles.public_api.enabled {
+            for symbol in &parsed.oracles.public_api.symbols {
+                anyhow::ensure!(*symbol == symbol.trim().to_ascii_uppercase()
+                    && !symbol.starts_with("CRYPTO.") && symbol.matches('/').count() == 1
+                    && crate::try_resolve_ticker_id(symbol).is_some(), "noncanonical public Pyth symbol");
+            }
+            for proxy in &parsed.oracles.public_api.proxies {
+                anyhow::ensure!(!proxy.contains('@'), "public Pyth proxy credentials must use the secret environment");
+            }
+        }
         if parsed
             .signed_quotes
             .as_ref()
@@ -2753,7 +2768,7 @@ mod tests {
     }
 
     #[test]
-    fn public_pyth_manifest_replaces_lazer_only_when_enabled() {
+    fn public_pyth_manifest_preserves_bridge_rosters() {
         let mut y: PipelineYml = serde_yml::from_str(
             "series:\n  renko: { min_pct: 0.001 }\n\
              \x20 vol: { ema_period: 1, winsorize_pct: [0.05, 0.95], winsorize_min_samples: 1 }\n\
@@ -2765,9 +2780,9 @@ mod tests {
         assert_eq!(y.oracles.public_api.poll_secs, 30);
         assert_eq!(y.relay_symbols().into_iter().collect::<Vec<_>>(), vec!["XAU/USD"]);
         y.oracles.public_api.enabled = true;
-        assert_eq!(y.configured_symbols().into_iter().collect::<Vec<_>>(), vec!["CBBTC/USD", "WBTC/USD"]);
+        assert_eq!(y.configured_symbols().into_iter().collect::<Vec<_>>(), vec!["CBBTC/USD", "WBTC/USD", "XAU/USD"]);
         assert_eq!(y.relay_symbols(), y.configured_symbols());
-        assert_eq!(y.relay_providers(), vec!["pyth"]);
+        assert_eq!(y.relay_providers(), vec!["pyth", "pyth_app"]);
     }
 
     /// A broker section must reach BOTH rosters: `configured_symbols` (what is

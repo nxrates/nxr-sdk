@@ -1043,11 +1043,38 @@ impl SignedFeedYml {
 /// `nxr-oracle` forwarder.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct OraclesYml {
+    #[serde(default)]
+    pub public_api: PythPublicYml,
     /// Oracle forwarder flush cadence (ms). Default 250 when absent.
     #[serde(default)]
     pub aggregation_interval_ms: Option<u64>,
     #[serde(default)]
     pub providers: BTreeMap<String, OracleProviderYml>,
+}
+
+/// Anonymous app API; enabling this replaces the Lazer transport and manifest.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PythPublicYml {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "pyth_poll_secs")]
+    pub poll_secs: u64,
+    #[serde(default = "pyth_stale_secs")]
+    pub stale_secs: u64,
+    #[serde(default = "pyth_weight")]
+    pub weight: f64,
+    #[serde(default)]
+    pub proxies: Vec<String>,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+}
+fn pyth_poll_secs() -> u64 { 30 }
+fn pyth_stale_secs() -> u64 { 90 }
+fn pyth_weight() -> f64 { 1.0 }
+impl Default for PythPublicYml {
+    fn default() -> Self {
+        Self { enabled: false, poll_secs: 30, stale_secs: 90, weight: 1.0, proxies: Vec::new(), symbols: Vec::new() }
+    }
 }
 
 /// `oracles.providers.<name>:` — one Lazer subscription + its feed manifest.
@@ -1262,7 +1289,9 @@ impl PipelineYml {
         self.oracles
             .providers
             .values()
+            .filter(|_| !self.oracles.public_api.enabled)
             .flat_map(|p| p.symbols.keys())
+            .chain(self.oracles.public_api.symbols.iter().filter(|_| self.oracles.public_api.enabled))
             .chain(self.ctrader.providers.values().flat_map(|p| p.symbols.keys()))
             .map(|s| s.to_uppercase())
             .filter(|s| crate::is_perp_symbol(s) == perp)
@@ -1294,8 +1323,11 @@ impl PipelineYml {
         self.oracles
             .providers
             .keys()
-            .chain(self.ctrader.providers.keys())
-            .cloned()
+            .filter(|_| !self.oracles.public_api.enabled)
+            .map(String::as_str)
+            .chain(self.oracles.public_api.enabled.then_some("pyth"))
+            .chain(self.ctrader.providers.keys().map(String::as_str))
+            .map(str::to_owned)
             .collect()
     }
 
@@ -2718,6 +2750,24 @@ mod tests {
         assert_eq!(minimal.rolling_window_days, 365);
         assert_eq!(minimal.bracket_max_iters, 12);
         assert!((minimal.accept_tol - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn public_pyth_manifest_replaces_lazer_only_when_enabled() {
+        let mut y: PipelineYml = serde_yml::from_str(
+            "series:\n  renko: { min_pct: 0.001 }\n\
+             \x20 vol: { ema_period: 1, winsorize_pct: [0.05, 0.95], winsorize_min_samples: 1 }\n\
+             \x20 calibration: { target_bpd: 300, min_window_days: 30, mult_bounds: [0.05, 4.0] }\n\
+             \x20 pipeline: { bootstrap_days: 1 }\n\
+             oracles:\n  providers:\n    pyth:\n      symbols: { XAU/USD: \"1\" }\n\
+             \x20 public_api: { symbols: [CBBTC/USD, WBTC/USD] }\n",
+        ).unwrap();
+        assert_eq!(y.oracles.public_api.poll_secs, 30);
+        assert_eq!(y.relay_symbols().into_iter().collect::<Vec<_>>(), vec!["XAU/USD"]);
+        y.oracles.public_api.enabled = true;
+        assert_eq!(y.configured_symbols().into_iter().collect::<Vec<_>>(), vec!["CBBTC/USD", "WBTC/USD"]);
+        assert_eq!(y.relay_symbols(), y.configured_symbols());
+        assert_eq!(y.relay_providers(), vec!["pyth"]);
     }
 
     /// A broker section must reach BOTH rosters: `configured_symbols` (what is

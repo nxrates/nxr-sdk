@@ -85,6 +85,9 @@ pub struct PipelineYml {
     /// cTrader Open API brokers consumed by `nxr-ctrader`. Absent = disabled.
     #[serde(default)]
     pub ctrader: CtraderYml,
+    /// On-chain pool legs, published by `nxr-oracle` as provider `onchain`.
+    #[serde(default)]
+    pub onchain: OnchainRosterYml,
     /// BTR DEX signed-quote endpoint (`/v1/quote/signed`). Absent = disabled.
     /// Domain binds to the DEPLOYED ExternalOracle (chain_id + address) —
     /// per-deployment config, never hardcoded. Signing key: env
@@ -1052,6 +1055,36 @@ pub struct OraclesYml {
     pub providers: BTreeMap<String, OracleProviderYml>,
 }
 
+/// Relay view of `onchain:`: the `ASSET/QUOTE` tickers the poller publishes.
+/// Every other key belongs to, and is validated by, `nxr-onchain`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct OnchainRosterYml {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub pools: Vec<OnchainLegYml>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OnchainLegYml {
+    pub asset: String,
+    pub quote: String,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub pool_id: Option<String>,
+}
+
+impl OnchainRosterYml {
+    /// Located legs on an enabled section; a locator-less pool is a candidate.
+    pub fn symbols(&self) -> impl Iterator<Item = String> + '_ {
+        self.pools
+            .iter()
+            .filter(|p| self.enabled && (p.address.is_some() || p.pool_id.is_some()))
+            .map(|p| format!("{}/{}", p.asset, p.quote).to_uppercase())
+    }
+}
+
 /// Anonymous app source; legacy bridge rosters remain registered.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct PythPublicYml {
@@ -1300,6 +1333,7 @@ impl PipelineYml {
             .chain(self.oracles.public_api.symbols.iter().filter(|_| self.oracles.public_api.enabled))
             .chain(self.ctrader.providers.values().flat_map(|p| p.symbols.keys()))
             .map(|s| s.to_uppercase())
+            .chain(self.onchain.symbols())
             .filter(|s| crate::is_perp_symbol(s) == perp)
             .collect()
     }
@@ -1319,7 +1353,8 @@ impl PipelineYml {
         self.relay_manifest(false)
     }
 
-    /// Relay provider names (`oracles.providers` ∪ `ctrader.providers` keys).
+    /// Relay provider names (`oracles.providers` ∪ `ctrader.providers` keys,
+    /// plus `pyth_app` / `onchain` while those sources publish).
     /// Each must resolve in `mitch/ids/market-providers.csv`, so a per-provider
     /// staging tree (`indexes/<provider>/…`) is named after this key exactly the
     /// way `cexs.exchanges` keys are. Offline re-aggregation needs the union:
@@ -1332,6 +1367,7 @@ impl PipelineYml {
             .map(String::as_str)
             .chain(self.oracles.public_api.enabled.then_some("pyth_app"))
             .chain(self.ctrader.providers.keys().map(String::as_str))
+            .chain(self.onchain.symbols().next().map(|_| "onchain"))
             .map(str::to_owned)
             .collect()
     }
@@ -2783,6 +2819,25 @@ mod tests {
         assert_eq!(y.configured_symbols().into_iter().collect::<Vec<_>>(), vec!["CBBTC/USD", "WBTC/USD", "XAU/USD"]);
         assert_eq!(y.relay_symbols(), y.configured_symbols());
         assert_eq!(y.relay_providers(), vec!["pyth", "pyth_app"]);
+    }
+
+    #[test]
+    fn onchain_located_legs_join_the_relay_roster() {
+        let mut y: PipelineYml = serde_yml::from_str(
+            "series:\n  renko: { min_pct: 0.001 }\n\
+             \x20 vol: { ema_period: 1, winsorize_pct: [0.05, 0.95], winsorize_min_samples: 1 }\n\
+             \x20 calibration: { target_bpd: 300, min_window_days: 30, mult_bounds: [0.05, 4.0] }\n\
+             \x20 pipeline: { bootstrap_days: 1 }\n\
+             onchain:\n  min_legs: 2\n  pools:\n\
+             \x20   - { asset: mUSD, chain: monad, dex: u, kind: v3, base: mUSD, quote: USDC, address: '0x99' }\n\
+             \x20   - { asset: wstETH, chain: ethereum, dex: u, kind: v4, base: wstETH, quote: ETH, pool_id: '0x77' }\n\
+             \x20   - { asset: GHO, chain: monad, dex: u, kind: v3, base: GHO, quote: USDC }\n",
+        ).unwrap();
+        assert!(y.configured_symbols().is_empty() && y.relay_providers().is_empty());
+        y.onchain.enabled = true;
+        assert_eq!(y.configured_symbols().into_iter().collect::<Vec<_>>(), vec!["MUSD/USDC", "WSTETH/ETH"]);
+        assert_eq!(y.relay_symbols(), y.configured_symbols());
+        assert_eq!(y.relay_providers(), vec!["onchain"]);
     }
 
     /// A broker section must reach BOTH rosters: `configured_symbols` (what is

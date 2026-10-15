@@ -1090,6 +1090,13 @@ impl OnchainRosterYml {
 pub struct PythPublicYml {
     /// App origin, `https://host` (no path). API base = `{origin}/api`.
     pub origin: String,
+    /// Market-provider name (`mitch/ids/market-providers.csv`) its ticks carry.
+    #[serde(default = "pyth_provider")]
+    pub provider: String,
+    /// Weight policy: the leg never takes a configured survey weight and stays
+    /// in the bounded unmapped bloc (`weights::resolve`).
+    #[serde(default)]
+    pub unmapped: bool,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default = "pyth_poll_secs")]
@@ -1119,12 +1126,13 @@ impl PythPublicYml {
         Ok(host.split(':').next().unwrap_or(host))
     }
 }
+fn pyth_provider() -> String { "pyth_app".to_owned() }
 fn pyth_poll_secs() -> u64 { 30 }
 fn pyth_stale_secs() -> u64 { 90 }
 fn pyth_proxies_env() -> String { "INSTANTPROXIES_URLS".to_owned() }
 impl Default for PythPublicYml {
     fn default() -> Self {
-        Self { origin: String::new(), enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new() }
+        Self { origin: String::new(), provider: pyth_provider(), unmapped: false, enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new() }
     }
 }
 
@@ -1376,11 +1384,17 @@ impl PipelineYml {
             .providers
             .keys()
             .map(String::as_str)
-            .chain(self.oracles.public_api.enabled.then_some("pyth_app"))
+            .chain(self.oracles.public_api.enabled.then_some(self.oracles.public_api.provider.as_str()))
             .chain(self.ctrader.providers.keys().map(String::as_str))
             .chain(self.onchain.symbols().next().map(|_| "onchain"))
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Provider names whose legs take the unmapped weight by policy.
+    pub fn unmapped_providers(&self) -> Vec<&str> {
+        let p = &self.oracles.public_api;
+        p.unmapped.then_some(p.provider.as_str()).into_iter().collect()
     }
 
     /// Read and parse a pipeline-yaml file from disk. Single source of truth

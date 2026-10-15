@@ -1088,6 +1088,8 @@ impl OnchainRosterYml {
 /// Anonymous app source; legacy bridge rosters remain registered.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct PythPublicYml {
+    /// App origin, `https://host` (no path). API base = `{origin}/api`.
+    pub origin: String,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default = "pyth_poll_secs")]
@@ -1103,9 +1105,18 @@ pub struct PythPublicYml {
 }
 impl std::fmt::Debug for PythPublicYml {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PythPublicYml").field("enabled", &self.enabled)
+        f.debug_struct("PythPublicYml").field("origin", &self.origin).field("enabled", &self.enabled)
             .field("poll_secs", &self.poll_secs).field("stale_secs", &self.stale_secs)
             .field("proxy_count", &self.proxies.len()).field("symbols", &self.symbols).finish()
+    }
+}
+impl PythPublicYml {
+    /// Validated host of `origin`: https only, bare `https://host[:port]`.
+    pub fn origin_host(&self) -> anyhow::Result<&str> {
+        let host = self.origin.strip_prefix("https://").unwrap_or_default();
+        anyhow::ensure!(!host.is_empty() && !host.contains(['/', '@', '?', '#', ' ']),
+            "oracles.public_api.origin must be https://host, got {:?}", self.origin);
+        Ok(host.split(':').next().unwrap_or(host))
     }
 }
 fn pyth_poll_secs() -> u64 { 30 }
@@ -1113,7 +1124,7 @@ fn pyth_stale_secs() -> u64 { 90 }
 fn pyth_proxies_env() -> String { "INSTANTPROXIES_URLS".to_owned() }
 impl Default for PythPublicYml {
     fn default() -> Self {
-        Self { enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new() }
+        Self { origin: String::new(), enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new() }
     }
 }
 
@@ -1384,6 +1395,7 @@ impl PipelineYml {
         let parsed = serde_yml::from_str::<Self>(&s)
             .with_context(|| format!("parse pipeline yaml {}", path.display()))?;
         if parsed.oracles.public_api.enabled {
+            parsed.oracles.public_api.origin_host()?;
             for symbol in &parsed.oracles.public_api.symbols {
                 anyhow::ensure!(*symbol == symbol.trim().to_ascii_uppercase()
                     && !symbol.starts_with("CRYPTO.") && symbol.matches('/').count() == 1
@@ -2811,7 +2823,7 @@ mod tests {
              \x20 calibration: { target_bpd: 300, min_window_days: 30, mult_bounds: [0.05, 4.0] }\n\
              \x20 pipeline: { bootstrap_days: 1 }\n\
              oracles:\n  providers:\n    pyth:\n      symbols: { XAU/USD: \"1\" }\n\
-             \x20 public_api: { symbols: [CBBTC/USD, WBTC/USD] }\n",
+             \x20 public_api: { origin: \"https://app.pyth.com\", symbols: [CBBTC/USD, WBTC/USD] }\n",
         ).unwrap();
         assert_eq!(y.oracles.public_api.poll_secs, 30);
         assert_eq!(y.relay_symbols().into_iter().collect::<Vec<_>>(), vec!["XAU/USD"]);

@@ -1053,6 +1053,23 @@ pub struct OraclesYml {
     pub aggregation_interval_ms: Option<u64>,
     #[serde(default)]
     pub providers: BTreeMap<String, OracleProviderYml>,
+    /// App-path jump guard of the `nxr-oracle` forwarder. Required there:
+    /// the forwarder refuses to boot without it.
+    #[serde(default)]
+    pub jump_guard: Option<JumpGuardYml>,
+}
+
+/// `oracles.jump_guard`: a sample further than `frac` (`frac_warmup` while
+/// the z-gate warms) from the last accepted print waits for confirmation; a
+/// hold persisting `force_after_held` rounds emits anyway; a peg ticker's
+/// held jump needs another provider within `peg_corroborate_ms`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JumpGuardYml {
+    pub frac: f64,
+    pub frac_warmup: f64,
+    pub force_after_held: u32,
+    pub peg_corroborate_ms: u64,
 }
 
 /// Relay view of `onchain:`: the `ASSET/QUOTE` tickers the poller publishes.
@@ -1109,6 +1126,14 @@ pub struct PythPublicYml {
     pub proxies: Vec<String>,
     #[serde(default)]
     pub symbols: Vec<String>,
+    /// Per-IP pace: one request per `ip_gap_secs`, at most 10 per `ip_window_secs`.
+    pub ip_gap_secs: u64,
+    pub ip_window_secs: u64,
+    /// A catalog price unmoved this long reads as halted (and a CDN snapshot
+    /// this old proves nothing).
+    pub live_window_secs: u64,
+    /// Largest point-vs-catalog gap an emitted point may carry.
+    pub point_catalog_max_frac: f64,
 }
 impl std::fmt::Debug for PythPublicYml {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1132,7 +1157,8 @@ fn pyth_stale_secs() -> u64 { 90 }
 fn pyth_proxies_env() -> String { "INSTANTPROXIES_URLS".to_owned() }
 impl Default for PythPublicYml {
     fn default() -> Self {
-        Self { origin: String::new(), provider: pyth_provider(), unmapped: false, enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new() }
+        // Absent section: disabled; the pacing numbers are inert (zero refuses `Scraper::new`).
+        Self { origin: String::new(), provider: pyth_provider(), unmapped: false, enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new(), ip_gap_secs: 0, ip_window_secs: 0, live_window_secs: 0, point_catalog_max_frac: 0.0 }
     }
 }
 
@@ -2837,7 +2863,8 @@ mod tests {
              \x20 calibration: { target_bpd: 300, min_window_days: 30, mult_bounds: [0.05, 4.0] }\n\
              \x20 pipeline: { bootstrap_days: 1 }\n\
              oracles:\n  providers:\n    pyth:\n      symbols: { XAU/USD: \"1\" }\n\
-             \x20 public_api: { origin: \"https://app.pyth.com\", symbols: [CBBTC/USD, WBTC/USD] }\n",
+             \x20 public_api: { origin: \"https://app.pyth.com\", symbols: [CBBTC/USD, WBTC/USD], \
+             ip_gap_secs: 6, ip_window_secs: 60, live_window_secs: 300, point_catalog_max_frac: 0.05 }\n",
         ).unwrap();
         assert_eq!(y.oracles.public_api.poll_secs, 30);
         assert_eq!(y.relay_symbols().into_iter().collect::<Vec<_>>(), vec!["XAU/USD"]);

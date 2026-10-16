@@ -1126,13 +1126,9 @@ pub struct PythPublicYml {
     pub proxies: Vec<String>,
     #[serde(default)]
     pub symbols: Vec<String>,
-    /// Per-IP pace: one request per `ip_gap_secs`, at most 10 per `ip_window_secs`.
-    pub ip_gap_secs: u64,
-    pub ip_window_secs: u64,
-    /// A catalog price unmoved this long reads as halted (and a CDN snapshot
-    /// this old proves nothing).
+    /// A CDN catalog snapshot this old proves nothing.
     pub live_window_secs: u64,
-    /// Largest point-vs-catalog gap an emitted point may carry.
+    /// A point this far from the (minutes-old) catalog price is counted, never held.
     pub point_catalog_max_frac: f64,
 }
 impl std::fmt::Debug for PythPublicYml {
@@ -1158,7 +1154,7 @@ fn pyth_proxies_env() -> String { "INSTANTPROXIES_URLS".to_owned() }
 impl Default for PythPublicYml {
     fn default() -> Self {
         // Absent section: disabled; the pacing numbers are inert (zero refuses `Scraper::new`).
-        Self { origin: String::new(), provider: pyth_provider(), unmapped: false, enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new(), ip_gap_secs: 0, ip_window_secs: 0, live_window_secs: 0, point_catalog_max_frac: 0.0 }
+        Self { origin: String::new(), provider: pyth_provider(), unmapped: false, enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new(), live_window_secs: 0, point_catalog_max_frac: 0.0 }
     }
 }
 
@@ -2864,7 +2860,7 @@ mod tests {
              \x20 pipeline: { bootstrap_days: 1 }\n\
              oracles:\n  providers:\n    pyth:\n      symbols: { XAU/USD: \"1\" }\n\
              \x20 public_api: { origin: \"https://app.pyth.com\", symbols: [CBBTC/USD, WBTC/USD], \
-             ip_gap_secs: 6, ip_window_secs: 60, live_window_secs: 300, point_catalog_max_frac: 0.05 }\n",
+             live_window_secs: 300, point_catalog_max_frac: 0.05 }\n",
         ).unwrap();
         assert_eq!(y.oracles.public_api.poll_secs, 30);
         assert_eq!(y.relay_symbols().into_iter().collect::<Vec<_>>(), vec!["XAU/USD"]);

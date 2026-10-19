@@ -1126,6 +1126,9 @@ pub struct PythPublicYml {
     pub proxies: Vec<String>,
     #[serde(default)]
     pub symbols: Vec<String>,
+    /// Per-symbol override of the frozen window for pegged feeds that legitimately do not move.
+    #[serde(default)]
+    pub frozen_secs: std::collections::BTreeMap<String, u64>,
     /// A CDN catalog snapshot this old proves nothing.
     pub live_window_secs: u64,
     /// A point this far from the (minutes-old) catalog price is counted, never held.
@@ -1154,7 +1157,7 @@ fn pyth_proxies_env() -> String { "INSTANTPROXIES_URLS".to_owned() }
 impl Default for PythPublicYml {
     fn default() -> Self {
         // Absent section: disabled; the pacing numbers are inert (zero refuses `Scraper::new`).
-        Self { origin: String::new(), provider: pyth_provider(), unmapped: false, enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new(), live_window_secs: 0, point_catalog_max_frac: 0.0 }
+        Self { origin: String::new(), provider: pyth_provider(), unmapped: false, enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new(), frozen_secs: Default::default(), live_window_secs: 0, point_catalog_max_frac: 0.0 }
     }
 }
 

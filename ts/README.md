@@ -220,3 +220,7 @@ The REST surface follows the same rule — additive only.
 ## License
 
 MIT.
+
+## Anonymous WebSocket client id
+
+Anonymous `/v1/stream` sockets are capped per client id (2) with a higher per-IP ceiling, so users behind one NAT do not starve each other. The client sends a random persistent `client_id` (8-64 of `[A-Za-z0-9_-]`) as a query parameter. Override: `new NxrClient({ clientId })`. Default: a UUID kept in `sessionStorage` (one per browser tab), or one per process in Node. API-key accounts are unaffected.

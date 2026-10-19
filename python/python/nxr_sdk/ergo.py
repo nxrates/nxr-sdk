@@ -740,6 +740,48 @@ class _HistoryBuilder:
         )
 
 
+# ── WebSocket client identity ───────────────────────────────────────────
+def client_id() -> str:
+    """Persistent random device id sent as ``client_id`` on ``/v1/stream``.
+
+    The anonymous WS cap is per client id (2) with a higher per-IP ceiling, so
+    several users behind one NAT do not starve each other. Order: env
+    ``NXR_CLIENT_ID``, ``~/.nxr/client_id``, else a fresh UUID persisted there
+    (best effort; an unwritable home just yields a per-process id).
+    """
+    import os
+    import uuid
+
+    import re
+
+    ok = re.compile(r"^[A-Za-z0-9_-]{8,64}$").match
+    env = os.environ.get("NXR_CLIENT_ID")
+    if env and ok(env):
+        return env
+    path = os.path.join(os.path.expanduser("~"), ".nxr", "client_id")
+    try:
+        with open(path) as f:
+            cid = f.read().strip()
+        if ok(cid):
+            return cid
+    except OSError:
+        pass
+    cid = str(uuid.uuid4())
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(cid)
+    except OSError:
+        pass
+    return cid
+
+
+def _with_client_id(url: str) -> str:
+    if "client_id=" in url:
+        return url
+    return url + ("&" if "?" in url else "?") + "client_id=" + client_id()
+
+
 # ── WebSocket subscriber ────────────────────────────────────────────────
 
 
@@ -810,7 +852,7 @@ class WsSubscriber:
     """
 
     def __init__(self, ws_url: str, allow_ids: Optional[set[int]] = None):
-        self._url = ws_url
+        self._url = _with_client_id(ws_url)
         self._allow_ids = allow_ids
         self._ws = None  # populated on connect()
         self._buffer: list[StreamIndexRecord] = []

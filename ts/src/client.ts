@@ -117,12 +117,46 @@ export interface TickerResponse {
   confidence: number;
 }
 
+let processClientId: string | undefined;
+
+/**
+ * Random client id valid for the server (8-64 of `[A-Za-z0-9_-]`): kept in
+ * `sessionStorage` (one id per browser tab, survives reload) when present, else
+ * one per process.
+ */
+export function defaultClientId(): string {
+  const mk = (): string =>
+    (globalThis.crypto as { randomUUID?: () => string } | undefined)?.randomUUID?.() ??
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+  try {
+    const ls = (globalThis as { sessionStorage?: Storage }).sessionStorage;
+    if (ls) {
+      let id = ls.getItem('nxr_client_id');
+      if (!id || !/^[A-Za-z0-9_-]{8,64}$/.test(id)) {
+        id = mk();
+        ls.setItem('nxr_client_id', id);
+      }
+      return id;
+    }
+  } catch {
+    // storage blocked: fall through to the per-process id
+  }
+  return (processClientId ??= mk());
+}
+
 export interface NxrClientOpts {
   /**
    * REST/WS root. Defaults to {@link DEFAULT_BASE_URL}.
    * e.g. `https://api.nxrates.com` or `http://nxr-svc:40004`.
    */
   baseUrl?: string;
+  /**
+   * Persistent device id sent as `client_id` on `/v1/stream`. Anonymous sockets
+   * are capped per client id (2) with a higher per-IP ceiling, so users behind
+   * one NAT do not starve each other. Default: a random UUID kept in
+   * `sessionStorage` (one per browser tab) or generated once per process.
+   */
+  clientId?: string;
   /** WS reconnect delay (default 3000 ms). */
   reconnectMs?: number;
   /** Optional fetch override (test injection). */
@@ -169,6 +203,7 @@ export class NxrClient {
   private readonly _fetch: typeof fetch;
   private readonly _WS: typeof WebSocket;
   private readonly apiKey: string | undefined;
+  private readonly clientId: string;
   private wsUrl: string | null = null;
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -187,11 +222,17 @@ export class NxrClient {
   private symbolToId = new Map<string, bigint>();
 
   constructor(opts: NxrClientOpts = {}) {
+    this.clientId = opts.clientId ?? defaultClientId();
     this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '');
     if (opts.reconnectMs) this.reconnectMs = opts.reconnectMs;
     this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
     this._WS = opts.WebSocket ?? (globalThis as { WebSocket: typeof WebSocket }).WebSocket;
     this.apiKey = opts.apiKey;
+  }
+
+  private withClientId(url: string): string {
+    if (url.includes('client_id=')) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}client_id=${encodeURIComponent(this.clientId)}`;
   }
 
   private authHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -543,7 +584,7 @@ export class NxrClient {
     cb: (rec: StreamIndexRecord) => void,
     onReject?: (rejected: { id: string; error: string }[]) => void,
   ): SubscriberHandle {
-    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/v1/stream`;
+    const wsUrl = this.withClientId(`${this.baseUrl.replace(/^http/, 'ws')}/v1/stream`);
     if (!this._WS) throw new Error('No global WebSocket; pass opts.WebSocket (e.g. `ws` on Node)');
     const ws = this.apiKey
       ? new this._WS(wsUrl, { headers: { 'X-NXR-Key': this.apiKey } } as unknown as string)
@@ -636,7 +677,7 @@ export class NxrClient {
    * @param wsUrl Optional override (defaults to `ws(s)://<host>/v1/stream`).
    */
   connect(wsUrl?: string): void {
-    this.wsUrl = wsUrl ?? `${this.baseUrl.replace(/^http/, 'ws')}/v1/stream`;
+    this.wsUrl = this.withClientId(wsUrl ?? `${this.baseUrl.replace(/^http/, 'ws')}/v1/stream`);
     this.doConnect();
   }
 

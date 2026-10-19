@@ -127,9 +127,61 @@ pub struct WsClient {
     pending: std::collections::VecDeque<Vec<u8>>,
 }
 
+/// Persistent random device id sent as `client_id` on `/v1/stream`. The
+/// anonymous WS cap is per client id (2) with a higher per-IP ceiling, so
+/// users behind one NAT do not starve each other. Order: env `NXR_CLIENT_ID`,
+/// `~/.nxr/client_id`, else a fresh id persisted there (best effort).
+pub fn client_id() -> String {
+    let valid = |s: &str| {
+        (8..=64).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    if let Ok(v) = std::env::var("NXR_CLIENT_ID") {
+        if valid(&v) {
+            return v;
+        }
+    }
+    let path = std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".nxr/client_id"));
+    if let Some(Ok(id)) = path.as_ref().map(std::fs::read_to_string) {
+        let id = id.trim();
+        if valid(id) {
+            return id.to_string();
+        }
+    }
+    use std::hash::{BuildHasher, Hasher};
+    let rnd = |salt: u64| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(salt);
+        h.finish()
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let id = format!("{:016x}{:016x}", rnd(nanos), rnd(!nanos));
+    if let Some(p) = path {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&p, &id);
+    }
+    id
+}
+
+/// Append `client_id=<id>` to `url` unless it already carries one.
+pub fn with_client_id(url: &str, id: &str) -> String {
+    if url.contains("client_id=") {
+        return url.to_string();
+    }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}client_id={id}")
+}
+
 impl WsClient {
-    /// Open a WebSocket to `url` (e.g. `ws://nxr-svc:40004/v1/stream`).
+    /// Open a WebSocket to `url` (e.g. `ws://nxr-svc:40004/v1/stream`). A
+    /// persistent [`client_id`] is appended unless the url already has one.
     pub async fn connect(url: &str) -> Result<Self> {
+        let url = &with_client_id(url, &client_id());
         let (ws, _response) = connect_async(url)
             .await
             .with_context(|| format!("connect {}", url))?;
@@ -341,5 +393,26 @@ mod tests {
         let bytes = vec![MSG_INDEX, 0, 1, 0, 0, 0, 0, 0];
         let mut out = Vec::new();
         assert!(decode_index_frame(&bytes, &mut out).is_err());
+    }
+}
+
+#[cfg(test)]
+mod client_id_tests {
+    use super::*;
+
+    #[test]
+    fn appends_once() {
+        let w = |u: &str| with_client_id(u, "abc");
+        assert_eq!(w("ws://h/s"), "ws://h/s?client_id=abc");
+        assert_eq!(w("ws://h/s?v=2"), "ws://h/s?v=2&client_id=abc");
+        assert_eq!(w("ws://h/s?client_id=x"), "ws://h/s?client_id=x");
+    }
+
+    #[test]
+    fn generated_id_is_valid_for_the_server() {
+        let id = client_id();
+        assert!((8..=64).contains(&id.len()));
+        let ok = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+        assert!(id.bytes().all(ok));
     }
 }

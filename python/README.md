@@ -230,3 +230,7 @@ This SDK mirrors those layouts byte-for-byte (see `index_record_dtype()` and
 ## License
 
 MIT
+
+## Anonymous WebSocket client id
+
+Anonymous `/v1/stream` sockets are capped per client id (2) with a higher per-IP ceiling. `WsSubscriber` sends a persistent random `client_id` (8-64 of `[A-Za-z0-9_-]`): env `NXR_CLIENT_ID`, else `~/.nxr/client_id` (created on first use). API-key accounts are unaffected.

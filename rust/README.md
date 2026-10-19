@@ -193,3 +193,7 @@ additive.
 ## License
 
 MIT.
+
+## Anonymous WebSocket client id
+
+Anonymous `/v1/stream` sockets are capped per client id (2) with a higher per-IP ceiling. `WsClient::connect` appends a persistent random `client_id` (8-64 of `[A-Za-z0-9_-]`): env `NXR_CLIENT_ID`, else `~/.nxr/client_id` (created on first use); a url that already has `client_id=` is left alone. API-key accounts are unaffected.

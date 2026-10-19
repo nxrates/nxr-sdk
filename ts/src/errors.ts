@@ -39,6 +39,8 @@ export type PlanErrorCode =
   | 'PLAN_RATE_LIMIT_WS'
   /** Too many WS feeds for the plan. Status 403 / close 4030. Upgrade. */
   | 'PLAN_WS_FEED_CAP'
+  /** Too many concurrent WS connections for the key/IP. Status 429 / close 4031. Drop a socket or upgrade. */
+  | 'PLAN_WS_CONN_CAP'
   /** MITCH/f64 encoding requested on Free. Status 406. Upgrade or use JSON. */
   | 'PLAN_ENCODING_FORBIDDEN'
   /** Timeframe below the plan floor. Status 403. Upgrade or coarsen TF. */
@@ -58,6 +60,7 @@ const UPGRADE_NEEDED_CODES: ReadonlySet<PlanErrorCode> = new Set([
   'PLAN_TIMEFRAME_FORBIDDEN',
   'PLAN_HISTORY_FORBIDDEN',
   'PLAN_WS_FEED_CAP',
+  'PLAN_WS_CONN_CAP',
 ]);
 
 /** Wire JSON body shape — exact mirror of `PlanErrorBody` in Rust. */

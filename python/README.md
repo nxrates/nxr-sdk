@@ -187,6 +187,7 @@ SDK parses that shape into a typed `PlanLimitError` so callers can branch on
 | `PLAN_RATE_LIMIT_HTTP`     | 429  | —        | back off + retry          |
 | `PLAN_RATE_LIMIT_WS`       | —    | 4029     | back off + retry          |
 | `PLAN_WS_FEED_CAP`         | 403  | 4030     | upgrade plan / fewer subs |
+| `PLAN_WS_CONN_CAP`         | —    | 4031     | close a socket / upgrade  |
 | `PLAN_ENCODING_FORBIDDEN`  | 406  | —        | upgrade / fall back JSON  |
 | `PLAN_TIMEFRAME_FORBIDDEN` | 403  | —        | upgrade / coarsen TF      |
 | `PLAN_HISTORY_FORBIDDEN`   | 403  | —        | upgrade / shorten range   |

@@ -57,6 +57,9 @@ pub enum PlanErrorCode {
     PlanRateLimitWs,
     /// Too many WS feeds for the plan (status 403 / close 4030). Upgrade.
     PlanWsFeedCap,
+    /// Too many concurrent WS connections for the key/IP (status 429 /
+    /// close 4031). Drop a socket or upgrade.
+    PlanWsConnCap,
     /// MITCH / f64 encoding requested on Free (status 406). Upgrade or use JSON.
     PlanEncodingForbidden,
     /// Timeframe below plan floor (status 403). Upgrade or coarsen TF.
@@ -78,6 +81,7 @@ impl PlanErrorCode {
             Self::PlanRateLimitHttp => "PLAN_RATE_LIMIT_HTTP",
             Self::PlanRateLimitWs => "PLAN_RATE_LIMIT_WS",
             Self::PlanWsFeedCap => "PLAN_WS_FEED_CAP",
+            Self::PlanWsConnCap => "PLAN_WS_CONN_CAP",
             Self::PlanEncodingForbidden => "PLAN_ENCODING_FORBIDDEN",
             Self::PlanTimeframeForbidden => "PLAN_TIMEFRAME_FORBIDDEN",
             Self::PlanHistoryForbidden => "PLAN_HISTORY_FORBIDDEN",
@@ -95,6 +99,7 @@ impl PlanErrorCode {
                 | Self::PlanTimeframeForbidden
                 | Self::PlanHistoryForbidden
                 | Self::PlanWsFeedCap
+                | Self::PlanWsConnCap
         )
     }
 
@@ -121,6 +126,7 @@ impl PlanErrorCode {
             Self::PlanRateLimitHttp => 429,
             Self::PlanRateLimitWs => 429,
             Self::PlanWsFeedCap => 403,
+            Self::PlanWsConnCap => 429,
             Self::PlanEncodingForbidden => 406,
             Self::PlanTimeframeForbidden => 403,
             Self::PlanHistoryForbidden => 403,
@@ -137,6 +143,7 @@ impl PlanErrorCode {
         match self {
             Self::PlanRateLimitWs => Some(4029),
             Self::PlanWsFeedCap => Some(4030),
+            Self::PlanWsConnCap => Some(4031),
             Self::PlanAuthRequired => Some(4401),
             Self::PlanKeyInvalid => Some(4401),
             Self::PlanKeyRevoked => Some(4403),
@@ -356,6 +363,7 @@ mod tests {
             PlanErrorCode::PlanRateLimitHttp,
             PlanErrorCode::PlanRateLimitWs,
             PlanErrorCode::PlanWsFeedCap,
+            PlanErrorCode::PlanWsConnCap,
             PlanErrorCode::PlanEncodingForbidden,
             PlanErrorCode::PlanTimeframeForbidden,
             PlanErrorCode::PlanHistoryForbidden,

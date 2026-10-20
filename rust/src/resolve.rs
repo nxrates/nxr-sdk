@@ -1465,6 +1465,70 @@ mod find_equivalence_tests {
         assert!(hits > 1000 && fuzzy > 10 && misses > 200, "{hits} {fuzzy} {misses}");
     }
 
+    /// Venue-style spellings of a stride of table names: perp/pair suffixes,
+    /// separators, multiplier prefixes, wrapped tickers, full-width letters,
+    /// zero-width joiners and mixed case.
+    fn venue_tokens() -> Vec<String> {
+        let mut out: Vec<String> = ["BTC-PERP", "btc_usdt", "1000PEPE", "WBTC.e", "ＢＴＣ", "ＥＴＨ-ＰＥＲＰ", "BtC", "eTh/uSdT", "BTC\u{200D}USDT", "B\u{200D}TC"]
+            .map(String::from)
+            .to_vec();
+        for (i, e) in RESOLVER.all.iter().enumerate().filter(|(i, _)| i % 6 == 0) {
+            let n = &e.asset.name;
+            out.push(format!("{n}-PERP"));
+            out.push(format!("{}_usdt", n.to_lowercase()));
+            out.push(format!("{n}/USDT:USDT"));
+            out.push(format!("1000{n}"));
+            out.push(format!("W{n}.e"));
+            out.push(format!("{n}\u{200D}"));
+            out.push(n.chars().map(|c| char::from_u32(c as u32 + 0xFEE0).filter(|_| c.is_ascii_graphic()).unwrap_or(c)).collect());
+            out.push(n.chars().enumerate().map(|(j, c)| if (i + j) % 2 == 0 { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() }).collect());
+        }
+        out
+    }
+
+    /// Release-only: `cargo test --release -p nxr-sdk -- --ignored indexed_find_matches_legacy_exhaustively --nocapture`
+    #[test]
+    #[ignore = "release-only exhaustive oracle comparison"]
+    fn indexed_find_matches_legacy_exhaustively() {
+        let r: &AssetResolver = &RESOLVER;
+        let classes = [
+            None,
+            Some(AssetClass::CR),
+            Some(AssetClass::FX),
+            Some(AssetClass::CM),
+            Some(AssetClass::IP),
+            Some(AssetClass::EQ),
+            Some(AssetClass::SD),
+        ];
+        let thresholds = [0.0, 0.5, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0];
+        let mut syms = corpus();
+        syms.extend(venue_tokens());
+        let (mut cases, mut exact, mut fuzzy, mut misses) = (0usize, 0usize, 0usize, 0usize);
+        for sym in &syms {
+            for &thr in &thresholds {
+                for &class in &classes {
+                    cases += 1;
+                    let new = r.find(sym, thr, class);
+                    let old = find_legacy(r, sym, thr, class);
+                    match (&new, &old) {
+                        (None, None) => misses += 1,
+                        (Some(n), Some(o)) => {
+                            assert_eq!(n.asset, o.asset, "{sym:?} {thr} {class:?}");
+                            assert_eq!(n.confidence.to_bits(), o.confidence.to_bits(), "{sym:?} {thr} {class:?}");
+                            assert_eq!(n.matched_field, o.matched_field, "{sym:?} {thr} {class:?}");
+                            if n.confidence == 1.0 { exact += 1 } else { fuzzy += 1 }
+                        }
+                        _ => panic!("{sym:?} {thr} {class:?}: new={new:?} old={old:?}"),
+                    }
+                }
+            }
+        }
+        println!("symbols={} cases={cases} exact={exact} fuzzy={fuzzy} misses={misses}", syms.len());
+        assert!(cases >= 400_000, "cases {cases}");
+        assert!(fuzzy >= 50_000, "fuzzy {fuzzy}");
+        assert!(exact > 0 && misses > 0);
+    }
+
     #[test]
     fn jaro_winkler_stack_and_heap_paths_agree_with_legacy() {
         let long_a = "a".repeat(80) + "bc";

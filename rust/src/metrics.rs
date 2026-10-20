@@ -159,7 +159,17 @@ pub async fn serve(port: u16) -> Result<()> {
         .route("/metrics", get(render_metrics))
         .route("/health", get(health))
         .route("/ready", get(ready))
-        .with_state(handle);
+        .with_state(handle.clone());
+
+    // install_recorder leaves upkeep to the caller: histogram samples sit in unbounded buckets
+    // until a render or upkeep drains them, so an unscraped process grows without bound.
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            handle.run_upkeep();
+        }
+    });
 
     tokio::spawn(async move {
         info!(%addr, "metrics server listening");

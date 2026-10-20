@@ -1,8 +1,9 @@
 use crate::resolve::{resolve_asset_in_class, resolve_ticker, split_perp};
 use dashmap::DashMap;
-use std::sync::LazyLock;
 use mitch::ticker::forex_ticker;
 use mitch::{AssetClass, InstrumentType};
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::warn;
 
 /// Split a canonical `BASE/QUOTE` pair string into its two legs.
@@ -106,18 +107,29 @@ pub fn try_resolve_ticker_id(symbol: &str) -> Option<u64> {
         return *hit;
     }
     let id = resolve_uncached(symbol);
-    // ponytail: bounded, venue listings are finite; past the cap fall through uncached.
-    if RESOLVED.len() < RESOLVED_CAP {
-        RESOLVED.insert(symbol.into(), id);
+    // Bounded: real venue symbols are short and finite, but this is reachable
+    // from REST input, so an attacker must not be able to grow the memo with
+    // long or unbounded keys. Past either limit the symbol resolves uncached.
+    if symbol.len() <= MEMO_MAX_KEY && MEMO_LEN.load(Ordering::Relaxed) < MEMO_CAP {
+        // ponytail: the cap is approximate (racing inserts can overshoot by
+        // the thread count); an exact bound would need a lock on this path.
+        if RESOLVED.insert(symbol.into(), id).is_none() {
+            MEMO_LEN.fetch_add(1, Ordering::Relaxed);
+        }
     }
     id
 }
 
 /// Process-wide memo of [`try_resolve_ticker_id`], negatives included. An
-/// unresolvable symbol walks the whole fuzzy asset index (~2.6 ms release vs
+/// unresolvable symbol walks the whole fuzzy asset index (~100 us release vs
 /// ~2 us for a hit), and a venue listing is mostly such a long tail.
 static RESOLVED: LazyLock<DashMap<Box<str>, Option<u64>>> = LazyLock::new(DashMap::new);
-const RESOLVED_CAP: usize = 1 << 17;
+/// Entry count of [`RESOLVED`], kept beside it because `DashMap::len` locks
+/// every shard.
+static MEMO_LEN: AtomicUsize = AtomicUsize::new(0);
+const MEMO_CAP: usize = 1 << 17;
+/// Longest symbol worth memoizing; longer keys are resolved but never stored.
+const MEMO_MAX_KEY: usize = 64;
 
 fn resolve_uncached(symbol: &str) -> Option<u64> {
     let (symbol, instrument_type) = split_perp(symbol);
@@ -222,3 +234,27 @@ mod perp_tests {
     }
 }
 
+#[cfg(test)]
+mod memo_tests {
+    use super::*;
+
+    #[test]
+    fn unresolvable_symbol_is_memoized_and_stable() {
+        let sym = "ZQXVWJ/USDT";
+        assert_eq!(try_resolve_ticker_id(sym), None);
+        assert_eq!(RESOLVED.get(sym).map(|e| *e), Some(None), "negative stored");
+        assert_eq!(try_resolve_ticker_id(sym), None, "repeat is stable");
+    }
+
+    #[test]
+    fn long_key_resolves_but_is_not_stored() {
+        let sym = format!("{}/USDT", "ZQXV".repeat(MEMO_MAX_KEY / 4));
+        assert!(sym.len() > MEMO_MAX_KEY);
+        assert_eq!(try_resolve_ticker_id(&sym), None);
+        assert!(!RESOLVED.contains_key(sym.as_str()));
+        let ok = "ZQXV".repeat(MEMO_MAX_KEY / 4);
+        assert_eq!(ok.len(), MEMO_MAX_KEY);
+        try_resolve_ticker_id(&ok);
+        assert!(RESOLVED.contains_key(ok.as_str()), "boundary length is stored");
+    }
+}

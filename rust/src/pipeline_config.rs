@@ -1782,6 +1782,10 @@ pub struct CexsYml {
     /// `weights::config::default_scrape_interval`.
     #[serde(default)]
     pub scrape_interval_minutes: Option<u64>,
+    /// Max wait (s) for the shared `<NXR_DATA_CONFIG>/weights-fetch.lock` that
+    /// serializes every `nxr-weights` run's CMC scrape. `None` => 900.
+    #[serde(default)]
+    pub weights_lock_wait_secs: Option<u64>,
     /// Path to the rendered weights file consumed by the NXR collector.
     /// Was: `weights::config::default_weights_path`.
     #[serde(default)]

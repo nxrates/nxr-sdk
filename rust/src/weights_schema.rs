@@ -28,11 +28,21 @@ impl ParamsLock {
     /// their own threads first (see `nxr-calibrate`'s `ParamsStore`) and must not
     /// nest acquisitions. Times out rather than hanging a cron forever.
     pub fn acquire(path: &std::path::Path) -> std::io::Result<Self> {
-        use fs2::FileExt;
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let mut lock_path = path.as_os_str().to_owned();
         lock_path.push(".lock");
-        let lock_path = std::path::PathBuf::from(lock_path);
+        Self::acquire_at(
+            std::path::Path::new(&lock_path),
+            std::time::Duration::from_secs(30),
+        )
+    }
+
+    /// Same lock on an explicit lock file, waiting up to `timeout`. Lets runs on
+    /// different output paths share one lock (e.g. `nxr-weights` fetch lock).
+    pub fn acquire_at(
+        lock_path: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        use fs2::FileExt;
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -41,15 +51,15 @@ impl ParamsLock {
             .read(true)
             .write(true)
             .truncate(false)
-            .open(&lock_path)?;
+            .open(lock_path)?;
         let start = std::time::Instant::now();
         loop {
             match f.try_lock_exclusive() {
                 Ok(()) => return Ok(Self(f)),
-                Err(e) if start.elapsed() >= TIMEOUT => {
+                Err(e) if start.elapsed() >= timeout => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
-                        format!("lock {} after {:?}: {}", lock_path.display(), TIMEOUT, e),
+                        format!("lock {} after {:?}: {}", lock_path.display(), timeout, e),
                     ))
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),

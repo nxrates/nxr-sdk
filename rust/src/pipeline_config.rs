@@ -1473,6 +1473,28 @@ impl PipelineYml {
     pub fn load_default(hint: ConfigHint) -> anyhow::Result<Self> {
         Self::load(&Self::resolve_path(hint))
     }
+
+    /// `--check-config` (any position): load the config exactly as boot does
+    /// (parse + validators + storage policy), print `CHECK_CONFIG_OK` or
+    /// `CHECK_CONFIG_FAIL <err>` and exit 0 / 78. Call first thing in `main`;
+    /// no-op without the flag. Used by ops `scripts/check-nxr-config.sh` to
+    /// vet a candidate ConfigMap against every deployed image before apply.
+    pub fn check_config_and_exit_if_requested(hint: ConfigHint) {
+        if !std::env::args().any(|a| a == "--check-config") {
+            return;
+        }
+        let r = Self::load_default(hint).and_then(|pl| crate::shard::init_storage_policy(&pl));
+        match r {
+            Ok(()) => {
+                println!("CHECK_CONFIG_OK");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                println!("CHECK_CONFIG_FAIL {e:#}");
+                std::process::exit(78);
+            }
+        }
+    }
 }
 
 /// `cexs.exchanges.<name>:` per-exchange metadata. New fields are wholly

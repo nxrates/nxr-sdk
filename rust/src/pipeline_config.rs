@@ -2082,6 +2082,13 @@ pub struct CexsYml {
     pub concentration: crate::tdwap::Concentration,
 }
 
+fn d_max_markets() -> usize { 20 }
+fn d_max_markets_pegged() -> usize { 40 }
+fn d_max_total_pegged() -> usize { 60 }
+fn d_min_market_volume() -> f64 { 50_000.0 }
+fn d_pin_min_volume() -> f64 { 10_000.0 }
+fn d_direct_frac() -> f64 { 0.1 }
+
 /// `cexs.storage:` block: per-asset market ranking and the published
 /// storage denomination. Genuinely YAML-sourced: no env indirection, no Rust
 /// literal that outranks the file (the mistake the retired env-only weight
@@ -2090,14 +2097,43 @@ pub struct CexsYml {
 /// Serde ignores unknown keys, so a ConfigMap still carrying the retired
 /// `pivot:` key falls back to defaults rather than failing: roll the ConfigMap
 /// with the image that reads `storage:`.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageYml {
     /// Markets aggregated per asset (top-N by volume).
-    #[serde(default)]
-    pub max_markets_per_asset: Option<usize>,
+    #[serde(default = "d_max_markets")]
+    pub max_markets_per_asset: usize,
+    /// Same cut for a `cexs.pegged` asset.
+    #[serde(default = "d_max_markets_pegged")]
+    pub max_markets_per_pegged: usize,
+    /// Hard ceiling on a pegged asset's surveyed books, pins included.
+    #[serde(default = "d_max_total_pegged")]
+    pub max_markets_pegged_total: usize,
     /// Trust floor per market, either side.
+    #[serde(default = "d_min_market_volume")]
+    pub min_market_volume_usd: f64,
+    /// `cexs.exchanges` names whose stable books a pegged asset always keeps
+    /// past the bar, the floor and the cut (down to `pin_min_volume_usd`).
     #[serde(default)]
-    pub min_market_volume_usd: Option<f64>,
+    pub pegged_pin_venues: Vec<String>,
+    /// Pinned books below this 24h volume get no exemption.
+    #[serde(default = "d_pin_min_volume")]
+    pub pin_min_volume_usd: f64,
+    /// A pegged venue's storage-quote book beats its best stable pair only at
+    /// this fraction of that pair's volume (and the market floor).
+    #[serde(default = "d_direct_frac")]
+    pub direct_book_min_frac: f64,
+    /// Hub stables: they are priced only by each other, USD and `fiat_counters`.
+    #[serde(default)]
+    pub hub_stables: Vec<String>,
+    /// Fiat counters any pegged asset may be priced over.
+    #[serde(default)]
+    pub fiat_counters: Vec<String>,
+    /// `cexs.exchanges` names forming a pegged asset's wash bloc.
+    #[serde(default)]
+    pub wash_venues: Vec<String>,
+    /// Combined final-share cap of the wash bloc. 0 = off.
+    #[serde(default)]
+    pub wash_bloc_frac: f64,
     /// PUBLISHED denomination for every CR asset: it decides the ticker_id, and
     /// therefore the `.idx`/`.s10` directory name, so it is fixed for the
     /// process. Every market of an asset is converted straight into it.
@@ -2271,6 +2307,12 @@ fn mult_seed() -> f64 {
     1.0
 }
 
+impl Default for StorageYml {
+    fn default() -> Self {
+        serde_yml::from_str("{}").expect("every storage key has a default")
+    }
+}
+
 impl StorageYml {
     /// The storage hub: the default stored quote (`storage_quote`, else USD).
     pub fn hub(&self) -> String {
@@ -2329,8 +2371,27 @@ impl StorageYml {
     /// Refuse a policy that cannot mean what it says: the hub and every
     /// override pair resolve, keys are upper-case asset symbols, and no crypto
     /// asset (`cexs.assets`) is overridden off the hub.
-    pub fn validate(&self, assets: &[String]) -> anyhow::Result<()> {
+    pub fn validate(
+        &self,
+        assets: &[String],
+        exchanges: &BTreeMap<String, ExchangeYml>,
+    ) -> anyhow::Result<()> {
         let hub = self.hub();
+        for n in self.pegged_pin_venues.iter().chain(&self.wash_venues) {
+            anyhow::ensure!(exchanges.contains_key(n), "storage venue list: unknown exchange {n}");
+        }
+        anyhow::ensure!(
+            self.pin_min_volume_usd.is_finite()
+                && (0.0..=self.min_market_volume_usd).contains(&self.pin_min_volume_usd),
+            "pin_min_volume_usd must be in [0, min_market_volume_usd]"
+        );
+        anyhow::ensure!((0.0..=1.0).contains(&self.direct_book_min_frac), "direct_book_min_frac must be in [0, 1]");
+        anyhow::ensure!((0.0..1.0).contains(&self.wash_bloc_frac), "wash_bloc_frac must be in [0, 1)");
+        anyhow::ensure!(
+            self.max_markets_per_pegged >= self.max_markets_per_asset
+                && self.max_markets_pegged_total >= self.max_markets_per_pegged,
+            "need max_markets_per_asset <= max_markets_per_pegged <= max_markets_pegged_total"
+        );
         anyhow::ensure!(
             crate::try_resolve_ticker_id(&format!("BTC/{hub}")).is_some(),
             "storage_quote {hub} does not resolve"
@@ -2625,6 +2686,20 @@ mod tests {
             assert!(err.contains("z_gate"), "{bad}: {err}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An older binary (deny_unknown_fields `Concentration`) shares this ConfigMap:
+    /// no storage key may leak into `cexs.concentration`, and the storage policy validates.
+    #[test]
+    fn repo_config_is_old_binary_safe_and_valid() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.yml");
+        let Ok(raw) = std::fs::read_to_string(path) else { return };
+        let v: serde_yml::Value = serde_yml::from_str(&raw).unwrap();
+        let conc = v["cexs"]["concentration"].clone();
+        serde_yml::from_value::<crate::tdwap::Concentration>(conc).expect("old-shape concentration parses");
+        let y: PipelineYml = serde_yml::from_str(&raw).unwrap();
+        y.cexs.storage.validate(&y.cexs.assets, &y.cexs.exchanges).expect("storage policy validates");
+        assert_eq!(y.cexs.storage.wash_bloc_frac, 0.15);
     }
 
     /// The deployed `config.yml` must actually reach `StorageYml`. These two keys

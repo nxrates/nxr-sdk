@@ -1121,7 +1121,7 @@ static POLICY: std::sync::OnceLock<crate::pipeline_config::StorageYml> = std::sy
 /// Install the process's storage policy from its boot config, validated. A
 /// denomination names directories, so it is fixed for the process.
 pub fn init_storage_policy(pl: &crate::pipeline_config::PipelineYml) -> Result<()> {
-    pl.cexs.storage.validate(&pl.cexs.assets)?;
+    pl.cexs.storage.validate(&pl.cexs.assets, &pl.cexs.exchanges)?;
     POLICY
         .set(pl.cexs.storage.clone())
         .map_err(|_| anyhow::anyhow!("storage policy already installed"))
@@ -1149,7 +1149,7 @@ pub fn storage_policy() -> &'static crate::pipeline_config::StorageYml {
             .unwrap_or_else(|e| panic!("storage policy: {} does not parse: {e:#}", path.display()));
         pl.cexs
             .storage
-            .validate(&pl.cexs.assets)
+            .validate(&pl.cexs.assets, &pl.cexs.exchanges)
             .unwrap_or_else(|e| panic!("storage policy: {e:#}"));
         pl.cexs.storage
     })

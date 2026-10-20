@@ -1897,6 +1897,10 @@ pub struct StorageYml {
     /// asset's published id is unchanged: a leg is an input, never an output.
     #[serde(default)]
     pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
+    /// Non-pegged assets that publish a mark only with >= 1 own (volume-mapped)
+    /// leg, as a pegged asset with a parity row does: Pyth alone is no price.
+    #[serde(default)]
+    pub no_fallback: Vec<String>,
     /// Weight multiplier on a tokenised WRAPPER book (an EQ asset's surveyed
     /// markets), on top of its survey weight. The ladder for an ETF is cash
     /// relay (1.0) > index-derived leg (`ParityLegYml::weight`) > perp-derived

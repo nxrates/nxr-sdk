@@ -103,30 +103,53 @@ fn resolve_fx6_ticker_id(symbol: &str, instrument_type: InstrumentType) -> Optio
 /// A `:PERP` suffix ([`crate::resolve::PERP_SUFFIX`]) selects the PERP
 /// instrument nibble; everything else is SPOT.
 pub fn try_resolve_ticker_id(symbol: &str) -> Option<u64> {
-    if let Some(hit) = RESOLVED.get(symbol) {
-        return *hit;
-    }
-    let id = resolve_uncached(symbol);
-    // Bounded: real venue symbols are short and finite, but this is reachable
-    // from REST input, so an attacker must not be able to grow the memo with
-    // long or unbounded keys. Past either limit the symbol resolves uncached.
-    if symbol.len() <= MEMO_MAX_KEY && MEMO_LEN.load(Ordering::Relaxed) < MEMO_CAP {
-        // ponytail: the cap is approximate (racing inserts can overshoot by
-        // the thread count); an exact bound would need a lock on this path.
-        if RESOLVED.insert(symbol.into(), id).is_none() {
-            MEMO_LEN.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    id
+    RESOLVED.get_or_resolve(symbol)
 }
 
-/// Process-wide memo of [`try_resolve_ticker_id`], negatives included. An
+/// Memo of [`try_resolve_ticker_id`] results, negatives included. An
 /// unresolvable symbol walks the whole fuzzy asset index (~100 us release vs
 /// ~2 us for a hit), and a venue listing is mostly such a long tail.
-static RESOLVED: LazyLock<DashMap<Box<str>, Option<u64>>> = LazyLock::new(DashMap::new);
-/// Entry count of [`RESOLVED`], kept beside it because `DashMap::len` locks
-/// every shard.
-static MEMO_LEN: AtomicUsize = AtomicUsize::new(0);
+struct Memo {
+    map: DashMap<Box<str>, Option<u64>>,
+    /// Entry count, kept beside the map because `DashMap::len` locks every shard.
+    len: AtomicUsize,
+    cap: usize,
+}
+
+impl Memo {
+    fn new(cap: usize) -> Self {
+        Self { map: DashMap::new(), len: AtomicUsize::new(0), cap }
+    }
+
+    fn get_or_resolve(&self, symbol: &str) -> Option<u64> {
+        if let Some(hit) = self.map.get(symbol) {
+            return *hit;
+        }
+        let id = resolve_uncached(symbol);
+        // Bounded: real venue symbols are short and finite, but this is reachable
+        // from REST input, so an attacker must not be able to grow the memo with
+        // long or unbounded keys. Past either limit the symbol resolves uncached.
+        if symbol.len() <= MEMO_MAX_KEY {
+            if self.len.load(Ordering::Relaxed) >= self.cap {
+                // Full: drop everything and start over. A memo that stops
+                // storing at the cap leaves real symbols cold-resolving inline
+                // (~100 us each on every hot reload); clearing keeps it working.
+                // Races only lose entries, which re-resolve once.
+                self.map.clear();
+                self.len.store(0, Ordering::Relaxed);
+            }
+            // ponytail: the count is approximate (racing inserts can overshoot
+            // by the thread count); an exact bound would need a lock on this path.
+            if self.map.insert(symbol.into(), id).is_none() {
+                self.len.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        id
+    }
+}
+
+/// Process-wide memo, shared by every venue pre-resolve and REST lookup.
+static RESOLVED: LazyLock<Memo> = LazyLock::new(|| Memo::new(MEMO_CAP));
 const MEMO_CAP: usize = 1 << 17;
 /// Longest symbol worth memoizing; longer keys are resolved but never stored.
 const MEMO_MAX_KEY: usize = 64;
@@ -242,7 +265,7 @@ mod memo_tests {
     fn unresolvable_symbol_is_memoized_and_stable() {
         let sym = "ZQXVWJ/USDT";
         assert_eq!(try_resolve_ticker_id(sym), None);
-        assert_eq!(RESOLVED.get(sym).map(|e| *e), Some(None), "negative stored");
+        assert_eq!(RESOLVED.map.get(sym).map(|e| *e), Some(None), "negative stored");
         assert_eq!(try_resolve_ticker_id(sym), None, "repeat is stable");
     }
 
@@ -251,10 +274,31 @@ mod memo_tests {
         let sym = format!("{}/USDT", "ZQXV".repeat(MEMO_MAX_KEY / 4));
         assert!(sym.len() > MEMO_MAX_KEY);
         assert_eq!(try_resolve_ticker_id(&sym), None);
-        assert!(!RESOLVED.contains_key(sym.as_str()));
+        assert!(!RESOLVED.map.contains_key(sym.as_str()));
         let ok = "ZQXV".repeat(MEMO_MAX_KEY / 4);
         assert_eq!(ok.len(), MEMO_MAX_KEY);
         try_resolve_ticker_id(&ok);
-        assert!(RESOLVED.contains_key(ok.as_str()), "boundary length is stored");
+        assert!(RESOLVED.map.contains_key(ok.as_str()), "boundary length is stored");
+    }
+
+    /// Past the cap the memo resets instead of dying: a real symbol still
+    /// resolves to the same id and is memoised, and new symbols keep storing.
+    /// A freestanding `Memo` with a small cap keeps this hermetic (no shared
+    /// map, no timing) and fast in debug.
+    #[test]
+    fn memo_keeps_working_past_the_cap() {
+        let memo = Memo::new(64);
+        let real = "XAU/USDT";
+        let id = memo.get_or_resolve(real);
+        assert_eq!(id, try_resolve_ticker_id(real), "same result as the shared memo");
+        assert!(id.is_some(), "test symbol must resolve");
+        for i in 0..256u32 {
+            memo.get_or_resolve(&format!("ZQ{i:05}/USDT"));
+        }
+        assert!(memo.map.len() <= 64, "bounded past the cap, len {}", memo.map.len());
+        assert_eq!(memo.get_or_resolve(real), id, "result unchanged past the cap");
+        assert!(memo.map.contains_key(real), "real symbol memoised after the flood");
+        memo.get_or_resolve("ZQTAIL/USDT");
+        assert!(memo.map.contains_key("ZQTAIL/USDT"), "new symbols still store past the cap");
     }
 }

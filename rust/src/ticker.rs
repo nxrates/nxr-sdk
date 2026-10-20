@@ -1,5 +1,6 @@
 use crate::resolve::{resolve_asset_in_class, resolve_ticker, split_perp};
 use dashmap::DashMap;
+use std::sync::LazyLock;
 use mitch::ticker::forex_ticker;
 use mitch::{AssetClass, InstrumentType};
 use tracing::warn;
@@ -101,6 +102,24 @@ fn resolve_fx6_ticker_id(symbol: &str, instrument_type: InstrumentType) -> Optio
 /// A `:PERP` suffix ([`crate::resolve::PERP_SUFFIX`]) selects the PERP
 /// instrument nibble; everything else is SPOT.
 pub fn try_resolve_ticker_id(symbol: &str) -> Option<u64> {
+    if let Some(hit) = RESOLVED.get(symbol) {
+        return *hit;
+    }
+    let id = resolve_uncached(symbol);
+    // ponytail: bounded, venue listings are finite; past the cap fall through uncached.
+    if RESOLVED.len() < RESOLVED_CAP {
+        RESOLVED.insert(symbol.into(), id);
+    }
+    id
+}
+
+/// Process-wide memo of [`try_resolve_ticker_id`], negatives included. An
+/// unresolvable symbol walks the whole fuzzy asset index (~2.6 ms release vs
+/// ~2 us for a hit), and a venue listing is mostly such a long tail.
+static RESOLVED: LazyLock<DashMap<Box<str>, Option<u64>>> = LazyLock::new(DashMap::new);
+const RESOLVED_CAP: usize = 1 << 17;
+
+fn resolve_uncached(symbol: &str) -> Option<u64> {
     let (symbol, instrument_type) = split_perp(symbol);
     // For 6-char pure-alpha FX pairs (EURUSD, USDJPY, USDCAD, ...), use a direct 3+3
     // base/quote split to match the 6-char broker symbol encoding.
@@ -202,3 +221,4 @@ mod perp_tests {
         assert!(crate::is_perp_symbol("XAU/USDT:PERP"));
     }
 }
+

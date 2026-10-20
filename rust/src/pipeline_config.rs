@@ -1909,11 +1909,6 @@ pub struct StorageYml {
     /// instead of following wrapper books alone. Absent class = no bound.
     #[serde(default)]
     pub unanchored_drift_bps: BTreeMap<String, f64>,
-    /// Every `onchain.venues[].mitch_id` venue publishing `ASSET/<quote>` for a
-    /// configured pool joins that asset's mark as one leg, like a CEX venue.
-    /// Off = the pass is byte-identical to before.
-    #[serde(default)]
-    pub onchain_venue_legs: bool,
 }
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at

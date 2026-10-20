@@ -497,6 +497,9 @@ pub struct ProviderEntry {
     /// surveyed venue with no volume row. Splits the unmapped bloc bound and
     /// the water-fill eligibility in [`compute_vwap_at`]. Default `false`.
     pub mapped: bool,
+    /// A wash-suspect venue: with its peers it holds at most
+    /// `cexs.storage.wash_bloc_frac` of the FINAL shares and takes no cap excess.
+    pub wash: bool,
     /// When this leg joined the blend; the join ramp runs from here. `None` =
     /// no ramp (a derived leg that is always present).
     pub joined: Option<Instant>,
@@ -526,6 +529,7 @@ impl ProviderEntry {
             ema_ipi_secs: 5.0,
             injected: false,
             mapped: false,
+            wash: false,
             joined: Some(now),
             last_gap_secs: 0.0,
             resid: 0.0,
@@ -537,6 +541,13 @@ impl ProviderEntry {
     #[must_use]
     pub const fn with_mapped(mut self, mapped: bool) -> Self {
         self.mapped = mapped;
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn with_wash(mut self, wash: bool) -> Self {
+        self.wash = wash;
         self
     }
 
@@ -614,6 +625,30 @@ pub fn compute_vwap_profiled_at<'a, I>(
     stale_threshold_secs: f64,
     kernel: Kernel,
     now: Instant,
+) -> Option<(Index, WeightProfile)>
+where
+    I: IntoIterator<Item = &'a ProviderEntry>,
+    I::IntoIter: Clone,
+{
+    compute_vwap_conc(ticker_id, entries, stale_threshold_secs, kernel, now, wash_bloc_frac())
+}
+
+/// `cexs.storage.wash_bloc_frac`, read once like [`Concentration::get`]; 0 (off) when unreadable.
+fn wash_bloc_frac() -> f64 {
+    static F: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        use crate::pipeline_config::{ConfigHint, PipelineYml};
+        PipelineYml::load_default(ConfigHint::Runtime).map_or(0.0, |p| p.cexs.storage.wash_bloc_frac)
+    })
+}
+
+fn compute_vwap_conc<'a, I>(
+    ticker_id: u64,
+    entries: I,
+    stale_threshold_secs: f64,
+    kernel: Kernel,
+    now: Instant,
+    wash_frac: f64,
 ) -> Option<(Index, WeightProfile)>
 where
     I: IntoIterator<Item = &'a ProviderEntry>,
@@ -709,7 +744,7 @@ where
     );
     // `(raw share, excess eligibility)`: only evidence legs receive the cap's
     // excess, in proportion to share × presence.
-    let raw = |e: &ProviderEntry, g: f64, w: f64| -> (f64, f64) {
+    let raw0 = |e: &ProviderEntry, g: f64, w: f64| -> (f64, f64) {
         let r = w / w_sum;
         if !any_mapped {
             (r, r * g)
@@ -718,6 +753,31 @@ where
         } else {
             (r * k_un, 0.0)
         }
+    };
+    // Wash bloc, the same rule on the pre-cap shares: `x = Φ·min(x_raw, F) + (1−Φ)·x_raw`,
+    // Φ = the other legs' presence; wash legs take no excess, so the bound holds on final shares.
+    let (mut x_raw, mut o_raw, mut o_g) = (0.0f64, 0.0f64, 0.0f64);
+    for e in entries.clone() {
+        if let Some((_, g, w)) = weigh(e) {
+            let r = raw0(e, g, w).0;
+            if e.wash {
+                x_raw += r;
+            } else {
+                o_raw += r;
+                o_g += r * g;
+            }
+        }
+    }
+    let (k_wash, k_other) = if wash_frac > 0.0 && x_raw > 0.0 && o_raw > 0.0 {
+        let phi = o_g / o_raw;
+        let x = phi * x_raw.min(wash_frac) + (1.0 - phi) * x_raw;
+        (x / x_raw, (1.0 - x) / (1.0 - x_raw).max(f64::MIN_POSITIVE))
+    } else {
+        (1.0, 1.0)
+    };
+    let raw = |e: &ProviderEntry, g: f64, w: f64| -> (f64, f64) {
+        let (r, x) = raw0(e, g, w);
+        if e.wash { (r * k_wash, 0.0) } else { (r * k_other, x * k_other) }
     };
     let cap = Concentration::get().w_max(n);
     let lam = water_fill(
@@ -731,8 +791,8 @@ where
         water_fill(
             entries
                 .clone()
-                .filter_map(|e| weigh(e).map(|(_, g, w)| raw(e, g, w)))
-                .map(|(r, _)| (r, r)),
+                .filter_map(|e| weigh(e).map(|(_, g, w)| (raw(e, g, w).0, e.wash)))
+                .map(|(r, wash)| (r, if wash { 0.0 } else { r })),
             cap,
         )
     });
@@ -740,7 +800,7 @@ where
         let (r, x) = raw(e, g, w);
         match (lam, all_eligible) {
             (Some(l), _) => (r + l * x).min(cap),
-            (None, Some(Some(l))) => (r + l * r).min(cap),
+            (None, Some(Some(l))) => (r + l * if e.wash { 0.0 } else { r }).min(cap),
             (None, _) => r,
         }
     };
@@ -1722,6 +1782,49 @@ mod unmapped_bloc_tests {
         compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now)
             .expect("legs blend")
             .1
+    }
+
+    /// 3 wash legs of 8 carry 37.5% of the raw weight; the bloc bound holds
+    /// their combined FINAL share at `wash_bloc_frac`, and off it changes nothing.
+    #[test]
+    fn wash_bloc_is_bounded_on_final_shares() {
+        let now = Instant::now();
+        let entries: Vec<ProviderEntry> = (0..8)
+            .map(|i| {
+                let wash = i < 3;
+                let mid = if wash { 101.0 } else { 100.0 };
+                let mut e = ProviderEntry::new_at(leg(mid), 1.0, now).with_mapped(true).with_wash(wash);
+                e.joined = None;
+                e
+            })
+            .collect();
+        let run = |frac: f64| {
+            compute_vwap_conc(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now, frac).unwrap().0.mid() - 100.0
+        };
+        assert!((run(0.15) - 0.15).abs() < 0.01, "wash share {}", run(0.15));
+        assert!((run(0.0) - 0.375).abs() < 0.01, "off: {}", run(0.0));
+    }
+
+    /// One clean leg against three wash legs: the cap's excess has no eligible home,
+    /// and the fallback pass must not hand it to the wash bloc either.
+    #[test]
+    fn wash_bloc_holds_when_the_cap_has_no_other_home() {
+        let now = Instant::now();
+        let entries: Vec<ProviderEntry> = (0..4)
+            .map(|i| {
+                let wash = i > 0;
+                let mut e = ProviderEntry::new_at(leg(if wash { 101.0 } else { 100.0 }), 1.0, now)
+                    .with_mapped(true)
+                    .with_wash(wash);
+                e.joined = None;
+                e
+            })
+            .collect();
+        let m = compute_vwap_conc(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now, 0.15)
+            .unwrap()
+            .0
+            .mid();
+        assert!(m - 100.0 <= 0.15 + 0.01, "wash share {}", m - 100.0);
     }
 
     /// Owner calibration: ~0.99 alone, falling with breadth to ~0.41 at 8.

@@ -1559,6 +1559,10 @@ pub struct ExchangeYml {
     /// after the existing supported-set intersection.
     #[serde(default)]
     pub exclude_symbols: Vec<String>,
+    /// Canonical "BASE/QUOTE" pairs `nxr-weights` keeps on this venue whatever
+    /// their 24h volume or rank: a deep book that trades little (kraken AUSD/USD).
+    #[serde(default)]
+    pub include_symbols: Vec<String>,
     /// Per-provider inbound-silence watchdog threshold, seconds. Applied
     /// PER SUBSCRIBED SYMBOL: a pair whose ticker has been silent this long,
     /// while the session keeps streaming other pairs, has lost its subscription

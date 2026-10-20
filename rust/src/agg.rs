@@ -103,6 +103,13 @@ impl RunningStats {
     /// Update with a new mid price. Returns z-score (0.0 during warmup, count < 10).
     #[inline]
     pub fn update(&mut self, mid: f64) -> f64 {
+        self.update_floored(mid, 0.0)
+    }
+
+    /// [`Self::update`] with the stddev floored at `min_sd`: a feed pinned for minutes
+    /// decays its EMA variance toward zero, and then a sub-bp move scores z in the hundreds.
+    #[inline]
+    pub fn update_floored(&mut self, mid: f64, min_sd: f64) -> f64 {
         if self.count == 0 {
             self.ema_mean = mid;
             self.ema_var = 0.0;
@@ -114,7 +121,7 @@ impl RunningStats {
         let z = if self.count < 10 {
             0.0
         } else {
-            let stddev = self.ema_var.sqrt();
+            let stddev = self.ema_var.sqrt().max(min_sd);
             if stddev < 1e-12 { 0.0 } else { delta.abs() / stddev }
         };
 

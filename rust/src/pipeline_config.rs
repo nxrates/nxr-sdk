@@ -1081,6 +1081,20 @@ impl ZGateYml {
     fn default_min_sd_bps() -> f64 {
         2.0
     }
+    /// Upper bounds keep a typo (`min_sd_bps: 2000`) from silently disabling the gate.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.threshold.is_finite() && self.threshold > 0.0 && self.threshold <= 20.0,
+            "oracles.z_gate.threshold must be finite and in (0, 20], got {}",
+            self.threshold
+        );
+        anyhow::ensure!(
+            self.min_sd_bps.is_finite() && self.min_sd_bps > 0.0 && self.min_sd_bps <= 100.0,
+            "oracles.z_gate.min_sd_bps must be finite and in (0, 100], got {}",
+            self.min_sd_bps
+        );
+        Ok(())
+    }
     /// The stddev floor for `price`.
     pub fn min_sd(&self, price: f64) -> f64 {
         price * self.min_sd_bps / 1e4
@@ -1467,6 +1481,7 @@ impl PipelineYml {
             .with_context(|| format!("read pipeline yaml {}", path.display()))?;
         let parsed = serde_yml::from_str::<Self>(&s)
             .with_context(|| format!("parse pipeline yaml {}", path.display()))?;
+        parsed.oracles.z_gate.validate()?;
         if parsed.oracles.public_api.enabled {
             parsed.oracles.public_api.origin_host()?;
             for symbol in &parsed.oracles.public_api.symbols {
@@ -2391,6 +2406,27 @@ mod tests {
         let z = serde_yml::from_str::<OraclesYml>("z_gate: {min_sd_bps: 3.5}").unwrap().z_gate;
         assert_eq!((z.threshold, z.min_sd_bps), (4.0, 3.5));
         assert!(serde_yml::from_str::<OraclesYml>("z_gate: {treshold: 4.0}").is_err());
+    }
+
+    #[test]
+    fn z_gate_bounds_are_enforced() {
+        let z = |y: &str| serde_yml::from_str::<OraclesYml>(y).unwrap().z_gate.validate();
+        assert!(ZGateYml::default().validate().is_ok());
+        assert!(z("aggregation_interval_ms: 250").is_ok());
+        assert!(z("z_gate: {threshold: 20, min_sd_bps: 100}").is_ok());
+        for bad in [
+            "z_gate: {threshold: 0}",
+            "z_gate: {min_sd_bps: 0}",
+            "z_gate: {threshold: -1}",
+            "z_gate: {min_sd_bps: -0.5}",
+            "z_gate: {threshold: 20.1}",
+            "z_gate: {min_sd_bps: 100.1}",
+            "z_gate: {threshold: .nan}",
+            "z_gate: {min_sd_bps: .nan}",
+            "z_gate: {threshold: .inf}",
+        ] {
+            assert!(z(bad).is_err(), "{bad}");
+        }
     }
 
     /// The deployed `config.yml` must actually reach `StorageYml`. These two keys

@@ -288,4 +288,52 @@ mod tests {
         acc.reaffirm(1.0, 1.0002, 5, 5);
         assert_eq!(acc.flush().unwrap().flags, 0);
     }
+
+    fn warmed(px: f64, n: usize) -> RunningStats {
+        let mut rs = RunningStats::default();
+        for _ in 0..n {
+            rs.update(px);
+        }
+        rs
+    }
+
+    #[test]
+    fn floor_scores_a_move_off_an_exactly_pinned_feed() {
+        let floor = 100.0 * 2e-4;
+        // Zero variance: unfloored scores z=0 and waves a 20 bp spike through.
+        assert_eq!(warmed(100.0, 30).update(100.2), 0.0);
+        // Floored: |0.2| / 0.02 = 10.
+        let z = warmed(100.0, 30).update_floored(100.2, floor);
+        assert!((z - 10.0).abs() < 1e-9, "z={z}");
+        // A 5 bp step stays under 4 sigma of the floor (z=2.5).
+        let z = warmed(100.0, 30).update_floored(100.05, floor);
+        assert!((z - 2.5).abs() < 1e-9, "z={z}");
+    }
+
+    #[test]
+    fn floor_tames_sub_bp_jitter_variance() {
+        let floor = 100.0 * 2e-4;
+        let jitter = |rs: &mut RunningStats| {
+            for i in 0..40 {
+                rs.update(100.0 + if i % 2 == 0 { 0.0 } else { 0.001 });
+            }
+        };
+        let (mut a, mut b) = (RunningStats::default(), RunningStats::default());
+        jitter(&mut a);
+        jitter(&mut b);
+        // Tiny but nonzero variance: a 5 bp step scores far over 4 unfloored.
+        let raw = a.update(100.05);
+        assert!(raw > 40.0, "raw z={raw}");
+        let z = b.update_floored(100.05, floor);
+        assert!(z < 4.0, "floored z={z}");
+    }
+
+    #[test]
+    fn update_is_update_floored_at_zero() {
+        let series = [100.0, 100.001, 99.999, 100.0, 100.002, 100.0, 100.001, 100.0, 99.998, 100.0, 100.0, 100.0, 100.3, 100.0];
+        let (mut a, mut b) = (RunningStats::default(), RunningStats::default());
+        for p in series {
+            assert_eq!(a.update(p).to_bits(), b.update_floored(p, 0.0).to_bits());
+        }
+    }
 }

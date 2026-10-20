@@ -1057,6 +1057,40 @@ pub struct OraclesYml {
     /// the forwarder refuses to boot without it.
     #[serde(default)]
     pub jump_guard: Option<JumpGuardYml>,
+    /// z-score outlier gate of the `nxr-oracle` forwarder. Absent = defaults.
+    #[serde(default)]
+    pub z_gate: ZGateYml,
+}
+
+/// `oracles.z_gate`: a sample scoring above `threshold` sigma is rejected;
+/// sigma is floored at `min_sd_bps` of price, so moves under
+/// `threshold * min_sd_bps` always pass.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZGateYml {
+    #[serde(default = "ZGateYml::default_threshold")]
+    pub threshold: f64,
+    #[serde(default = "ZGateYml::default_min_sd_bps")]
+    pub min_sd_bps: f64,
+}
+
+impl ZGateYml {
+    fn default_threshold() -> f64 {
+        4.0
+    }
+    fn default_min_sd_bps() -> f64 {
+        2.0
+    }
+    /// The stddev floor for `price`.
+    pub fn min_sd(&self, price: f64) -> f64 {
+        price * self.min_sd_bps / 1e4
+    }
+}
+
+impl Default for ZGateYml {
+    fn default() -> Self {
+        Self { threshold: Self::default_threshold(), min_sd_bps: Self::default_min_sd_bps() }
+    }
 }
 
 /// `oracles.jump_guard`: a sample further than `frac` (`frac_warmup` while
@@ -2348,6 +2382,16 @@ impl Default for BackfillDiskYml {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn z_gate_defaults_when_absent_and_rejects_typos() {
+        let d = serde_yml::from_str::<OraclesYml>("aggregation_interval_ms: 250").unwrap().z_gate;
+        assert_eq!((d.threshold, d.min_sd_bps), (4.0, 2.0));
+        assert_eq!(d.min_sd(100.0), 100.0 * 2e-4, "default floor is the old constant");
+        let z = serde_yml::from_str::<OraclesYml>("z_gate: {min_sd_bps: 3.5}").unwrap().z_gate;
+        assert_eq!((z.threshold, z.min_sd_bps), (4.0, 3.5));
+        assert!(serde_yml::from_str::<OraclesYml>("z_gate: {treshold: 4.0}").is_err());
+    }
 
     /// The deployed `config.yml` must actually reach `StorageYml`. These two keys
     /// sat in the YAML with no field behind them, so serde dropped them and the

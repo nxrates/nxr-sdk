@@ -83,9 +83,37 @@ fn jaro_winkler_similarity(s1: &str, s2: &str) -> f64 {
     jaro + 0.1 * prefix_len * (1.0 - jaro)
 }
 
+/// Strings up to this many chars run on stack buffers; longer ones (rare:
+/// normalized names/aliases and ticker queries) take the heap path.
+const JARO_STACK: usize = 64;
+
+fn fill_chars(s: &str, buf: &mut [char; JARO_STACK]) -> Option<usize> {
+    let mut n = 0;
+    for c in s.chars() {
+        *buf.get_mut(n)? = c;
+        n += 1;
+    }
+    Some(n)
+}
+
 fn jaro_similarity(s1: &str, s2: &str) -> f64 {
+    let (mut b1, mut b2) = (['\0'; JARO_STACK], ['\0'; JARO_STACK]);
+    if let (Some(l1), Some(l2)) = (fill_chars(s1, &mut b1), fill_chars(s2, &mut b2)) {
+        return jaro_core(
+            &b1[..l1],
+            &b2[..l2],
+            &mut [false; JARO_STACK][..l1],
+            &mut [false; JARO_STACK][..l2],
+        );
+    }
     let c1: Vec<char> = s1.chars().collect();
     let c2: Vec<char> = s2.chars().collect();
+    let (mut m1, mut m2) = (vec![false; c1.len()], vec![false; c2.len()]);
+    jaro_core(&c1, &c2, &mut m1, &mut m2)
+}
+
+/// `m1`/`m2` are zeroed scratch of the same lengths as `c1`/`c2`.
+fn jaro_core(c1: &[char], c2: &[char], m1: &mut [bool], m2: &mut [bool]) -> f64 {
     let (l1, l2) = (c1.len(), c2.len());
 
     if l1 == 0 && l2 == 0 {
@@ -100,8 +128,6 @@ fn jaro_similarity(s1: &str, s2: &str) -> f64 {
     } else {
         l1.max(l2) / 2 - 1
     };
-    let mut m1 = vec![false; l1];
-    let mut m2 = vec![false; l2];
     let mut matches = 0usize;
 
     for i in 0..l1 {
@@ -138,6 +164,58 @@ fn jaro_similarity(s1: &str, s2: &str) -> f64 {
 
     let m = matches as f64;
     (m / l1 as f64 + m / l2 as f64 + (m - transpositions as f64 / 2.0) / m) / 3.0
+}
+
+/// Bit for `c` in a char-presence mask: a-z, 0-9, `+`, `-` get their own bit
+/// (the whole normalized alphabet for ASCII); anything else shares bit 63.
+fn char_bit(c: char) -> u64 {
+    1u64 << match c {
+        'a'..='z' => c as u32 - 'a' as u32,
+        '0'..='9' => 26 + c as u32 - '0' as u32,
+        '+' => 36,
+        '-' => 37,
+        _ => 63,
+    }
+}
+
+fn char_mask(s: &str) -> u64 {
+    s.chars().fold(0, |m, c| m | char_bit(c))
+}
+
+/// Upper bound of [`jaro_winkler_similarity`] without running the matcher.
+/// Matches m <= min(l1, l2) and <= the number of `s2` chars that occur in `s1`
+/// at all (`s1_mask`), transpositions >= 0, and the prefix bonus is monotone
+/// in jaro and bounded by the real common prefix (<= 4 chars). Lets the fuzzy
+/// scan skip candidates that cannot reach the threshold.
+fn jw_upper_bound(s1: &str, l1: usize, s1_mask: u64, s2: &str, l2: usize) -> f64 {
+    let shared = s2.chars().filter(|&c| char_bit(c) & s1_mask != 0).count();
+    let m = l1.min(l2).min(shared) as f64;
+    let jaro = (m / l1 as f64 + m / l2 as f64 + 1.0) / 3.0;
+    let prefix = s1
+        .chars()
+        .zip(s2.chars())
+        .take(4)
+        .take_while(|(a, b)| a == b)
+        .count() as f64;
+    jaro + 0.1 * prefix * (1.0 - jaro)
+}
+
+/// [`jaro_winkler_similarity`] when it can reach `min_confidence`, else 0.0
+/// (any value < `min_confidence` is equivalent to the caller). `l1`/`l2` are
+/// the char counts of `s1`/`s2`, `s1_mask` is `char_mask(s1)`.
+fn jw_at_least(
+    s1: &str,
+    l1: usize,
+    s1_mask: u64,
+    s2: &str,
+    l2: usize,
+    min_confidence: f64,
+) -> f64 {
+    // 1e-9 slack keeps the skip strictly conservative against float rounding.
+    if l1 != 0 && l2 != 0 && jw_upper_bound(s1, l1, s1_mask, s2, l2) + 1e-9 < min_confidence {
+        return 0.0;
+    }
+    jaro_winkler_similarity(s1, s2)
 }
 
 // ---- Suffix stripping ----
@@ -202,37 +280,66 @@ fn strip_ticker_suffixes(symbol: &str) -> String {
 
 // ---- Asset resolver ----
 
-/// Strength of an EXACT hit of `key` on `asset`: 0 = canonical name or PRIMARY
-/// (first) alias, 1 = secondary alias, `None` = no exact hit.
-///
-/// Load order used to decide which row owned a shared key (last write wins), so
-/// an index's 11th alias outranked an equity's own ticker: `ES` → S&P 500 not
-/// Eversource, `TW` → Taiwan Weighted not Tradeweb, `BSX` → Sensex not Boston
-/// Scientific. Rank first, then lowest (class, class_id), makes the winner
-/// independent of CSV order.
-fn exact_rank(asset: &Asset, key: &str) -> Option<u8> {
-    if normalize_asset_name(&asset.name) == key {
-        return Some(0);
-    }
-    asset
-        .aliases
-        .split('|')
-        .filter(|s| !s.is_empty())
-        .position(|a| normalize_asset_name(a) == key)
-        .map(|i| u8::from(i > 0))
-}
-
 /// Deterministic exact-match precedence key: primary before secondary, then
 /// lowest class then lowest class_id.
 fn exact_key(asset: &Asset, rank: u8) -> (u8, u8, u16) {
     (rank, asset.class as u8, asset.class_id)
 }
 
+/// One asset with its names normalized ONCE at load. `find` used to
+/// re-normalize every name and alias of every asset per call.
+struct Entry {
+    asset: Asset,
+    norm_name: String,
+    /// One per non-empty raw alias, in alias order (empty norms kept, so the
+    /// index is the alias position).
+    norm_aliases: Vec<String>,
+}
+
+impl Entry {
+    fn new(asset: Asset) -> Self {
+        let norm_name = normalize_asset_name(&asset.name);
+        let norm_aliases = asset
+            .aliases
+            .split('|')
+            .filter(|s| !s.is_empty())
+            .map(normalize_asset_name)
+            .collect();
+        Self {
+            asset,
+            norm_name,
+            norm_aliases,
+        }
+    }
+
+    /// Strength of an EXACT hit of `key`: 0 = canonical name or PRIMARY
+    /// (first) alias, 1 = secondary alias, `None` = no exact hit.
+    ///
+    /// Load order used to decide which row owned a shared key (last write
+    /// wins), so an index's 11th alias outranked an equity's own ticker: `ES`
+    /// -> S&P 500 not Eversource, `TW` -> Taiwan Weighted not Tradeweb, `BSX`
+    /// -> Sensex not Boston Scientific. Rank first, then lowest (class,
+    /// class_id), makes the winner independent of CSV order.
+    fn exact_rank(&self, key: &str) -> Option<u8> {
+        if self.norm_name == key {
+            return Some(0);
+        }
+        self.norm_aliases
+            .iter()
+            .position(|a| a == key)
+            .map(|i| u8::from(i > 0))
+    }
+}
+
 struct AssetResolver {
     by_id: HashMap<(AssetClass, u16), Asset>,
     by_normalized: HashMap<String, (Asset, u8)>,
-    by_class: HashMap<AssetClass, Vec<Asset>>,
-    all: Vec<Asset>,
+    /// Per-class exact index: normalized key -> `all` index of the winner by
+    /// [`exact_key`]. Makes the class-pinned exact lookup O(1).
+    exact_by_class: HashMap<AssetClass, HashMap<String, usize>>,
+    /// Indices into `all`, per class, in load order.
+    by_class: HashMap<AssetClass, Vec<usize>>,
+    all: Vec<Entry>,
 }
 
 impl AssetResolver {
@@ -240,6 +347,7 @@ impl AssetResolver {
         let mut r = Self {
             by_id: HashMap::new(),
             by_normalized: HashMap::new(),
+            exact_by_class: HashMap::new(),
             by_class: HashMap::new(),
             all: Vec::new(),
         };
@@ -255,16 +363,18 @@ impl AssetResolver {
     }
 
     fn load_class(&mut self, class: AssetClass, data: &[DataEntry]) {
-        let mut class_assets = Vec::new();
+        let mut class_ixs = Vec::new();
+        let class_exact = self.exact_by_class.entry(class).or_default();
         for entry in data {
             let class_id = entry.id as u16;
-            let asset = Asset {
+            let ent = Entry::new(Asset {
                 id: pack_asset(class, class_id),
                 class_id,
                 class,
                 name: entry.name.to_string(),
                 aliases: entry.aliases.to_string(),
-            };
+            });
+            let asset = &ent.asset;
 
             self.by_id.insert((class, class_id), asset.clone());
 
@@ -274,9 +384,15 @@ impl AssetResolver {
             // silently mis-resolves one of them (the "Ethereum Plus" 5701 vs
             // "Ethereum" 5801 incident). Panic at load so the boot CI gate /
             // collision SLA catches it instead of shipping a ghost id.
-            let mut insert_checked = |norm: String, asset: &Asset| {
-                let rank = exact_rank(asset, &norm).unwrap_or(1);
-                if let Some((existing, _)) = self.by_normalized.get(&norm)
+            let all_len = self.all.len();
+            let all = &self.all;
+            let by_normalized = &mut self.by_normalized;
+            let mut insert_checked = |norm: &String| {
+                if norm.is_empty() {
+                    return;
+                }
+                let rank = ent.exact_rank(norm).unwrap_or(1);
+                if let Some((existing, _)) = by_normalized.get(norm)
                     && (existing.class, existing.class_id) != (asset.class, asset.class_id)
                 {
                     // Hard gate scoped to CR↔CR (the collision SLA, RCA ROOT1c):
@@ -318,30 +434,32 @@ impl AssetResolver {
                         );
                     }
                 }
-                if self
-                    .by_normalized
-                    .get(&norm)
-                    .is_none_or(|(ex, er)| exact_key(asset, rank) < exact_key(ex, *er))
+                let key = exact_key(asset, rank);
+                if by_normalized
+                    .get(norm)
+                    .is_none_or(|(ex, er)| key < exact_key(ex, *er))
                 {
-                    self.by_normalized.insert(norm, (asset.clone(), rank));
+                    by_normalized.insert(norm.clone(), (asset.clone(), rank));
+                }
+                // Same precedence, class-local (`all_len` = this entry's index).
+                if class_exact.get(norm).is_none_or(|&ix| {
+                    // The current entry is not in `all` yet.
+                    let ex = if ix == all_len { &ent } else { &all[ix] };
+                    key < exact_key(&ex.asset, ex.exact_rank(norm).unwrap_or(1))
+                }) {
+                    class_exact.insert(norm.clone(), all_len);
                 }
             };
 
-            let norm = normalize_asset_name(entry.name);
-            if !norm.is_empty() {
-                insert_checked(norm, &asset);
-            }
-            for alias in entry.aliases.split('|').filter(|s| !s.is_empty()) {
-                let norm_alias = normalize_asset_name(alias);
-                if !norm_alias.is_empty() {
-                    insert_checked(norm_alias, &asset);
-                }
+            insert_checked(&ent.norm_name);
+            for norm_alias in &ent.norm_aliases {
+                insert_checked(norm_alias);
             }
 
-            class_assets.push(asset.clone());
-            self.all.push(asset);
+            class_ixs.push(all_len);
+            self.all.push(ent);
         }
-        self.by_class.insert(class, class_assets);
+        self.by_class.insert(class, class_ixs);
     }
 
     fn find(
@@ -356,9 +474,9 @@ impl AssetResolver {
 
         let norm = normalize_asset_name(&strip_ticker_suffixes(query));
 
-        let candidates: Vec<&Asset> = match class_filter {
-            Some(c) => self.by_class.get(&c)?.iter().collect(),
-            None => self.all.iter().collect(),
+        let class_ixs = match class_filter {
+            Some(c) => Some(self.by_class.get(&c)?),
+            None => None,
         };
 
         // Exact name/alias match ALWAYS beats any fuzzy hit, in any class.
@@ -384,14 +502,11 @@ impl AssetResolver {
                 });
             }
             // Class-filtered fallback: the global winner sits in another class.
-            if let Some(asset) = candidates
-                .iter()
-                .filter_map(|a| exact_rank(a, &key).map(|r| (exact_key(a, r), *a)))
-                .min_by_key(|(k, _)| *k)
-                .map(|(_, a)| a)
+            if let Some(c) = class_filter
+                && let Some(&ix) = self.exact_by_class.get(&c).and_then(|m| m.get(&key))
             {
                 return Some(AssetMatch {
-                    asset: asset.clone(),
+                    asset: self.all[ix].asset.clone(),
                     confidence: 1.0,
                     matched_field: format!("Exact alias match on '{}'", key),
                 });
@@ -399,44 +514,63 @@ impl AssetResolver {
         }
 
         // Fuzzy matching
+        let (nl, nm) = (norm.chars().count(), char_mask(&norm));
         let mut best: Option<AssetMatch> = None;
-        for asset in candidates {
-            let name_sim = jaro_winkler_similarity(&norm, &normalize_asset_name(&asset.name));
-            let mut best_sim = name_sim;
-            let mut field = "name".to_string();
+        let mut scan = |ent: &Entry| {
+            let name_len = ent.norm_name.chars().count();
+            let mut best_sim = jw_at_least(&norm, nl, nm, &ent.norm_name, name_len, min_confidence);
+            let mut field_alias: Option<usize> = None;
 
-            for alias in asset.aliases.split('|').filter(|s| !s.is_empty()) {
-                let sim = jaro_winkler_similarity(&norm, &normalize_asset_name(alias));
+            for (i, na) in ent.norm_aliases.iter().enumerate() {
+                let sim = jw_at_least(&norm, nl, nm, na, na.chars().count(), min_confidence);
                 if sim > best_sim {
                     best_sim = sim;
-                    field = format!("alias:{}", alias);
+                    field_alias = Some(i);
                 }
             }
 
-            if best_sim >= min_confidence {
-                // Ties break on shortest name, then lowest (class, class_id),
-                // so the winner never depends on CSV load order.
-                let is_better = best.as_ref().is_none_or(|cur| {
-                    (
-                        best_sim,
-                        cur.asset.name.len(),
-                        cur.asset.class as u8,
-                        cur.asset.class_id,
-                    ) > (
-                        cur.confidence,
-                        asset.name.len(),
-                        asset.class as u8,
-                        asset.class_id,
-                    )
-                });
-                if is_better {
-                    best = Some(AssetMatch {
-                        asset: asset.clone(),
-                        confidence: best_sim,
-                        matched_field: field,
-                    });
-                }
+            if best_sim < min_confidence {
+                return;
             }
+            let asset = &ent.asset;
+            // Ties break on shortest name, then lowest (class, class_id),
+            // so the winner never depends on CSV load order.
+            let is_better = best.as_ref().is_none_or(|cur| {
+                (
+                    best_sim,
+                    cur.asset.name.len(),
+                    cur.asset.class as u8,
+                    cur.asset.class_id,
+                ) > (
+                    cur.confidence,
+                    asset.name.len(),
+                    asset.class as u8,
+                    asset.class_id,
+                )
+            });
+            if is_better {
+                let field = match field_alias {
+                    None => "name".to_string(),
+                    Some(i) => format!(
+                        "alias:{}",
+                        asset
+                            .aliases
+                            .split('|')
+                            .filter(|s| !s.is_empty())
+                            .nth(i)
+                            .unwrap_or_default()
+                    ),
+                };
+                best = Some(AssetMatch {
+                    asset: asset.clone(),
+                    confidence: best_sim,
+                    matched_field: field,
+                });
+            }
+        };
+        match class_ixs {
+            Some(ixs) => ixs.iter().for_each(|&i| scan(&self.all[i])),
+            None => self.all.iter().for_each(scan),
         }
         best
     }
@@ -1103,6 +1237,281 @@ mod fx_surfacing_tests {
                 AssetClass::CR,
                 "{sym}: base class must be CR"
             );
+        }
+    }
+}
+
+/// Equivalence of the indexed [`AssetResolver::find`] against the original
+/// scan-and-renormalize implementation, kept here verbatim as the oracle.
+#[cfg(test)]
+mod find_equivalence_tests {
+    use super::*;
+
+    fn jaro_legacy(s1: &str, s2: &str) -> f64 {
+        let c1: Vec<char> = s1.chars().collect();
+        let c2: Vec<char> = s2.chars().collect();
+        let (l1, l2) = (c1.len(), c2.len());
+        if l1 == 0 && l2 == 0 {
+            return 1.0;
+        }
+        if l1 == 0 || l2 == 0 {
+            return 0.0;
+        }
+        let window = if l1.max(l2) <= 2 { 0 } else { l1.max(l2) / 2 - 1 };
+        let mut m1 = vec![false; l1];
+        let mut m2 = vec![false; l2];
+        let mut matches = 0usize;
+        for i in 0..l1 {
+            let lo = i.saturating_sub(window);
+            let hi = (i + window + 1).min(l2);
+            for j in lo..hi {
+                if m2[j] || c1[i] != c2[j] {
+                    continue;
+                }
+                m1[i] = true;
+                m2[j] = true;
+                matches += 1;
+                break;
+            }
+        }
+        if matches == 0 {
+            return 0.0;
+        }
+        let mut transpositions = 0usize;
+        let mut k = 0;
+        for i in 0..l1 {
+            if !m1[i] {
+                continue;
+            }
+            while !m2[k] {
+                k += 1;
+            }
+            if c1[i] != c2[k] {
+                transpositions += 1;
+            }
+            k += 1;
+        }
+        let m = matches as f64;
+        (m / l1 as f64 + m / l2 as f64 + (m - transpositions as f64 / 2.0) / m) / 3.0
+    }
+
+    fn jw_legacy(s1: &str, s2: &str) -> f64 {
+        if s1 == s2 {
+            return 1.0;
+        }
+        if s1.is_empty() || s2.is_empty() {
+            return 0.0;
+        }
+        let jaro = jaro_legacy(s1, s2);
+        let p = s1.chars().zip(s2.chars()).take(4).take_while(|(a, b)| a == b).count() as f64;
+        jaro + 0.1 * p * (1.0 - jaro)
+    }
+
+    fn exact_rank_legacy(asset: &Asset, key: &str) -> Option<u8> {
+        if normalize_asset_name(&asset.name) == key {
+            return Some(0);
+        }
+        asset
+            .aliases
+            .split('|')
+            .filter(|s| !s.is_empty())
+            .position(|a| normalize_asset_name(a) == key)
+            .map(|i| u8::from(i > 0))
+    }
+
+    fn find_legacy(
+        r: &AssetResolver,
+        query: &str,
+        min_confidence: f64,
+        class_filter: Option<AssetClass>,
+    ) -> Option<AssetMatch> {
+        if query.trim().is_empty() {
+            return None;
+        }
+        let norm = normalize_asset_name(&strip_ticker_suffixes(query));
+        let candidates: Vec<&Asset> = match class_filter {
+            Some(c) => r.by_class.get(&c)?.iter().map(|&i| &r.all[i].asset).collect(),
+            None => r.all.iter().map(|e| &e.asset).collect(),
+        };
+        for key in [normalize_asset_name(query), norm.clone()] {
+            if key.is_empty() {
+                continue;
+            }
+            if let Some((asset, _)) = r.by_normalized.get(&key)
+                && class_filter.is_none_or(|c| c == asset.class)
+            {
+                return Some(AssetMatch {
+                    asset: asset.clone(),
+                    confidence: 1.0,
+                    matched_field: "exact".into(),
+                });
+            }
+            if let Some(asset) = candidates
+                .iter()
+                .filter_map(|a| exact_rank_legacy(a, &key).map(|r| (exact_key(a, r), *a)))
+                .min_by_key(|(k, _)| *k)
+                .map(|(_, a)| a)
+            {
+                return Some(AssetMatch {
+                    asset: asset.clone(),
+                    confidence: 1.0,
+                    matched_field: format!("Exact alias match on '{}'", key),
+                });
+            }
+        }
+        let mut best: Option<AssetMatch> = None;
+        for asset in candidates {
+            let name_sim = jw_legacy(&norm, &normalize_asset_name(&asset.name));
+            let mut best_sim = name_sim;
+            let mut field = "name".to_string();
+            for alias in asset.aliases.split('|').filter(|s| !s.is_empty()) {
+                let sim = jw_legacy(&norm, &normalize_asset_name(alias));
+                if sim > best_sim {
+                    best_sim = sim;
+                    field = format!("alias:{}", alias);
+                }
+            }
+            if best_sim >= min_confidence {
+                let is_better = best.as_ref().is_none_or(|cur| {
+                    (best_sim, cur.asset.name.len(), cur.asset.class as u8, cur.asset.class_id)
+                        > (cur.confidence, asset.name.len(), asset.class as u8, asset.class_id)
+                });
+                if is_better {
+                    best = Some(AssetMatch {
+                        asset: asset.clone(),
+                        confidence: best_sim,
+                        matched_field: field,
+                    });
+                }
+            }
+        }
+        best
+    }
+
+    /// Realistic corpus: every table name and alias (hits), typo mutants of a
+    /// stride of them (fuzzy hits), and a deterministic long tail of venue-like
+    /// tokens that resolve to nothing (misses, the expensive path).
+    fn corpus() -> Vec<String> {
+        let mut raw: Vec<String> = Vec::new();
+        for e in &RESOLVER.all {
+            raw.push(e.asset.name.clone());
+            raw.extend(e.asset.aliases.split('|').filter(|s| !s.is_empty()).map(str::to_string));
+        }
+        let mut out = raw.clone();
+        for (i, s) in raw.iter().enumerate().filter(|(i, _)| i % 40 == 0) {
+            let c: Vec<char> = s.chars().collect();
+            if c.len() < 3 {
+                continue;
+            }
+            let mut swap = c.clone();
+            swap.swap(i % (c.len() - 1), i % (c.len() - 1) + 1);
+            out.push(swap.into_iter().collect());
+            let mut drop = c.clone();
+            drop.remove(i % c.len());
+            out.push(drop.into_iter().collect());
+            out.push(format!("{s}X"));
+            out.push(s.to_lowercase());
+        }
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..250 {
+            let mut t = String::new();
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let len = 2 + (x >> 60) as usize;
+            for _ in 0..len {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                t.push(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[(x >> 33) as usize % 36] as char);
+            }
+            out.push(t);
+        }
+        out.extend(["", "   ", "...", "A", "BRK-B", "ETH+", "ES", "TW", "BSX", "ÄÖÜ", "日本"].map(String::from));
+        out
+    }
+
+    #[test]
+    fn indexed_find_matches_legacy_on_a_large_corpus() {
+        let r: &AssetResolver = &RESOLVER;
+        let classes = [
+            None,
+            Some(AssetClass::CR),
+            Some(AssetClass::FX),
+            Some(AssetClass::CM),
+            Some(AssetClass::IP),
+            Some(AssetClass::EQ),
+            Some(AssetClass::SD),
+        ];
+        let thresholds = [0.9, 0.95, 1.0];
+        let corpus = corpus();
+        assert!(corpus.len() > 5000, "corpus too small: {}", corpus.len());
+        let (mut hits, mut fuzzy, mut misses) = (0, 0, 0);
+        for (i, sym) in corpus.iter().enumerate() {
+            // One rotating (threshold, class) config per symbol: the legacy
+            // oracle costs ~40 ms per miss in a debug build.
+            let cfgs = [(thresholds[i % 3], classes[(i / 3) % classes.len()])];
+            for (thr, class) in cfgs {
+                let new = r.find(sym, thr, class);
+                let old = find_legacy(r, sym, thr, class);
+                match (&new, &old) {
+                    (None, None) => misses += 1,
+                    (Some(n), Some(o)) => {
+                        assert_eq!(n.asset, o.asset, "{sym:?} {thr} {class:?}");
+                        assert_eq!(n.confidence.to_bits(), o.confidence.to_bits(), "{sym:?}");
+                        assert_eq!(n.matched_field, o.matched_field, "{sym:?} {thr} {class:?}");
+                        if n.confidence == 1.0 { hits += 1 } else { fuzzy += 1 }
+                    }
+                    _ => panic!("{sym:?} {thr} {class:?}: new={new:?} old={old:?}"),
+                }
+            }
+        }
+        assert!(hits > 1000 && fuzzy > 10 && misses > 200, "{hits} {fuzzy} {misses}");
+    }
+
+    #[test]
+    fn jaro_winkler_stack_and_heap_paths_agree_with_legacy() {
+        let long_a = "a".repeat(80) + "bc";
+        let long_b = "a".repeat(79) + "cb";
+        for (a, b) in [("martha", "marhta"), ("dwayne", "duane"), ("日本語", "日本"), (&long_a, &long_b)] {
+            assert_eq!(
+                jaro_winkler_similarity(a, b).to_bits(),
+                jw_legacy(a, b).to_bits(),
+                "{a} {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn upper_bound_never_undercuts_the_real_score() {
+        let words = ["btc", "bitcoin", "eth", "ethereum", "usdt", "x", "xyzzy", "bitcoincash", "abcabc"];
+        for a in words {
+            for b in words {
+                let real = jaro_winkler_similarity(a, b);
+                let ub = jw_upper_bound(a, a.chars().count(), char_mask(a), b, b.chars().count());
+                assert!(ub + 1e-9 >= real, "{a} {b}: ub {ub} < {real}");
+            }
+        }
+    }
+
+    /// `cargo test -p nxr-sdk --release --lib miss_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "release-only timing report"]
+    fn miss_cost_report() {
+        let r: &AssetResolver = &RESOLVER;
+        let toks: Vec<String> = corpus().into_iter().rev().take(200).collect();
+        let time = |f: &dyn Fn(&str)| {
+            let t = std::time::Instant::now();
+            toks.iter().for_each(|s| f(s));
+            t.elapsed().as_secs_f64() * 1e6 / toks.len() as f64
+        };
+        for (name, class, thr) in [
+            ("ALL", None, 0.9),
+            ("CR", Some(AssetClass::CR), 0.95),
+            ("FX", Some(AssetClass::FX), 0.95),
+            ("CM", Some(AssetClass::CM), 0.95),
+            ("IP", Some(AssetClass::IP), 0.95),
+            ("EQ", Some(AssetClass::EQ), 0.95),
+        ] {
+            let old = time(&|s| drop(find_legacy(r, s, thr, class)));
+            let new = time(&|s| drop(r.find(s, thr, class)));
+            println!("miss {name}: legacy {old:.1} us, indexed {new:.1} us");
         }
     }
 }

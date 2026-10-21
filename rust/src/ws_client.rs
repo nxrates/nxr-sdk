@@ -137,10 +137,10 @@ pub fn client_id() -> String {
             && s.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     };
-    if let Ok(v) = std::env::var("NXR_CLIENT_ID") {
-        if valid(&v) {
-            return v;
-        }
+    if let Ok(v) = std::env::var("NXR_CLIENT_ID")
+        && valid(&v)
+    {
+        return v;
     }
     let path = std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".nxr/client_id"));
     if let Some(Ok(id)) = path.as_ref().map(std::fs::read_to_string) {
@@ -177,6 +177,14 @@ pub fn with_client_id(url: &str, id: &str) -> String {
     format!("{url}{sep}client_id={id}")
 }
 
+/// `scheme://host[:port]` only: drops userinfo, path and query (bearer tokens ride there).
+pub(crate) fn redact_url(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if scheme.is_empty() { host.to_string() } else { format!("{scheme}://{host}") }
+}
+
 impl WsClient {
     /// Open a WebSocket to `url` (e.g. `ws://nxr-svc:40004/v1/stream`). A
     /// persistent [`client_id`] is appended unless the url already has one.
@@ -184,8 +192,8 @@ impl WsClient {
         let url = &with_client_id(url, &client_id());
         let (ws, _response) = connect_async(url)
             .await
-            .with_context(|| format!("connect {}", url))?;
-        info!(%url, "NXR WS client connected");
+            .with_context(|| format!("connect {}", redact_url(url)))?;
+        info!(url = %redact_url(url), "NXR WS client connected");
         Ok(Self {
             inner: ws,
             keepalive: DEFAULT_KEEPALIVE,
@@ -314,6 +322,17 @@ impl WsClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redact_url_keeps_scheme_host_port_only() {
+        use super::redact_url;
+        assert_eq!(
+            redact_url("wss://ws-api.kucoin.com/endpoint?token=SECRET&client_id=x"),
+            "wss://ws-api.kucoin.com"
+        );
+        assert_eq!(redact_url("ws://u:p@h:40004/v1/stream?k=S"), "ws://h:40004");
+        assert_eq!(redact_url("ws://h:1#frag"), "ws://h:1");
+    }
+
     use super::*;
 
     fn encode(records: &[WsIndex]) -> Vec<u8> {

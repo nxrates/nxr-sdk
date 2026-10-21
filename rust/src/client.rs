@@ -658,7 +658,11 @@ impl NxrClient {
         if let Some(k) = &self.api_key {
             req = req.header("X-NXR-Key", k);
         }
-        let r = req.send().await.with_context(|| format!("GET {}", url))?;
+        let r = req
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .with_context(|| format!("GET {}", crate::ws_client::redact_url(&url)))?;
         let status = r.status();
         if !status.is_success() {
             let body = r.text().await.unwrap_or_default();
@@ -673,6 +677,7 @@ impl NxrClient {
         }
         r.json::<T>()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("decode {}", path))
     }
 
@@ -685,7 +690,11 @@ impl NxrClient {
         if let Some(k) = &self.api_key {
             req = req.header("X-NXR-Key", k);
         }
-        let r = req.send().await.with_context(|| format!("GET {}", url))?;
+        let r = req
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .with_context(|| format!("GET {}", crate::ws_client::redact_url(&url)))?;
         let status = r.status();
         if !status.is_success() {
             let body = r.text().await.unwrap_or_default();
@@ -698,7 +707,10 @@ impl NxrClient {
                 }
             );
         }
-        r.bytes().await.with_context(|| format!("bytes {}", path))
+        r.bytes()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .with_context(|| format!("bytes {}", path))
     }
 }
 

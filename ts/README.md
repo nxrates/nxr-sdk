@@ -75,7 +75,7 @@ sub.close();
 | `client.freshness(sym)`                     | `GET /v1/freshness/{ticker}`      | JSON             |
 | `client.idx(sym, opts)`                     | `GET /v1/idx/{sym}`               | MITCH binary 56B |
 | `client.bars(sym, kind, opts)`              | `GET /v1/bars/{sym}/{kind}`       | MITCH binary 96B |
-| `client.ohlc(sym, tf_s, opts)`              | `GET /v1/ohlc/{sym}?tf=`          | JSON (legacy)    |
+| `client.ohlc(sym, tfS, opts)`               | `GET /v1/ohlc/{sym}?tf=`          | JSON (legacy)    |
 | `client.integrity(sym, { kind? })`          | `GET /v1/integrity/{sym}`         | JSON             |
 | `client.history(opts)`                      | unified routing                   | typed envelope   |
 | `client.get().history()....fetch()`         | unified routing                   | typed envelope   |

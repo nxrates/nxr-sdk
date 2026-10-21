@@ -191,12 +191,10 @@ pub(crate) fn redact_url(url: &str) -> String {
             _ => (hp, None),
         }
     }
-    let (mut host, mut port) = split(hostport);
-    if !port.is_none_or(|p| p.bytes().all(|b| b.is_ascii_digit())) {
-        // Unparseable (a raw password may hold `/`, `?`, `#`): userinfo ends at the LAST `@`,
-        // and nothing up to it is printed.
-        let tail = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
-        (host, port) = split(tail.split(['/', '?', '#']).next().unwrap_or(""));
+    let (host, port) = split(hostport);
+    // Unparseable (bad port, e.g. a raw password holding `/`): print nothing from the URL.
+    if host.is_empty() || !port.is_none_or(|p| p.bytes().all(|b| b.is_ascii_digit())) {
+        return if scheme.is_empty() { "<redacted-url>".into() } else { format!("{scheme}://<redacted>") };
     }
     let dflt = match scheme.as_str() {
         "http" | "ws" => "80",
@@ -362,7 +360,9 @@ mod tests {
             ("wss://h/key@abc123", "wss://h"),
             ("https://rpc.example/p?token=a@b", "https://rpc.example"),
             ("https://u:p@rpc.example:8443/x@y", "https://rpc.example:8443"),
-            ("http://user:pa/ss@1.2.3.4:8080", "http://1.2.3.4:8080"),
+            ("http://user:pa/ss@1.2.3.4:8080", "http://<redacted>"),
+            ("http://h:x/p?a@S", "http://<redacted>"),
+            ("h:x/p?a@S", "<redacted-url>"),
             ("wss://h:443/p?t=S", "wss://h"),
             ("ws://h:80/", "ws://h"),
             ("ws://[::1]:40004/v1?t=S", "ws://[::1]:40004"),
@@ -372,6 +372,7 @@ mod tests {
         ] {
             assert_eq!(redact_url(raw), want, "{raw}");
         }
+        assert!(!redact_url("http://h:x/p?a@S").contains('S'));
     }
 
     fn encode(records: &[WsIndex]) -> Vec<u8> {

@@ -178,7 +178,7 @@ pub fn with_client_id(url: &str, id: &str) -> String {
 }
 
 /// `scheme://host[:port]` only (userinfo, path, query dropped; default port dropped, IPv6
-/// brackets kept). Same semantics as `btr_rpc::redact_url`, minus the `url` crate.
+/// brackets kept). Mirrors `btr_rpc::redact_url`, but an unparseable URL prints nothing.
 pub(crate) fn redact_url(url: &str) -> String {
     let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
     let scheme = scheme.to_ascii_lowercase();

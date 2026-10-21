@@ -1081,7 +1081,8 @@ impl ZGateYml {
     fn default_min_sd_bps() -> f64 {
         2.0
     }
-    /// Upper bounds keep a typo (`min_sd_bps: 2000`) from silently disabling the gate.
+    /// Bounds keep a typo from disabling the gate: `min_sd_bps` in [0.1, 100] and the
+    /// always-pass window `threshold * min_sd_bps` <= 50 bp.
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.threshold.is_finite() && self.threshold > 0.0 && self.threshold <= 20.0,
@@ -1089,9 +1090,14 @@ impl ZGateYml {
             self.threshold
         );
         anyhow::ensure!(
-            self.min_sd_bps.is_finite() && self.min_sd_bps > 0.0 && self.min_sd_bps <= 100.0,
-            "oracles.z_gate.min_sd_bps must be finite and in (0, 100], got {}",
+            self.min_sd_bps.is_finite() && self.min_sd_bps >= 0.1 && self.min_sd_bps <= 100.0,
+            "oracles.z_gate.min_sd_bps must be finite and in [0.1, 100], got {}",
             self.min_sd_bps
+        );
+        anyhow::ensure!(
+            self.threshold * self.min_sd_bps <= 50.0,
+            "oracles.z_gate threshold * min_sd_bps must be <= 50 bp, got {}",
+            self.threshold * self.min_sd_bps
         );
         Ok(())
     }
@@ -2413,10 +2419,16 @@ mod tests {
         let z = |y: &str| serde_yml::from_str::<OraclesYml>(y).unwrap().z_gate.validate();
         assert!(ZGateYml::default().validate().is_ok());
         assert!(z("aggregation_interval_ms: 250").is_ok());
-        assert!(z("z_gate: {threshold: 20, min_sd_bps: 100}").is_ok());
+        assert!(z("z_gate: {threshold: 20, min_sd_bps: 2.5}").is_ok(), "exactly 50 bp");
+        assert!(z("z_gate: {threshold: 0.5, min_sd_bps: 100}").is_ok(), "exactly 50 bp");
+        assert!(z("z_gate: {threshold: 4, min_sd_bps: 0.1}").is_ok(), "lower bound");
         for bad in [
             "z_gate: {threshold: 0}",
             "z_gate: {min_sd_bps: 0}",
+            "z_gate: {min_sd_bps: 0.09}",
+            "z_gate: {threshold: 4, min_sd_bps: 12.6}",
+            "z_gate: {threshold: 20, min_sd_bps: 2.6}",
+            "z_gate: {threshold: 1, min_sd_bps: 100}",
             "z_gate: {threshold: -1}",
             "z_gate: {min_sd_bps: -0.5}",
             "z_gate: {threshold: 20.1}",
@@ -2427,6 +2439,27 @@ mod tests {
         ] {
             assert!(z(bad).is_err(), "{bad}");
         }
+    }
+
+    /// Raw serde bypasses `validate`; `PipelineYml::load` is the production path.
+    #[test]
+    fn load_rejects_a_bad_z_gate() {
+        let Ok(base) = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.yml")) else {
+            return; // submodule checked out standalone: no full config to mutate
+        };
+        let dir = std::env::temp_dir().join(format!("zg-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pipeline.yml");
+        let load = |z: &str| {
+            std::fs::write(&path, base.replacen("\noracles:\n", &format!("\noracles:\n  z_gate: {z}\n"), 1)).unwrap();
+            PipelineYml::load(&path)
+        };
+        assert!(load("{threshold: 4, min_sd_bps: 2}").is_ok());
+        for bad in ["{min_sd_bps: 0.01}", "{threshold: 20, min_sd_bps: 50}", "{threshold: 0}"] {
+            let err = format!("{:#}", load(bad).unwrap_err());
+            assert!(err.contains("z_gate"), "{bad}: {err}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The deployed `config.yml` must actually reach `StorageYml`. These two keys

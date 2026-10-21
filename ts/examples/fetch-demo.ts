@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // NXR TypeScript SDK — fetch demo against live prod API.
-// Run: cd sdk/ts && bun run examples/fetch_demo.ts
+// Run: cd sdk/ts && bun run examples/fetch-demo.ts
 
 import { NxrClient } from '../src/client.js';
 import { decodeIdxBatch } from '../src/decode.js';

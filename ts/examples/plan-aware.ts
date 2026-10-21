@@ -7,8 +7,8 @@
 //   3. Pretty-prints code / plan / limit / requested with an upgrade CTA
 //   4. Falls back gracefully (e.g. MITCH → JSON on Free)
 //
-// Run: cd sdk/ts && NXR_API_KEY=<key> bun run examples/plan_aware.ts
-// Run on Free (anonymous): bun run examples/plan_aware.ts
+// Run: cd sdk/ts && NXR_API_KEY=<key> bun run examples/plan-aware.ts
+// Run on Free (anonymous): bun run examples/plan-aware.ts
 
 import { NxrClient } from '../src/client.js';
 import { PlanLimitError } from '../src/errors.js';

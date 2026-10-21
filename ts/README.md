@@ -208,8 +208,8 @@ try {
 }
 ```
 
-Runnable example: [`examples/plan_aware.ts`](./examples/plan_aware.ts) —
-`bun run examples/plan_aware.ts`.
+Runnable example: [`examples/plan-aware.ts`](./examples/plan-aware.ts) —
+`bun run examples/plan-aware.ts`.
 
 ## Versioning
 

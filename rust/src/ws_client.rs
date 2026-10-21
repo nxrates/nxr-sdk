@@ -177,12 +177,40 @@ pub fn with_client_id(url: &str, id: &str) -> String {
     format!("{url}{sep}client_id={id}")
 }
 
-/// `scheme://host[:port]` only: drops userinfo, path and query (bearer tokens ride there).
+/// `scheme://host[:port]` only (userinfo, path, query dropped; default port dropped, IPv6
+/// brackets kept). Same semantics as `btr_rpc::redact_url`, minus the `url` crate.
 pub(crate) fn redact_url(url: &str) -> String {
     let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if scheme.is_empty() { host.to_string() } else { format!("{scheme}://{host}") }
+    let scheme = scheme.to_ascii_lowercase();
+    // The authority ends at the first `/`, `?` or `#`: an `@` past it is path/query, not userinfo.
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+    fn split(hp: &str) -> (&str, Option<&str>) {
+        match hp.rsplit_once(':') {
+            Some((h, p)) if !p.contains(']') => (h, Some(p)),
+            _ => (hp, None),
+        }
+    }
+    let (mut host, mut port) = split(hostport);
+    if !port.is_none_or(|p| p.bytes().all(|b| b.is_ascii_digit())) {
+        // Unparseable (a raw password may hold `/`, `?`, `#`): userinfo ends at the LAST `@`,
+        // and nothing up to it is printed.
+        let tail = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
+        (host, port) = split(tail.split(['/', '?', '#']).next().unwrap_or(""));
+    }
+    let dflt = match scheme.as_str() {
+        "http" | "ws" => "80",
+        "https" | "wss" => "443",
+        _ => "",
+    };
+    let port = port.filter(|p| !p.is_empty() && *p != dflt);
+    let host = host.to_ascii_lowercase();
+    match (scheme.is_empty(), port) {
+        (true, None) => host,
+        (true, Some(p)) => format!("{host}:{p}"),
+        (false, None) => format!("{scheme}://{host}"),
+        (false, Some(p)) => format!("{scheme}://{host}:{p}"),
+    }
 }
 
 impl WsClient {
@@ -322,18 +350,29 @@ impl WsClient {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn redact_url_keeps_scheme_host_port_only() {
-        use super::redact_url;
-        assert_eq!(
-            redact_url("wss://ws-api.kucoin.com/endpoint?token=SECRET&client_id=x"),
-            "wss://ws-api.kucoin.com"
-        );
-        assert_eq!(redact_url("ws://u:p@h:40004/v1/stream?k=S"), "ws://h:40004");
-        assert_eq!(redact_url("ws://h:1#frag"), "ws://h:1");
+        for (raw, want) in [
+            ("wss://ws-api.kucoin.com/endpoint?token=SECRET&client_id=x", "wss://ws-api.kucoin.com"),
+            ("ws://u:p@h:40004/v1/stream?k=S", "ws://h:40004"),
+            ("ws://h:1#frag", "ws://h:1"),
+            ("wss://h/p?x=a@SECRET", "wss://h"),
+            ("wss://h/key@abc123", "wss://h"),
+            ("https://rpc.example/p?token=a@b", "https://rpc.example"),
+            ("https://u:p@rpc.example:8443/x@y", "https://rpc.example:8443"),
+            ("http://user:pa/ss@1.2.3.4:8080", "http://1.2.3.4:8080"),
+            ("wss://h:443/p?t=S", "wss://h"),
+            ("ws://h:80/", "ws://h"),
+            ("ws://[::1]:40004/v1?t=S", "ws://[::1]:40004"),
+            ("ws://u:p@[::1]/v1", "ws://[::1]"),
+            ("h:40004/p?t=a@S", "h:40004"),
+            ("u:p@h/p", "h"),
+        ] {
+            assert_eq!(redact_url(raw), want, "{raw}");
+        }
     }
-
-    use super::*;
 
     fn encode(records: &[WsIndex]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(FRAME_HEADER_BYTES + records.len() * INDEX_RECORD_BYTES);

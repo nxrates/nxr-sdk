@@ -455,8 +455,8 @@ export class NxrClient {
   }
 
   /** OHLC candles from `/v1/ohlc/{sym}?tf=<tf_seconds>`. JSON only (legacy path). */
-  async ohlc(sym: Sym, tf_s: number, opts: RangeOpts = {}): Promise<Ohlc[]> {
-    const q = this.range({ ...opts, tf: tf_s } as RangeOpts & { tf: number });
+  async ohlc(sym: Sym, tfS: number, opts: RangeOpts = {}): Promise<Ohlc[]> {
+    const q = this.range({ ...opts, tf: tfS } as RangeOpts & { tf: number });
     return this.json<Ohlc[]>(`/v1/ohlc/${urlSym(sym)}${q}`);
   }
 

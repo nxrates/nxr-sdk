@@ -149,3 +149,11 @@ pub async fn shutdown_signal() {
         let _ = ctrl_c.await;
     }
 }
+
+/// Header value marked sensitive so `HeaderMap`/request `Debug` never prints it (API keys).
+/// `None` if `v` is not a valid header value.
+pub fn sensitive_header(v: &str) -> Option<http::HeaderValue> {
+    let mut h = http::HeaderValue::from_str(v).ok()?;
+    h.set_sensitive(true);
+    Some(h)
+}

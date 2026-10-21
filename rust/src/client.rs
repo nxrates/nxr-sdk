@@ -983,11 +983,9 @@ fn decode_pod_slice<T: Pod + Copy>(bytes: &[u8]) -> Result<Vec<T>> {
     Ok(slice.to_vec())
 }
 
-/// `X-NXR-Key` value, marked sensitive so `HeaderMap`/request `Debug` never prints the key.
-pub fn key_header(k: &str) -> Result<HeaderValue> {
-    let mut v = HeaderValue::from_str(k).map_err(|_| anyhow!("API key is not a valid header value"))?;
-    v.set_sensitive(true);
-    Ok(v)
+/// `X-NXR-Key` value, sensitive in `Debug` ([`crate::sensitive_header`]).
+fn key_header(k: &str) -> Result<HeaderValue> {
+    crate::sensitive_header(k).ok_or_else(|| anyhow!("API key is not a valid header value"))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

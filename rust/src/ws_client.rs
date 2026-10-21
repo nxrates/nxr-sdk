@@ -177,37 +177,53 @@ pub fn with_client_id(url: &str, id: &str) -> String {
     format!("{url}{sep}client_id={id}")
 }
 
-/// `scheme://host[:port]` only (userinfo, path, query dropped; default port dropped, IPv6
-/// brackets kept). Mirrors `btr_rpc::redact_url`, but an unparseable URL prints nothing.
+/// `scheme://host[:port]` only (default port dropped, IPv6 brackets kept). Allowlist rebuild like
+/// `btr_rpc::redact_url`, stricter: only validated pieces are echoed, and any `@` after the scheme
+/// (userinfo, or a path/query `@` that may hide a raw password) redacts the whole authority.
 pub(crate) fn redact_url(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let scheme = scheme.to_ascii_lowercase();
-    // The authority ends at the first `/`, `?` or `#`: an `@` past it is path/query, not userinfo.
-    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let hostport = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
-    fn split(hp: &str) -> (&str, Option<&str>) {
-        match hp.rsplit_once(':') {
-            Some((h, p)) if !p.contains(']') => (h, Some(p)),
-            _ => (hp, None),
-        }
+    const NONE: &str = "<redacted-url>";
+    let Some((scheme, rest)) = url.split_once("://") else { return NONE.into() };
+    let mut sc = scheme.bytes();
+    if !sc.next().is_some_and(|b| b.is_ascii_alphabetic())
+        || !sc.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'))
+    {
+        return NONE.into();
     }
-    let (host, port) = split(hostport);
-    // Unparseable (bad port, e.g. a raw password holding `/`): print nothing from the URL.
-    if host.is_empty() || !port.is_none_or(|p| p.bytes().all(|b| b.is_ascii_digit())) {
-        return if scheme.is_empty() { "<redacted-url>".into() } else { format!("{scheme}://<redacted>") };
+    let scheme = scheme.to_ascii_lowercase();
+    let hidden = format!("{scheme}://<redacted>");
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if rest.contains(['@', '\\']) {
+        return hidden;
+    }
+    let (host, port) = if let Some(v6) = auth.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some((h, t)) if !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'.')) => {
+                (format!("[{}]", h.to_ascii_lowercase()), t.strip_prefix(':').map(str::to_string).or_else(|| t.is_empty().then(String::new)))
+            }
+            _ => return hidden,
+        }
+    } else {
+        match auth.rsplit_once(':') {
+            Some((h, p)) => (h.to_ascii_lowercase(), Some(p.to_string())),
+            None => (auth.to_ascii_lowercase(), None),
+        }
+    };
+    let host_ok = host.starts_with('[')
+        || (!host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')));
+    let port = port.unwrap_or_default();
+    let port_ok = port.bytes().all(|b| b.is_ascii_digit());
+    if !host_ok || !port_ok {
+        return hidden;
     }
     let dflt = match scheme.as_str() {
         "http" | "ws" => "80",
         "https" | "wss" => "443",
         _ => "",
     };
-    let port = port.filter(|p| !p.is_empty() && *p != dflt);
-    let host = host.to_ascii_lowercase();
-    match (scheme.is_empty(), port) {
-        (true, None) => host,
-        (true, Some(p)) => format!("{host}:{p}"),
-        (false, None) => format!("{scheme}://{host}"),
-        (false, Some(p)) => format!("{scheme}://{host}:{p}"),
+    if port.is_empty() || port == dflt {
+        format!("{scheme}://{host}")
+    } else {
+        format!("{scheme}://{host}:{port}")
     }
 }
 
@@ -354,25 +370,33 @@ mod tests {
     fn redact_url_keeps_scheme_host_port_only() {
         for (raw, want) in [
             ("wss://ws-api.kucoin.com/endpoint?token=SECRET&client_id=x", "wss://ws-api.kucoin.com"),
-            ("ws://u:p@h:40004/v1/stream?k=S", "ws://h:40004"),
+            ("ws://h:40004/v1/stream?k=S", "ws://h:40004"),
             ("ws://h:1#frag", "ws://h:1"),
-            ("wss://h/p?x=a@SECRET", "wss://h"),
-            ("wss://h/key@abc123", "wss://h"),
-            ("https://rpc.example/p?token=a@b", "https://rpc.example"),
-            ("https://u:p@rpc.example:8443/x@y", "https://rpc.example:8443"),
+            ("wss://h:443/p?t=S", "wss://h"),
+            ("ws://H:80/", "ws://h"),
+            ("ws://[::1]:40004/v1?t=S", "ws://[::1]:40004"),
+            ("ws://[::1]/v1", "ws://[::1]"),
+            // any `@` after the scheme, wherever it sits, hides the host too
+            ("ws://u:p@h:40004/v1/stream?k=S", "ws://<redacted>"),
+            ("wss://h/p?x=a@SECRET", "wss://<redacted>"),
+            ("https://rpc.example/key@abc123", "https://<redacted>"),
+            ("ws://[::1]/p?t=a@SECRET", "ws://<redacted>"),
             ("http://user:pa/ss@1.2.3.4:8080", "http://<redacted>"),
             ("http://h:x/p?a@S", "http://<redacted>"),
-            ("h:x/p?a@S", "<redacted-url>"),
-            ("wss://h:443/p?t=S", "wss://h"),
-            ("ws://h:80/", "ws://h"),
-            ("ws://[::1]:40004/v1?t=S", "ws://[::1]:40004"),
-            ("ws://u:p@[::1]/v1", "ws://[::1]"),
-            ("h:40004/p?t=a@S", "h:40004"),
-            ("u:p@h/p", "h"),
+            ("ws://user:123/rest@host:9", "ws://<redacted>"),
+            ("ws://h%40SECRET:1/", "ws://<redacted>"),
+            ("ws://SECRET\\h:1/", "ws://<redacted>"),
+            ("ws://[::1@SECRET]:1/", "ws://<redacted>"),
+            ("host/?u=http://sec@x", "<redacted-url>"),
+            ("tok3n", "<redacted-url>"),
+            ("h:40004/p?t=S", "<redacted-url>"),
         ] {
-            assert_eq!(redact_url(raw), want, "{raw}");
+            let got = redact_url(raw);
+            assert_eq!(got, want, "{raw}");
+            for secret in ["SECRET", "sec", "user", "123"] {
+                assert!(!(raw.contains(secret) && want.contains("redacted") && got.contains(secret)), "{raw} leaked {secret}");
+            }
         }
-        assert!(!redact_url("http://h:x/p?a@S").contains('S'));
     }
 
     fn encode(records: &[WsIndex]) -> Vec<u8> {

@@ -656,7 +656,7 @@ impl NxrClient {
             .get(&url)
             .header(ACCEPT, HeaderValue::from_static("application/json"));
         if let Some(k) = &self.api_key {
-            req = req.header("X-NXR-Key", k);
+            req = req.header("X-NXR-Key", key_header(k)?);
         }
         let r = req
             .send()
@@ -688,7 +688,7 @@ impl NxrClient {
             .get(&url)
             .header(ACCEPT, HeaderValue::from_static("application/octet-stream"));
         if let Some(k) = &self.api_key {
-            req = req.header("X-NXR-Key", k);
+            req = req.header("X-NXR-Key", key_header(k)?);
         }
         let r = req
             .send()
@@ -983,11 +983,27 @@ fn decode_pod_slice<T: Pod + Copy>(bytes: &[u8]) -> Result<Vec<T>> {
     Ok(slice.to_vec())
 }
 
+/// `X-NXR-Key` value, marked sensitive so `HeaderMap`/request `Debug` never prints the key.
+pub fn key_header(k: &str) -> Result<HeaderValue> {
+    let mut v = HeaderValue::from_str(k).map_err(|_| anyhow!("API key is not a valid header value"))?;
+    v.set_sensitive(true);
+    Ok(v)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_header_is_sensitive_in_debug() {
+        let mut m = reqwest::header::HeaderMap::new();
+        m.insert("x-nxr-key", key_header("sekrit-key-123").unwrap());
+        let d = format!("{m:?}");
+        assert!(!d.contains("sekrit-key-123"), "{d}");
+        assert!(key_header("bad\nkey").is_err());
+    }
 
     #[test]
     fn parse_ticker_forms() {

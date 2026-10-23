@@ -692,6 +692,29 @@ pub struct SignedQuotesYml {
     /// keeps keeping everything until an operator asks it to prune.
     #[serde(default)]
     pub retention_days: Option<u16>,
+    /// BYPASS the sweep's own safety valve. Default `false`.
+    ///
+    /// The valve refuses any sweep that would delete more than 25% of the
+    /// existing sealed shards, or all of them, because the FIRST prune of a
+    /// node that was never pruned looks exactly like a misconfiguration: a
+    /// `retention_days: 2` typo on a 365-day archive is 363 days of history
+    /// deleted in one pass, irrecoverably. With force off the sweep refuses and
+    /// logs an ERROR stating the plan; the data is still there to fix the config
+    /// against. Set this only after reading that line and deciding it is what
+    /// you meant.
+    #[serde(default)]
+    pub retention_force: bool,
+    /// DRY RUN: log exactly what the sweep would delete and delete nothing.
+    /// Default `false`.
+    ///
+    /// This is how to REHEARSE the first prune on an archive node: set
+    /// `retention_days` and this together, read the plan line, confirm the
+    /// oldest/newest dates and the byte count, then drop this key (or set it
+    /// false) and let the next hourly pass do the work. The valve above still
+    /// evaluates in a dry run, so a rehearsal also tells you whether the live
+    /// pass would be refused.
+    #[serde(default)]
+    pub retention_dry_run: bool,
 }
 
 /// Default index-tree retention for a light node: 1 sealed day + today.
@@ -3165,6 +3188,26 @@ mod tests {
         let light = parse("role: light\nretention_days: 14\n");
         assert_eq!(light.sweep_bars_days(), light.bars_retention_days());
         assert_eq!(light.bars_retention_days(), 8, "default σ legs");
+    }
+
+    /// The valve's two switches are OFF unless named: a config that lands with
+    /// no opinion must never bypass a safety check or silently refuse to prune.
+    #[test]
+    fn retention_valve_keys_default_off_and_parse() {
+        let base = "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\n\
+             min_accepted_providers: 1\nquorum: 2\npeers:\n\
+               - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
+             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n";
+        let bare: SignedQuotesYml = serde_yml::from_str(base).expect("parse without valve keys");
+        assert!(!bare.retention_force);
+        assert!(!bare.retention_dry_run);
+        let armed: SignedQuotesYml = serde_yml::from_str(&format!(
+            "{base}retention_days: 365\nretention_force: true\nretention_dry_run: true\n"
+        ))
+        .expect("parse with valve keys");
+        assert!(armed.retention_force);
+        assert!(armed.retention_dry_run);
     }
 
     /// `history_url` is base-URL only, normalised to "absent" when empty.

@@ -503,6 +503,23 @@ pub struct SignedQuotesYml {
     /// change: a partially seeded fleet is a partially armed one.
     #[serde(default)]
     pub archive_urls: Vec<String>,
+    /// ARCHIVE READ upstream (base URL, e.g. `http://nxr-archive.nxr.svc:8080`).
+    /// The READ side of [`Self::archive_urls`], which only ever seeds σ at boot:
+    /// a history request whose range starts before this node's own oldest shard
+    /// is forwarded WHOLE to this base, and its body, status and `x-nxr-*`
+    /// headers are returned verbatim. Never merged with local data — a client
+    /// summing depth across the boundary would be adding two different units.
+    ///
+    /// Absent ⇒ this node serves local data only, and an older-than-local
+    /// request fails 503 naming the archive as unavailable instead of the
+    /// empty 200 that used to read as "no data".
+    ///
+    /// Must address a FULL node, never this node's own Service: a VIP that
+    /// round-robins back onto a light replica reproduces the missing history
+    /// the proxy exists to hide. The `x-nxr-proxied: 1` guard turns that into
+    /// one refused hop rather than an infinite loop.
+    #[serde(default)]
+    pub history_url: Option<String>,
     /// Minimum total signatures per served quote (self + peers). Required and
     /// must be >= 2; a build below quorum fails closed (503).
     pub quorum: Option<u8>,
@@ -643,10 +660,23 @@ pub struct SignedQuotesYml {
     /// holding SOL's marks.
     #[serde(default)]
     pub sign_only: bool,
+    /// NODE ROLE. `full` (the default, and what a config that names neither
+    /// this key nor `sign_only` gets) is a whole replica: the full materialised
+    /// universe, the long retention window, local disk as the only history
+    /// source. `light` is a signer: materialise only the signed subset, keep a
+    /// short window, and forward older history to [`Self::history_url`].
+    ///
+    /// [`Self::sign_only`] stays a working ALIAS for `light` so no existing
+    /// ConfigMap breaks; when both keys are present this one WINS and a
+    /// disagreement is reported at load. Rejecting unknown values is serde's
+    /// (`unknown variant .., expected light or full`), contextualised with the
+    /// config path by [`PipelineYml::load`].
+    #[serde(default)]
+    pub role: Option<NodeRole>,
     /// LIGHT NODE retention, in whole days of sealed shards to keep BESIDES
     /// today's (so `1` = yesterday + today = 2 files per ticker). Honored ONLY
-    /// when `sign_only` is true: a full node's retention is the API contract
-    /// (365 d `/v1/bars`) and is not this knob.
+    /// when [`Self::node_role`] is `light`: a full node's retention is the API
+    /// contract (365 d `/v1/bars`) and is not this knob.
     ///
     /// This bounds the INDEX tree (`indexes/*.idx`), which is the tree that
     /// actually costs disk: one 56 B record per emit cycle per ticker. Measured
@@ -655,13 +685,42 @@ pub struct SignedQuotesYml {
     /// bars, never the index, so this stays at 1 day while the bar trees are
     /// retained for as long as the longest σ leg needs
     /// ([`Self::bars_retention_days`]).
-    #[serde(default = "default_light_retention_days")]
-    pub retention_days: u16,
+    ///
+    /// ABSENT is meaningful, not "1": the default follows the ROLE
+    /// ([`Self::index_retention_days`]), and on a full node an absent key also
+    /// leaves the hourly sweep DISARMED, so a node that always kept everything
+    /// keeps keeping everything until an operator asks it to prune.
+    #[serde(default)]
+    pub retention_days: Option<u16>,
 }
 
-/// The index tree is the disk hog and σ never reads it: 1 sealed day + today.
-fn default_light_retention_days() -> u16 {
-    1
+/// Default index-tree retention for a light node: 1 sealed day + today.
+pub const LIGHT_INDEX_RETENTION_DAYS: u16 = 1;
+
+/// Default retention for a full node: the `/v1/bars` API contract, in days.
+/// Longer than 365 is allowed (up to [`crate::pipeline_config`]'s role ceiling
+/// of 400 in `core::retention`) so an archive can carry a margin over the
+/// published contract without a second knob.
+pub const FULL_INDEX_RETENTION_DAYS: u16 = 365;
+
+/// Which side of the read path a node is on. See [`SignedQuotesYml::role`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeRole {
+    /// Whole replica: full universe, long retention, local history only.
+    #[default]
+    Full,
+    /// Signer: signed subset, short retention, older history proxied upstream.
+    Light,
+}
+
+impl NodeRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Light => "light",
+        }
+    }
 }
 
 /// Bar width the σ estimator rolls up to, in minutes.
@@ -779,6 +838,66 @@ impl SignedQuotesYml {
     /// the loader can name the offending file in its WARN.
     fn has_stale_sigma_alias(&self) -> bool {
         self.sigma_windows_min.is_some() && self.sigma_lookback_bars.is_some()
+    }
+
+    /// This node's role: [`Self::role`] when named, else the `sign_only` alias,
+    /// else [`NodeRole::Full`] — a config that names neither keeps exactly the
+    /// behaviour it had.
+    pub fn node_role(&self) -> NodeRole {
+        match (self.role, self.sign_only) {
+            (Some(r), _) => r,
+            (None, true) => NodeRole::Light,
+            (None, false) => NodeRole::Full,
+        }
+    }
+
+    /// `role: full` beside `sign_only: true` is a contradiction that silently
+    /// DISARMS the prune: `role` wins, so the node keeps the full universe and
+    /// grows unbounded. Only this direction is reported — `role: light` with an
+    /// absent `sign_only` is the recommended config, and a bool cannot tell
+    /// "absent" from "false".
+    fn has_role_alias_conflict(&self) -> bool {
+        self.role == Some(NodeRole::Full) && self.sign_only
+    }
+
+    /// Configured index-tree retention, defaulted by ROLE: a light node keeps
+    /// the σ-arming floor, a full node the `/v1/bars` contract.
+    pub fn index_retention_days(&self) -> u16 {
+        self.retention_days.unwrap_or(match self.node_role() {
+            NodeRole::Light => LIGHT_INDEX_RETENTION_DAYS,
+            NodeRole::Full => FULL_INDEX_RETENTION_DAYS,
+        })
+    }
+
+    /// True when the hourly shard sweep must be armed. A light node always
+    /// prunes (disk is the constraint it exists under); a full node prunes ONLY
+    /// when an operator named a retention, so a node that never had a sweep
+    /// never starts deleting history because of an upgrade.
+    pub fn sweep_armed(&self) -> bool {
+        self.node_role() == NodeRole::Light || self.retention_days.is_some()
+    }
+
+    /// Bars window the hourly sweep must honour, per ROLE.
+    ///
+    /// A light node's bar trees exist only to fill its σ legs, so the DERIVED
+    /// window is the window. A full node's depth is its published history
+    /// contract, so the derivation is only a FLOOR: arming a full node's sweep
+    /// at `bars_retention_days()` alone would delete a year of `.s10` down to
+    /// two weeks the first time an operator named `retention_days`.
+    pub fn sweep_bars_days(&self) -> u16 {
+        let derived = self.bars_retention_days();
+        match self.node_role() {
+            NodeRole::Light => derived,
+            NodeRole::Full => derived.max(self.index_retention_days()),
+        }
+    }
+
+    /// The archive read upstream, when configured and non-empty.
+    pub fn history_upstream(&self) -> Option<&str> {
+        self.history_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
     }
 
     /// Whole days of `.s10` / `.renko` shards a light node must keep for the
@@ -1510,6 +1629,26 @@ impl PipelineYml {
                  sigma_lookback_bars: sigma_windows_min wins and the stale key is \
                  ignored — delete sigma_lookback_bars from this file"
             );
+        }
+        if let Some(sq) = parsed.signed_quotes.as_ref() {
+            // The role decides retention, the sweep and the history proxy. A
+            // value serde cannot name already failed the parse above; a URL it
+            // cannot route fails here, at load, not on the first old request.
+            if let Some(url) = sq.history_upstream() {
+                anyhow::ensure!(
+                    url.starts_with("http://") || url.starts_with("https://"),
+                    "signed_quotes.history_url must be an http(s) base URL, got {url:?}"
+                );
+            }
+            if sq.has_role_alias_conflict() {
+                tracing::warn!(
+                    config = %path.display(),
+                    role = sq.node_role().as_str(),
+                    "signed_quotes sets role: full beside sign_only: true — role WINS, so \
+                     the retention sweep is DISARMED and disk grows unbounded; delete \
+                     sign_only from this file"
+                );
+            }
         }
         Ok(parsed)
     }
@@ -2864,8 +3003,10 @@ mod tests {
         assert_eq!(base.sigma_windows().max_days(SIGMA_BAR_MIN), 7);
         assert_eq!(base.bars_retention_days(), 8);
         // The INDEX window is untouched: σ never reads it and it is the tree
-        // that actually costs disk.
-        assert_eq!(base.retention_days, 1);
+        // that actually costs disk. Absent key + no role = FULL node, whose
+        // retention is the `/v1/bars` contract.
+        assert_eq!(base.retention_days, None);
+        assert_eq!(base.index_retention_days(), FULL_INDEX_RETENTION_DAYS);
 
         // A longer leg pulls retention up with it, no second knob to forget.
         let long = SignedQuotesYml {
@@ -2884,6 +3025,27 @@ mod tests {
             11,
             "scan horizon wins over the leg"
         );
+    }
+
+    /// The derived bar window follows the RAISED bound, not the retired 14-day
+    /// wall: a full node's σ leg may legitimately span weeks, and clamping the
+    /// derivation at 14 would delete bars the longest leg needs to fill.
+    #[test]
+    fn derived_bar_window_is_not_capped_at_the_old_light_ceiling() {
+        let base: SignedQuotesYml = serde_yml::from_str(
+            "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
+             min_composite_freshness_bps: 500\nquorum: 1\npeers: []\n\
+             feeds:\n\
+               - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n",
+        )
+        .expect("parse");
+        // 20 d leg ⇒ 20 + edge day, i.e. past the old 14-day ceiling.
+        let long = SignedQuotesYml {
+            sigma_windows_min: Some(crate::mtf::MtfWindows::equal([360u32, 2_880, 28_800])),
+            ..base
+        };
+        assert_eq!(long.bars_retention_days(), 21);
     }
 
     #[test]
@@ -2918,6 +3080,114 @@ mod tests {
         )
         .expect("parse explicit sign_only:true");
         assert!(on.sign_only);
+    }
+
+    /// Role parsing. The whole point of the key is that an operator can say
+    /// READ-ONLY-LIGHT without also flipping the materialisation switch, and
+    /// that the old `sign_only: true` ConfigMaps keep meaning what they meant.
+    #[test]
+    fn role_parses_light_and_full_with_sign_only_as_light_alias() {
+        let base = "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\n\
+             min_accepted_providers: 1\nquorum: 2\npeers:\n\
+               - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
+             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n";
+        let parse = |extra: &str| -> SignedQuotesYml {
+            serde_yml::from_str(&format!("{base}{extra}")).expect("parse role schema")
+        };
+
+        // Neither key: FULL, today's behaviour, and no sweep armed.
+        let none = parse("");
+        assert_eq!(none.node_role(), NodeRole::Full);
+        assert!(none.role.is_none());
+        assert!(
+            !none.sweep_armed(),
+            "an unconfigured node must not start pruning"
+        );
+        assert_eq!(none.history_upstream(), None);
+
+        assert_eq!(parse("role: light\n").node_role(), NodeRole::Light);
+        assert_eq!(parse("role: full\n").node_role(), NodeRole::Full);
+
+        // The alias: an old ConfigMap keeps its exact meaning, sweep included.
+        let alias = parse("sign_only: true\n");
+        assert_eq!(alias.node_role(), NodeRole::Light);
+        assert!(alias.sweep_armed());
+        assert_eq!(
+            alias.index_retention_days(),
+            LIGHT_INDEX_RETENTION_DAYS,
+            "light keeps the 1-day index floor, the tree that costs the disk"
+        );
+
+        // role WINS over a contradicting alias, and the loader says so.
+        let both = parse("role: full\nsign_only: true\n");
+        assert_eq!(both.node_role(), NodeRole::Full);
+        assert!(both.has_role_alias_conflict());
+        assert!(!parse("role: light\n").has_role_alias_conflict());
+
+        // An unknown role is a LOAD error, not a silent fallback to full.
+        let bad = serde_yml::from_str::<SignedQuotesYml>(&format!("{base}role: lite\n"));
+        let msg = bad.expect_err("unknown role must be rejected").to_string();
+        assert!(
+            msg.contains("unknown variant") && msg.contains("light"),
+            "error must name the accepted values, got: {msg}"
+        );
+    }
+
+    /// A full node keeps the published contract by default; a named retention
+    /// always wins and is what arms the sweep.
+    #[test]
+    fn retention_defaults_follow_role_and_enable_the_sweep() {
+        let base = "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\n\
+             min_accepted_providers: 1\nquorum: 2\npeers:\n\
+               - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
+             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n";
+        let parse = |extra: &str| -> SignedQuotesYml {
+            serde_yml::from_str(&format!("{base}{extra}")).expect("parse retention schema")
+        };
+        assert_eq!(parse("").index_retention_days(), FULL_INDEX_RETENTION_DAYS);
+        let explicit = parse("retention_days: 400\n");
+        assert_eq!(explicit.index_retention_days(), 400);
+        assert!(
+            explicit.sweep_armed(),
+            "naming a retention on a full node is the opt-in to pruning"
+        );
+        assert_eq!(
+            parse("role: light\nretention_days: 14\n").index_retention_days(),
+            14
+        );
+        // A full node's BAR window follows its retention, never the σ
+        // derivation: the sweep must not cut a year of `.s10` to two weeks.
+        let full = parse("retention_days: 365\n");
+        assert_eq!(full.sweep_bars_days(), 365);
+        // A light node's bars exist to fill σ, so the derivation IS the window.
+        let light = parse("role: light\nretention_days: 14\n");
+        assert_eq!(light.sweep_bars_days(), light.bars_retention_days());
+        assert_eq!(light.bars_retention_days(), 8, "default σ legs");
+    }
+
+    /// `history_url` is base-URL only, normalised to "absent" when empty.
+    #[test]
+    fn history_url_is_optional_and_trimmed() {
+        let base = "oracle: '0x1111111111111111111111111111111111111111'\n\
+             chain_id: 1\nmin_interval_ms: 5\nmark_max_age_ms: 500\n\
+             min_accepted_providers: 1\nquorum: 2\npeers:\n\
+               - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
+             feeds:\n  - { symbol: 'BTC-USDC', cosign_tolerance_bps: 5.0 }\n";
+        let bare: SignedQuotesYml = serde_yml::from_str(base).expect("parse without history_url");
+        assert_eq!(bare.history_upstream(), None);
+        let set: SignedQuotesYml = serde_yml::from_str(&format!(
+            "{base}history_url: '  http://nxr-archive.nxr.svc:8080 '\n"
+        ))
+        .expect("parse with history_url");
+        assert_eq!(
+            set.history_upstream(),
+            Some("http://nxr-archive.nxr.svc:8080")
+        );
+        let empty: SignedQuotesYml =
+            serde_yml::from_str(&format!("{base}history_url: ''\n")).expect("parse empty");
+        assert_eq!(empty.history_upstream(), None);
     }
 
     /// PART B4 (2026-06-09): the per-pair forced-k escape hatch. The calibrator

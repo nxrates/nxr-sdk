@@ -76,11 +76,12 @@ impl EphemeralIdxSource {
     }
 
     /// Push one record. If the ring is at capacity, the oldest record is
-    /// evicted FIFO. Records are pushed in arrival order; callers SHOULD
-    /// push in monotonically non-decreasing `ts_ms` for the `iter_range`
-    /// contract to hold (the live kernel does this by construction).
+    /// evicted FIFO. Records are pushed in arrival order; callers MUST push in
+    /// monotonically non-decreasing `ts_ms` or the `iter_range*` contract
+    /// breaks (debug-asserted: `iter_range*` binary-search the ring).
     pub fn push(&self, rec: IndexRecord) {
         let mut g = self.lock();
+        assert_ascending(g.back(), &rec);
         if g.len() >= self.capacity {
             g.pop_front();
         }
@@ -95,6 +96,7 @@ impl EphemeralIdxSource {
     pub fn push_windowed(&self, rec: IndexRecord, window_ms: i64) {
         let cutoff = mitch::timestamp::to_epoch_ms(rec.header.get_timestamp()) - window_ms;
         let mut g = self.lock();
+        assert_ascending(g.back(), &rec);
         while let Some(front) = g.front() {
             if mitch::timestamp::to_epoch_ms(front.header.get_timestamp()) < cutoff {
                 g.pop_front();
@@ -106,6 +108,28 @@ impl EphemeralIdxSource {
             g.pop_front();
         }
         g.push_back(rec);
+    }
+
+    /// [`iter_range`](Self::iter_range) keeping only the NEWEST `limit` records
+    /// of the window.
+    ///
+    /// `/v1/ohlc` answers with the newest `MAX_LIMIT` records whatever the ring
+    /// returns, so an unbounded window must not copy the whole ring (a synth
+    /// ring holds a full day, 648k × 56 B = 36 MB) while the emit path waits
+    /// for the same lock. Both bounds are binary-searched; the copy is bounded
+    /// by `limit`.
+    pub fn iter_range_newest(&self, from_ms: i64, to_ms: i64, limit: usize) -> Vec<IndexRecord> {
+        if limit == 0 || from_ms > to_ms {
+            return Vec::new();
+        }
+        let g = self.lock();
+        let end = g.partition_point(|r| rec_ts_ms(r) <= to_ms);
+        let start = g
+            .partition_point(|r| rec_ts_ms(r) < from_ms)
+            .max(end.saturating_sub(limit));
+        let mut out: Vec<IndexRecord> = Vec::with_capacity(end - start);
+        out.extend(g.range(start..end).copied());
+        out
     }
 
     /// Current ring length (for metrics + tests).
@@ -168,6 +192,17 @@ impl EphemeralIdxSource {
 #[inline]
 fn rec_ts_ms(rec: &IndexRecord) -> i64 {
     mitch::timestamp::to_epoch_ms(rec.header.get_timestamp())
+}
+
+/// The ring is time-ordered by CONTRACT, and `iter_range*` binary-search it:
+/// out-of-order arrivals would return a silently truncated window instead of a
+/// wrong-looking one. Cost is zero in release (`debug_assert!`).
+#[inline]
+fn assert_ascending(back: Option<&IndexRecord>, rec: &IndexRecord) {
+    debug_assert!(
+        back.is_none_or(|last| rec_ts_ms(last) <= rec_ts_ms(rec)),
+        "push must be ts-ascending: iter_range* binary-search the ring"
+    );
 }
 
 impl Default for EphemeralIdxSource {
@@ -332,5 +367,41 @@ mod tests {
         s.push(mk_rec(42, t0 + 32));
         assert_eq!(s.len(), 2);
         assert_eq!(s.iter_range(i64::MIN, i64::MAX).len(), 2);
+    }
+
+    /// `/v1/ohlc` keeps the NEWEST records of its window, so the ring copy must
+    /// be clamped from the tail: an unbounded window on a full-day synth ring
+    /// copied 36 MB under the lock the emit path needs.
+    #[test]
+    fn iter_range_newest_clamps_the_tail() {
+        let s = EphemeralIdxSource::with_capacity(100);
+        let t0 = 1_700_000_000_000_i64;
+        let step = 32_i64;
+        for i in 0..100_i64 {
+            s.push(mk_rec(42, t0 + i * step));
+        }
+        let v = s.iter_range_newest(i64::MIN, i64::MAX, 7);
+        assert_eq!(v.len(), 7, "only the requested tail is copied");
+        assert_eq!(mitch::timestamp::to_epoch_ms(v[0].header.get_timestamp()), t0 + 93 * step);
+        assert_eq!(mitch::timestamp::to_epoch_ms(v[6].header.get_timestamp()), t0 + 99 * step);
+        // A window narrower than `limit` still clips at BOTH ends.
+        let w = s.iter_range_newest(t0 + 10 * step, t0 + 20 * step, 7);
+        assert_eq!(w.len(), 7);
+        assert_eq!(mitch::timestamp::to_epoch_ms(w[6].header.get_timestamp()), t0 + 20 * step);
+        assert!(s.iter_range_newest(t0, t0 + step, 0).is_empty());
+        assert!(s.iter_range_newest(t0 + step, t0, 7).is_empty(), "inverted window");
+    }
+
+    /// The binary searches need the ring to be time-ordered; a caller that
+    /// pushes out of order is caught in debug builds instead of being served a
+    /// silently truncated window.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "push must be ts-ascending")]
+    fn out_of_order_push_trips_the_ordering_assert() {
+        let s = EphemeralIdxSource::with_capacity(4);
+        let t0 = 1_700_000_000_000_i64;
+        s.push(mk_rec(42, t0 + 64));
+        s.push(mk_rec(42, t0));
     }
 }

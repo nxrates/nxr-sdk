@@ -20,7 +20,7 @@
 //! a NXR pod easily and is bounded.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::IndexRecord;
 
@@ -47,6 +47,17 @@ pub struct EphemeralIdxSource {
 }
 
 impl EphemeralIdxSource {
+    /// Take the ring, recovering a poisoned lock.
+    ///
+    /// This ring is written by the emit path and read by REST. A panic while
+    /// the lock is held poisons it, and the old `expect` then panicked on EVERY
+    /// later access — turning one bad handler into a dead aggregator. A
+    /// poisoned `VecDeque` is still structurally valid (push/pop cannot publish
+    /// a half-updated deque), so reuse it.
+    fn lock(&self) -> MutexGuard<'_, VecDeque<IndexRecord>> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Create a new ring with the given capacity. Panics if `capacity == 0`.
     pub fn with_capacity(capacity: usize) -> Self {
         assert!(capacity > 0, "EphemeralIdxSource capacity must be > 0");
@@ -69,7 +80,7 @@ impl EphemeralIdxSource {
     /// push in monotonically non-decreasing `ts_ms` for the `iter_range`
     /// contract to hold (the live kernel does this by construction).
     pub fn push(&self, rec: IndexRecord) {
-        let mut g = self.inner.lock().expect("ring lock poisoned");
+        let mut g = self.lock();
         if g.len() >= self.capacity {
             g.pop_front();
         }
@@ -83,7 +94,7 @@ impl EphemeralIdxSource {
     /// a handful of heartbeats, not `capacity` records accumulated over days.
     pub fn push_windowed(&self, rec: IndexRecord, window_ms: i64) {
         let cutoff = mitch::timestamp::to_epoch_ms(rec.header.get_timestamp()) - window_ms;
-        let mut g = self.inner.lock().expect("ring lock poisoned");
+        let mut g = self.lock();
         while let Some(front) = g.front() {
             if mitch::timestamp::to_epoch_ms(front.header.get_timestamp()) < cutoff {
                 g.pop_front();
@@ -99,7 +110,7 @@ impl EphemeralIdxSource {
 
     /// Current ring length (for metrics + tests).
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("ring lock poisoned").len()
+        self.lock().len()
     }
 
     /// True iff the ring is empty.
@@ -115,32 +126,48 @@ impl EphemeralIdxSource {
     /// Yield every record in `[from_ms, to_ms]` (inclusive) in ascending
     /// timestamp order. Allocates: clones matching records out of the
     /// mutex-guarded ring so the lock is released quickly; callers should
-    /// consume promptly.
-    pub fn iter_range(
-        &self,
-        from_ms: i64,
-        to_ms: i64,
-    ) -> Box<dyn Iterator<Item = IndexRecord> + Send + '_> {
-        // Snapshot under the lock: clone matching records out so the lock
-        // is released quickly. For today's hot range that's at most ~648k
-        // × 56 B = 36 MB worst-case; in practice REST calls request a much
-        // narrower [from, to] window.
-        let g = self.inner.lock().expect("ring lock poisoned");
-        let mut out: Vec<IndexRecord> = Vec::new();
-        for rec in g.iter() {
-            let header = rec.header;
-            let ts_mts = header.get_timestamp();
-            let ts_ms = mitch::timestamp::to_epoch_ms(ts_mts);
-            if ts_ms < from_ms {
-                continue;
-            }
-            if ts_ms > to_ms {
+    /// consume promptly, or use [`iter_range_limited`](Self::iter_range_limited)
+    /// when they only need the first `limit` records.
+    pub fn iter_range(&self, from_ms: i64, to_ms: i64) -> Vec<IndexRecord> {
+        self.iter_range_limited(from_ms, to_ms, usize::MAX)
+    }
+
+    /// [`iter_range`](Self::iter_range) with a hard cap on the records copied.
+    ///
+    /// `/v1/ohlc` and `/v1/idx` ask for a small `limit` but used to copy the
+    /// whole window (a full day is ~648k × 56 B = 36 MB) out of the ring, while
+    /// holding the same lock the emit path needs. Pass the caller's `limit` here
+    /// and the copy, the allocation and the lock hold are all bounded by it.
+    ///
+    /// The lock is held for the copy only, and the bounds are FOUND by search
+    /// rather than by walking the day: the ring is time-ordered because
+    /// `push`/`push_windowed` append in arrival order and the live kernel emits
+    /// monotonically non-decreasing `mts` (see [`push`](Self::push)). A caller
+    /// that violates that contract gets the same answer the previous
+    /// front-to-back scan gave — it also stopped at the first record past
+    /// `to_ms` — never a wrong one silently.
+    pub fn iter_range_limited(&self, from_ms: i64, to_ms: i64, limit: usize) -> Vec<IndexRecord> {
+        if limit == 0 || from_ms > to_ms {
+            return Vec::new();
+        }
+        let g = self.lock();
+        let start = g.partition_point(|r| rec_ts_ms(r) < from_ms);
+        let take = limit.min(g.len() - start);
+        let mut out: Vec<IndexRecord> = Vec::with_capacity(take);
+        for rec in g.range(start..) {
+            if rec_ts_ms(rec) > to_ms || out.len() >= limit {
                 break;
             }
             out.push(*rec);
         }
-        Box::new(out.into_iter())
+        out
     }
+}
+
+/// Record timestamp in epoch ms (the unit both bounds and the ring contract use).
+#[inline]
+fn rec_ts_ms(rec: &IndexRecord) -> i64 {
+    mitch::timestamp::to_epoch_ms(rec.header.get_timestamp())
 }
 
 impl Default for EphemeralIdxSource {
@@ -191,7 +218,7 @@ mod tests {
         }
         assert_eq!(s.len(), 3);
         // First two evicted; remaining ts = t0+2step, t0+3step, t0+4step.
-        let v: Vec<IndexRecord> = s.iter_range(i64::MIN, i64::MAX).collect();
+        let v: Vec<IndexRecord> = s.iter_range(i64::MIN, i64::MAX);
         assert_eq!(v.len(), 3);
         let first_ts = mitch::timestamp::to_epoch_ms(v[0].header.get_timestamp());
         let last_ts = mitch::timestamp::to_epoch_ms(v[2].header.get_timestamp());
@@ -208,7 +235,7 @@ mod tests {
             s.push(mk_rec(42, t0 + i * step));
         }
         // [t0+3step, t0+5step] should yield 3 records (i=3, 4, 5).
-        let v: Vec<IndexRecord> = s.iter_range(t0 + 3 * step, t0 + 5 * step).collect();
+        let v: Vec<IndexRecord> = s.iter_range(t0 + 3 * step, t0 + 5 * step);
         assert_eq!(v.len(), 3, "expected 3 records in [3step, 5step]");
         let ts0 = mitch::timestamp::to_epoch_ms(v[0].header.get_timestamp());
         let ts2 = mitch::timestamp::to_epoch_ms(v[2].header.get_timestamp());
@@ -226,7 +253,7 @@ mod tests {
             s.push_windowed(mk_rec(42, t0 + i * step), 2 * step);
         }
         // Age window keeps i=3..5 (ts >= t5 - 2step); count cap (4) not hit.
-        let v: Vec<IndexRecord> = s.iter_range(i64::MIN, i64::MAX).collect();
+        let v: Vec<IndexRecord> = s.iter_range(i64::MIN, i64::MAX);
         assert_eq!(v.len(), 3);
         let first_ts = mitch::timestamp::to_epoch_ms(v[0].header.get_timestamp());
         assert_eq!(first_ts, t0 + 3 * step);
@@ -241,7 +268,69 @@ mod tests {
     #[test]
     fn empty_range_returns_zero() {
         let s = EphemeralIdxSource::with_capacity(10);
-        let v: Vec<IndexRecord> = s.iter_range(0, 1_000).collect();
+        let v: Vec<IndexRecord> = s.iter_range(0, 1_000);
         assert!(v.is_empty());
+    }
+
+    /// The bounded form must copy only what was asked for: `/v1/idx` passes the
+    /// caller's `limit`, and a full-day ring is ~36 MB of records.
+    #[test]
+    fn iter_range_limited_stops_at_limit() {
+        let s = EphemeralIdxSource::with_capacity(100);
+        let t0 = 1_700_000_000_000_i64;
+        let step = 32_i64;
+        for i in 0..100_i64 {
+            s.push(mk_rec(42, t0 + i * step));
+        }
+        let v = s.iter_range_limited(i64::MIN, i64::MAX, 7);
+        assert_eq!(v.len(), 7, "must not copy the window it was not asked for");
+        assert_eq!(
+            mitch::timestamp::to_epoch_ms(v[6].header.get_timestamp()),
+            t0 + 6 * step,
+            "and it must be the OLDEST 7, in order"
+        );
+        assert!(s.iter_range_limited(t0, t0 + step, 0).is_empty());
+    }
+
+    /// Bounds are found by search, so a window in the middle and a window with
+    /// no records must both land exactly where the old front-to-back scan did.
+    #[test]
+    fn iter_range_bounds_are_exact_for_mid_windows() {
+        let s = EphemeralIdxSource::with_capacity(50);
+        let t0 = 1_700_000_000_000_i64;
+        let step = 32_i64;
+        for i in 0..50_i64 {
+            s.push(mk_rec(42, t0 + i * step));
+        }
+        // Window inside the ring, both ends inclusive, one record wide.
+        let one = s.iter_range(t0 + 20 * step, t0 + 20 * step);
+        assert_eq!(one.len(), 1);
+        // Window entirely past the newest record.
+        assert!(s.iter_range(t0 + 1_000 * step, t0 + 2_000 * step).is_empty());
+        // Window entirely before the oldest record.
+        assert!(s.iter_range(t0 - 1_000 * step, t0 - step).is_empty());
+        // Open-ended from a mid bound to the newest.
+        let tail = s.iter_range(t0 + 47 * step, i64::MAX);
+        assert_eq!(tail.len(), 3);
+    }
+
+    /// A panic while the lock is held must not wedge the ring: the emit path
+    /// would panic on every later push (the old `expect("ring lock poisoned")`).
+    #[test]
+    fn a_poisoned_ring_still_serves_and_accepts() {
+        let s = std::sync::Arc::new(EphemeralIdxSource::with_capacity(8));
+        let t0 = 1_700_000_000_000_i64;
+        s.push(mk_rec(42, t0));
+        let poisoner = std::sync::Arc::clone(&s);
+        // Panic while holding the guard, which is what poisons the mutex.
+        let _ = std::thread::spawn(move || {
+            let _g = poisoner.inner.lock().expect("fresh lock");
+            panic!("poison the ring");
+        })
+        .join();
+        assert!(s.inner.is_poisoned(), "precondition: the test poisoned it");
+        s.push(mk_rec(42, t0 + 32));
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.iter_range(i64::MIN, i64::MAX).len(), 2);
     }
 }

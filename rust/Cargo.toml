@@ -23,7 +23,7 @@ ws-config = ["dep:tokio-tungstenite"]
 [dependencies]
 mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }
 
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
 memmap2 = "0.9"
 
 tokio = { version = "1.52", default-features = false, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "signal"] }

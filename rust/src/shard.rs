@@ -608,16 +608,27 @@ impl ShardRecord for crate::mitch::bar::Bar {
 /// atomicity only up to a page); the trailing partial record is unrecoverable
 /// and must be discarded, not parsed.
 pub fn read_shard_aligned<T: Pod>(path: &Path) -> Result<Vec<T>> {
-    let bytes = fs::read(path).with_context(|| format!("read shard {}", path.display()))?;
+    let mut bytes = fs::read(path).with_context(|| format!("read shard {}", path.display()))?;
     let stride = std::mem::size_of::<T>();
     if stride == 0 {
         return Ok(Vec::new());
     }
-    let n = bytes.len() / stride;
-    let aligned = &bytes[..n * stride];
-    // T is `repr(C, packed)` (align 1) for our record types, so cast_slice
-    // never fails the alignment check; bytes from `fs::read` are align-1 safe.
-    Ok(bytemuck::cast_slice::<u8, T>(aligned).to_vec())
+    // Whole records only: the trailing partial record is discarded, not parsed.
+    bytes.truncate(bytes.len() / stride * stride);
+    // RECAST in place, no second `Vec<T>` and no memcpy. `try_cast_vec` needs the
+    // alignment to match and the capacity to be a whole multiple of the stride;
+    // a `Vec<u8>` from `fs::read` has slack capacity and align 1, so tighten the
+    // slack and fall back to the old per-record copy when the alignment differs
+    // (our record types are `repr(C, packed)`, align 1, so this never fires here).
+    if bytes.capacity() % stride != 0 {
+        bytes.shrink_to_fit();
+    }
+    match bytemuck::allocation::try_cast_vec::<u8, T>(bytes) {
+        Ok(recs) => Ok(recs),
+        Err((_, bytes)) => Ok((0..bytes.len() / stride)
+            .map(|i| bytemuck::pod_read_unaligned(&bytes[i * stride..][..stride]))
+            .collect()),
+    }
 }
 
 /// Restart-seeding call sites want the very last record; reads a few extra
@@ -975,19 +986,40 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 
 /// Build a [`ShardEntry`] for a finished shard file by scanning it. Generic
 /// over any [`ShardRecord`] (idx or bar).
+///
+/// ONE full read: the record bounds, the record count, the size and the digest
+/// all come off the same buffer. Rotation used to read the shard TWICE (once in
+/// `read_shard_aligned` for the bounds, once in `sha256_file` for the digest),
+/// on the writer thread, for every ticker at every rollover.
 pub fn shard_entry<T: ShardRecord>(date: NaiveDate, path: &Path) -> Result<ShardEntry> {
-    let recs = read_shard_aligned::<T>(path)?;
-    let first_ts = recs.first().map(|r| r.shard_ts_ms()).unwrap_or(0);
-    let last_ts = recs.last().map(|r| r.shard_ts_ms()).unwrap_or(0);
-    let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let bytes = fs::read(path).with_context(|| format!("read shard {}", path.display()))?;
+    let stride = std::mem::size_of::<T>();
+    let n = bytes.len().checked_div(stride).unwrap_or(0);
+    // `T` is `repr(C, packed)` (align 1) for our record types, so the same cast
+    // `read_shard_aligned` makes is alignment-safe over a `Vec<u8>`.
+    let recs: &[T] = if n == 0 {
+        &[]
+    } else {
+        bytemuck::cast_slice(&bytes[..n * stride])
+    };
     Ok(ShardEntry {
         date: date_stem(date),
-        first_ts,
-        last_ts,
-        n_records: recs.len() as u64,
-        size_bytes,
-        sha256: sha256_file(path)?,
+        first_ts: recs.first().map(|r| r.shard_ts_ms()).unwrap_or(0),
+        last_ts: recs.last().map(|r| r.shard_ts_ms()).unwrap_or(0),
+        n_records: n as u64,
+        size_bytes: bytes.len() as u64,
+        // The WHOLE file, a torn trailing partial record included: that is what
+        // `sha256_file` covered, so every existing manifest digest still matches.
+        sha256: sha256_bytes(&bytes),
     })
+}
+
+/// SHA-256 of an in-memory buffer, same hex encoding as [`sha256_file`].
+fn sha256_bytes(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 /// Atomic shard write: write `bytes` to `<path>.tmp` → fsync → rename → path.
@@ -1785,6 +1817,82 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// ITEM 5: the in-place recast returns the SAME records as the old
+    /// `cast_slice(..).to_vec()` path, from a buffer aligned for `T`, and still
+    /// drops a torn trailing record.
+    #[test]
+    fn read_shard_aligned_recasts_in_place_and_stays_aligned() {
+        let root = std::env::temp_dir()
+            .join(format!("nxr_shard_recast_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("2026-01-02.idx");
+        let recs: Vec<IndexRecord> = (0..256)
+            .map(|i| rec(i * 100, 100.0 + i as f64, 101.0 + i as f64))
+            .collect();
+        let raw = bytemuck::cast_slice::<IndexRecord, u8>(&recs).to_vec();
+        fs::write(&path, &raw).unwrap();
+
+        let got = read_shard_aligned::<IndexRecord>(&path).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<IndexRecord, u8>(&got),
+            &raw[..],
+            "recast must be byte-identical to the copy path"
+        );
+        assert_eq!(got.len(), recs.len());
+        assert_eq!(
+            got.as_ptr() as usize % std::mem::align_of::<IndexRecord>(),
+            0,
+            "returned buffer must be aligned for T"
+        );
+
+        // Torn tail: three stray bytes are dropped, never parsed as a record.
+        let mut torn = raw.clone();
+        torn.extend_from_slice(&[1, 2, 3]);
+        fs::write(&path, &torn).unwrap();
+        let got = read_shard_aligned::<IndexRecord>(&path).unwrap();
+        assert_eq!(got.len(), recs.len(), "partial record is discarded");
+        assert_eq!(bytemuck::cast_slice::<IndexRecord, u8>(&got), &raw[..]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// ITEM 4: one rotation now reads the shard ONCE. The manifest entry it
+    /// writes must be exactly what the old two-read derivation produced (bounds
+    /// and count off `read_shard_aligned`, digest off `sha256_file`), including
+    /// for a shard with a torn trailing record, whose bytes are still hashed.
+    #[test]
+    fn shard_entry_matches_the_two_read_derivation() {
+        let root = std::env::temp_dir()
+            .join(format!("nxr_shard_entry_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("2026-01-02.idx");
+        let recs: Vec<IndexRecord> = (0..97)
+            .map(|i| rec(i * 100, 100.0 + i as f64, 101.0))
+            .collect();
+        fs::write(&path, bytemuck::cast_slice::<IndexRecord, u8>(&recs)).unwrap();
+
+        let date = ts_ms_to_utc_date(recs[0].shard_ts_ms());
+        let old = read_shard_aligned::<IndexRecord>(&path).unwrap();
+        let e = shard_entry::<IndexRecord>(date, &path).unwrap();
+        assert_eq!(e.date, date_stem(date));
+        assert_eq!(e.n_records, old.len() as u64);
+        assert_eq!(e.first_ts, old.first().unwrap().shard_ts_ms());
+        assert_eq!(e.last_ts, old.last().unwrap().shard_ts_ms());
+        assert_eq!(e.size_bytes, fs::metadata(&path).unwrap().len());
+        assert_eq!(e.sha256, sha256_file(&path).unwrap(), "digest unchanged");
+
+        // Torn trailing bytes: hashed (as `sha256_file` did), not counted.
+        let mut torn = fs::read(&path).unwrap();
+        torn.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x01]);
+        fs::write(&path, &torn).unwrap();
+        let e = shard_entry::<IndexRecord>(date, &path).unwrap();
+        assert_eq!(e.n_records, recs.len() as u64);
+        assert_eq!(e.size_bytes, torn.len() as u64);
+        assert_eq!(e.sha256, sha256_file(&path).unwrap());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// The enumerator is the ONLY inventory: a ticker holding all four artefact
     /// kinds must report all four, `.vol` included. Every tool that walks the
     /// store by hand has so far dropped `.vol`; this test is what stops the next
@@ -2293,3 +2401,4 @@ mod storable_tests {
         }
     }
 }
+

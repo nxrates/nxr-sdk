@@ -1019,16 +1019,34 @@ impl ProviderFingerprint {
     /// SUMS these, which is what makes the set order irrelevant, and a
     /// duplicated tuple then counts twice instead of cancelling as it would
     /// under an XOR.
+    ///
+    /// Each field gets its OWN odd multiplier before the sum. Xor-ing rotated
+    /// words put different fields in the same bit position (`rotate_left(17)`
+    /// vs `rotate_left(41)` aliased bid bit i with ask bit i-24; the bare
+    /// `provider_id` aliased `vask` bit 0..15), so a forwarder could flip a
+    /// chosen bit PAIR and leave the digest — and therefore the throttle —
+    /// untouched. `2^i * K1 == 2^j * K2 (mod 2^64)` has no solution for
+    /// distinct odd multipliers and i != j, so no single-bit pair cancels.
     #[inline]
     fn digest(&self) -> u64 {
+        /// Distinct odd multipliers, one per field (see above): a per-field
+        /// rotation would re-alias (rotation is a bijection on the bit
+        /// positions, so two fields always collide somewhere), a per-field
+        /// `mix64` costs 5 dependent ops. `provider_id` stays raw: it only has
+        /// to differ from every MULTIPLIED field, which it does.
+        const K_BID: u64 = 0xc2b2_ae3d_27d4_eb4f;
+        const K_ASK: u64 = 0x1656_67b1_9e37_79f9;
+        const K_VOL: u64 = 0x27d4_eb2f_1656_67c5;
         /// Distinguishes an injected leg from a real one without stealing a bit
         /// of `vbid`: an added constant carries, a shifted flag would alias
         /// with `vbid`'s top bit.
         const INJECTED: u64 = 0x2545_f491_4f6c_dd1d;
+        // `vbid`/`vask` share one word: disjoint 32-bit halves cannot cancel.
+        let vol = (u64::from(self.vbid) << 32) | u64::from(self.vask);
         let mut lane = u64::from(self.provider_id)
-            ^ self.bid_bits.rotate_left(17)
-            ^ self.ask_bits.rotate_left(41)
-            ^ ((u64::from(self.vbid) << 32) | u64::from(self.vask));
+            .wrapping_add(self.bid_bits.wrapping_mul(K_BID))
+            .wrapping_add(self.ask_bits.wrapping_mul(K_ASK))
+            .wrapping_add(vol.wrapping_mul(K_VOL));
         if self.injected {
             lane = lane.wrapping_add(INJECTED);
         }
@@ -1451,6 +1469,11 @@ mod fingerprint_tests {
                     f.vask,
                     now,
                 );
+                // `inject_at` sets `injected`, which is itself fingerprinted:
+                // without this the probe differs from the base in a SECOND
+                // field and the assert passes even when the field under test is
+                // absent from the digest.
+                probe[2].1.injected = base[2].1.injected;
                 assert_ne!(
                     fingerprint_of(&probe),
                     expected,
@@ -1463,6 +1486,51 @@ mod fingerprint_tests {
         let (bid, ask) = (injected[2].1.index.bid, injected[2].1.index.ask);
         injected[2].1.inject_at(bid, ask, 0, 0, now);
         assert_ne!(fingerprint_of(&injected), expected);
+    }
+
+    /// The structural alias the per-field multipliers exist to kill: under the
+    /// old `bid.rotate_left(17) ^ ask.rotate_left(41)` lane, bid bit i and ask
+    /// bit i-24 landed in the SAME xor position and cancelled, so a forwarder
+    /// could flip the pair and keep the digest (and the throttled replay) it
+    /// had. Same for `provider_id` bit k against `vask` bit k.
+    #[test]
+    fn fingerprint_reacts_to_compensating_bit_pairs() {
+        let now = Instant::now();
+        let base = legs(now);
+        let expected = fingerprint_of(&base);
+        // `None` = leave that field alone; every probe differs from the base in
+        // EXACTLY the two bits under test.
+        let flip = |prices: Option<(u64, u64)>, pid_bit: Option<u64>, vask_bit: Option<u64>| {
+            let mut probe = base.clone();
+            let f = ProviderFingerprint::from_entry(probe[2].0, &probe[2].1);
+            let (bid, ask) = prices.map_or((f.bid_bits, f.ask_bits), |(i, j)| {
+                (f.bid_bits ^ (1 << i), f.ask_bits ^ (1 << j))
+            });
+            probe[2].0 = f.provider_id ^ pid_bit.map_or(0, |k| 1 << k);
+            probe[2].1.inject_at(
+                f64::from_bits(bid),
+                f64::from_bits(ask),
+                f.vbid,
+                f.vask ^ vask_bit.map_or(0, |k| 1 << k),
+                now,
+            );
+            probe[2].1.injected = base[2].1.injected;
+            fingerprint_of(&probe) != expected
+        };
+        for i in 0..64u64 {
+            let pair = (i, (i + 40) % 64);
+            assert!(
+                flip(Some(pair), None, None),
+                "bid bit {i} + ask bit {} cancelled",
+                pair.1
+            );
+        }
+        for k in 0..16u64 {
+            assert!(
+                flip(None, Some(k), Some(k)),
+                "provider_id bit {k} + vask bit {k} cancelled"
+            );
+        }
     }
 
     /// Same set in a different order replays the cached composite; one changed

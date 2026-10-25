@@ -51,6 +51,8 @@ pub mod vol_estimator;
 pub mod weights_schema;
 #[cfg(feature = "client")]
 pub mod ws_client;
+#[cfg(feature = "ws-config")]
+pub mod ws_config;
 pub mod ws_frame;
 
 // ---- MITCH types ----

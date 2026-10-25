@@ -12,9 +12,13 @@ default = []
 # UDP multicast + publisher traits (nxr core aggregator / bar multicast).
 transport = ["dep:socket2", "dep:metrics", "tokio/net"]
 # REST + binary WS consumer client.
-client = ["transport", "dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util"]
+client = ["transport", "ws-config", "dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util"]
 # Shared axum `/metrics` server (crypto/fx forwarder bins).
 server-metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "tokio/net"]
+# The one inbound WebSocket configuration ([`ws_config`]) used by the CEX
+# forwarder, the cTrader forwarder and the consumer WS client. Kept separate from
+# `client` so a forwarder gets the config without sdk's REST client.
+ws-config = ["dep:tokio-tungstenite"]
 
 [dependencies]
 mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }

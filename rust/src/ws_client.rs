@@ -29,9 +29,11 @@ use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
+    MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite::protocol::Message,
 };
 use tracing::{debug, info, warn};
+
+use crate::ws_config::ws_config;
 
 pub use crate::ws_frame::{FRAME_HEADER_BYTES, INDEX_RECORD_BYTES, INDEX_STRIDE, MSG_INDEX};
 
@@ -232,7 +234,9 @@ impl WsClient {
     /// persistent [`client_id`] is appended unless the url already has one.
     pub async fn connect(url: &str) -> Result<Self> {
         let url = &with_client_id(url, &client_id());
-        let (ws, _response) = connect_async(url)
+        // Same inbound caps and TCP_NODELAY as the CEX forwarder: one config,
+        // one place to audit (nxr_sdk::ws_config).
+        let (ws, _response) = connect_async_with_config(url, Some(ws_config()), true)
             .await
             .with_context(|| format!("connect {}", redact_url(url)))?;
         info!(url = %redact_url(url), "NXR WS client connected");

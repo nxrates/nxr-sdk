@@ -179,6 +179,10 @@ pub struct CalibrateRun {
     /// comparable across runs at equal window.
     #[serde(default)]
     pub window_days: Option<u32>,
+    /// Synth ids dropped before the synth pass (no `.s10` shards). Exported as
+    /// `nxr_calibrate_synth_prefiltered`.
+    #[serde(default)]
+    pub synth_prefiltered: usize,
 }
 
 /// One market an asset trades in, ranked by 24h USD volume.

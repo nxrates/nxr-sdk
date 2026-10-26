@@ -658,6 +658,9 @@ pub struct SignedQuotesYml {
     /// sign any resolvable ticker, including one no feed declares. Coupling
     /// the two is what made `/v1/price/SOL-USDC` answer empty on a signer
     /// holding SOL's marks.
+    // ponytail: legacy alias of `role: light`, kept so deployed signer ConfigMaps
+    // still parse; remove once every ConfigMap says `role: light`, then `node_role`
+    // reads `role` alone.
     #[serde(default)]
     pub sign_only: bool,
     /// NODE ROLE. `full` (the default, and what a config that names neither
@@ -673,10 +676,9 @@ pub struct SignedQuotesYml {
     /// config path by [`PipelineYml::load`].
     #[serde(default)]
     pub role: Option<NodeRole>,
-    /// LIGHT NODE retention, in whole days of sealed shards to keep BESIDES
-    /// today's (so `1` = yesterday + today = 2 files per ticker). Honored ONLY
-    /// when [`Self::node_role`] is `light`: a full node's retention is the API
-    /// contract (365 d `/v1/bars`) and is not this knob.
+    /// Retention, in whole days of sealed shards to keep BESIDES today's (so
+    /// `1` = yesterday + today = 2 files per ticker). Naming it is the ONLY
+    /// thing that arms the sweep; its ceiling follows the role.
     ///
     /// This bounds the INDEX tree (`indexes/*.idx`), which is the tree that
     /// actually costs disk: one 56 B record per emit cycle per ticker. Measured
@@ -687,8 +689,8 @@ pub struct SignedQuotesYml {
     /// ([`Self::bars_retention_days`]).
     ///
     /// ABSENT is meaningful, not "1": the default follows the ROLE
-    /// ([`Self::index_retention_days`]), and on a full node an absent key also
-    /// leaves the hourly sweep DISARMED, so a node that always kept everything
+    /// ([`Self::index_retention_days`]), and an absent key leaves the hourly
+    /// sweep DISARMED on every role, so a node that always kept everything
     /// keeps keeping everything until an operator asks it to prune.
     #[serde(default)]
     pub retention_days: Option<u16>,
@@ -892,12 +894,13 @@ impl SignedQuotesYml {
         })
     }
 
-    /// True when the hourly shard sweep must be armed. A light node always
-    /// prunes (disk is the constraint it exists under); a full node prunes ONLY
-    /// when an operator named a retention, so a node that never had a sweep
-    /// never starts deleting history because of an upgrade.
+    /// True when the hourly shard sweep must be armed: ONLY when an operator
+    /// named `retention_days`, whatever the role. A node that never had a sweep
+    /// (every deployed `sign_only` signer included) never starts deleting
+    /// history because of an upgrade; a light node without the key just keeps
+    /// the role default window as a report, not a prune.
     pub fn sweep_armed(&self) -> bool {
-        self.node_role() == NodeRole::Light || self.retention_days.is_some()
+        self.retention_days.is_some()
     }
 
     /// Bars window the hourly sweep must honour, per ROLE.
@@ -3132,10 +3135,12 @@ mod tests {
         assert_eq!(parse("role: light\n").node_role(), NodeRole::Light);
         assert_eq!(parse("role: full\n").node_role(), NodeRole::Full);
 
-        // The alias: an old ConfigMap keeps its exact meaning, sweep included.
+        // The alias: an old ConfigMap keeps its role, and still does NOT prune.
         let alias = parse("sign_only: true\n");
         assert_eq!(alias.node_role(), NodeRole::Light);
-        assert!(alias.sweep_armed());
+        assert!(!alias.sweep_armed(), "upgrading a sign_only signer must not arm a sweep");
+        assert!(!parse("role: light\n").sweep_armed());
+        assert!(parse("sign_only: true\nretention_days: 3\n").sweep_armed());
         assert_eq!(
             alias.index_retention_days(),
             LIGHT_INDEX_RETENTION_DAYS,

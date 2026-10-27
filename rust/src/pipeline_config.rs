@@ -1127,8 +1127,9 @@ pub struct SignedFeedYml {
     /// wrap priced 1:1 off its underlying (`EURC-USDC` off `USDC-EUR` inverted,
     /// `WBTC-USDC` off `BTC-USDC`), where the wrap has no book of its own and
     /// the signer never composes. Boot refuses a `publish` whose
-    /// `series_alias::series_canonical_ticker_id` differs from the resolved
-    /// pair's, so it can only relabel a wrap, never re-price.
+    /// `series_alias::wrap_underlying_ticker_id` differs from the resolved
+    /// pair's, so it can only relabel a wrap, never re-price. A measured wrap
+    /// (WBTC, cbBTC) is then scaled by its basis (nx-rates `wrapped_basis`).
     #[serde(default)]
     pub publish: Option<String>,
     /// V2 (`packedV2`) ONLY: this feed's global lane index on `ExternalOracleV2`

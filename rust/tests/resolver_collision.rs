@@ -119,10 +119,10 @@ fn fx_wrapper_assets_resolve_to_themselves_not_to_their_currency() {
     }
 }
 
-/// CAT-2 custodial BTC wraps keep a DISTINCT exposed ticker_id (de-peg risk is
-/// observable) but `series_canonical_ticker_id` redirects them to BTC's series.
+/// WBTC and cbBTC keep a DISTINCT exposed ticker_id AND their own series: they are
+/// measured against BTC (nx-rates `wrapped_basis`), never aliased to it.
 #[test]
-fn wrapped_btc_distinct_id_shares_btc_series() {
+fn wrapped_btc_distinct_id_and_own_series() {
     use nxr_sdk::{resolve_ticker_id, series_canonical_ticker_id};
 
     let btc_usdt = id_of("BTC/USDT");
@@ -140,23 +140,12 @@ fn wrapped_btc_distinct_id_shares_btc_series() {
         "WBTC keeps own id"
     );
 
-    // But series-shared with BTC at the same quote.
-    assert_eq!(
-        series_canonical_ticker_id(resolve_ticker_id("CBBTC/USDT")),
-        btc_usdt
-    );
-    assert_eq!(
-        series_canonical_ticker_id(resolve_ticker_id("WBTC/USDT")),
-        btc_usdt
-    );
-    assert_eq!(
-        series_canonical_ticker_id(resolve_ticker_id("CBBTC-USDC")),
-        btc_usdc
-    );
-    assert_eq!(
-        series_canonical_ticker_id(resolve_ticker_id("WBTC-USDC")),
-        btc_usdc
-    );
+    // Never redirected to BTC's series: a WBTC/cbBTC history is its own.
+    for s in ["CBBTC/USDT", "WBTC/USDT", "CBBTC-USDC", "WBTC-USDC"] {
+        let id = resolve_ticker_id(s);
+        assert_eq!(series_canonical_ticker_id(id), id, "{s}");
+    }
+    assert_eq!(nxr_sdk::wrap_underlying_ticker_id(resolve_ticker_id("WBTC-USDC")), btc_usdc);
 
     // cbBTC still resolves to its own (Coinbase BTC) asset, not Bitcoin.
     assert!(
@@ -208,8 +197,6 @@ fn cat2_distinct_id_shared_series() {
 
     let btc_usdt = id_of("BTC/USDT");
     for wrap in [
-        "WBTC/USDT",
-        "CBBTC/USDT",
         "TBTC/USDT",
         "BTCB/USDT",
         "BBTC/USDT",

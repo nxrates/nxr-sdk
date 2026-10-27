@@ -115,6 +115,9 @@ pub struct Kernel {
     /// those levels as shares age, a median moves only when half the share
     /// reprices, and one venue cannot pull it at all.
     pub median: bool,
+    /// Ceiling on any one leg's final share, on top of `w_max(n)`, faded by the
+    /// second most present evidence leg: `1 − (1 − share_cap)·g₂`. 1.0 = none.
+    pub share_cap: f64,
 }
 
 /// A leg is dead once its price can have diffused this many reference
@@ -147,6 +150,7 @@ impl Kernel {
             s_min: s_min_bp * 1e-4,
             horizon_secs,
             median: false,
+            share_cap: 1.0,
         }
     }
 
@@ -760,6 +764,17 @@ where
     let clip = n_clip();
     let (mut w_sum, mut w_map, mut w_map_g) = (0.0f64, 0.0f64, 0.0f64);
     let (mut nm1, mut nm2, mut na1, mut na2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    // Presence of the two most present evidence legs, mapped and all: the
+    // pegged share cap fades with the SECOND (a lone live venue is never capped
+    // toward a leg that is fading out, nor an unmapped one).
+    let (mut gm, mut ga) = ([0.0f64; 2], [0.0f64; 2]);
+    let top2 = |t: &mut [f64; 2], g: f64| {
+        if g > t[0] {
+            *t = [g, t[0]];
+        } else if g > t[1] {
+            t[1] = g;
+        }
+    };
     for (e, l) in entries.clone().zip(&legs) {
         let Some((_, g, w, _)) = *l else { continue };
         w_sum += w;
@@ -770,11 +785,13 @@ where
             if !e.injected {
                 nm1 += x;
                 nm2 += x * x;
+                top2(&mut gm, g);
             }
         }
         if !e.injected {
             na1 += x;
             na2 += x * x;
+            top2(&mut ga, g);
         }
     }
     if w_sum < 1e-12 {
@@ -815,11 +832,22 @@ where
             (r * k_un, 0.0)
         }
     };
-    let cap = Concentration::get().w_max(n);
-    let lam = water_fill(
-        legs.iter().zip(entries.clone()).filter_map(|(l, e)| l.map(|(_, g, w, _)| raw(e, g, w))),
-        cap,
-    );
+    let w_max = Concentration::get().w_max(n);
+    // Pegged cap, faded by the second leg's presence: 1 − (1 − c)·g₂.
+    let g2 = if any_mapped { gm[1] } else { ga[1] };
+    let peg = 1.0 - (1.0 - kernel.share_cap) * g2.min(1.0);
+    let fill = |cap| {
+        water_fill(
+            legs.iter().zip(entries.clone()).filter_map(|(l, e)| l.map(|(_, g, w, _)| raw(e, g, w))),
+            cap,
+        )
+    };
+    let (cap, lam) = match fill(w_max.min(peg)) {
+        // The pegged cap never forces share onto a leg with no evidence: no
+        // eligible home falls back to the ordinary cap, not to all-eligible.
+        None if peg < w_max => (w_max, fill(w_max)),
+        l => (w_max.min(peg), l),
+    };
     // No eligible home for the excess: rather than skip the cap, water-fill
     // again with EVERY leg eligible in proportion to its own share. Only a
     // single live leg (nothing to move share to) then keeps its raw 1.0.

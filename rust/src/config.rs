@@ -22,8 +22,13 @@ pub struct NxrConfig {
     pub log_level: String,
     /// TCP port the aggregator listens on for MITCH frames from provider forwarders
     pub listen_port: u16,
-    /// Aggregation cycle interval in milliseconds (default: 200 = 5 Hz)
+    /// Aggregation cycle interval in milliseconds (default: 200 = 5 Hz): the
+    /// persisted row spacing (`.idx`, bars, backfill parity).
     pub aggregation_interval_ms: u64,
+    /// Aggregation tick (`network.signing_interval_ms`, YAML only): a divisor of
+    /// `aggregation_interval_ms`. Off-row ticks refresh the signed view only and
+    /// persist nothing. Absent ⇒ `aggregation_interval_ms` (one grid).
+    pub signing_interval_ms: u64,
     /// Duration in ms after which a quote is considered stale (weight decays to zero)
     pub stale_threshold_ms: u64,
     /// TDWAP per-provider decay-weight recompute cadence, in ms. The throttle
@@ -97,6 +102,7 @@ impl NxrConfig {
         let bars_dir = env_or("NXR_DATA_BARS", &format!("{}/bars", data_root));
         let indexes_dir = env_or("NXR_DATA_INDEXES", &format!("{}/indexes", data_root));
         let config_dir = config_dir();
+        let (aggregation_interval_ms, signing_interval_ms) = resolve_intervals_ms(hint);
         let ticker_params_path = env_or(
             "NXR_TICKER_PARAMS_PATH",
             &format!("{}/ticker-params.json", config_dir),
@@ -113,9 +119,10 @@ impl NxrConfig {
             // split-brain that produced ~2× target bpd). YAML is authoritative;
             // the `NXR_AGGREGATION_INTERVAL_MS` env var is a fallback used ONLY
             // when the YAML is absent (dev / no `/etc/nxr/config.yml`). When BOTH
-            // are present and DISAGREE, `resolve_aggregation_interval_ms` panics at
+            // are present and DISAGREE, `resolve_intervals_ms` panics at
             // boot (drift is fatal, never silent).
-            aggregation_interval_ms: resolve_aggregation_interval_ms(hint),
+            aggregation_interval_ms,
+            signing_interval_ms,
             stale_threshold_ms: env_or("NXR_STALE_THRESHOLD_MS", "10000")
                 .parse()
                 .unwrap_or(10000),
@@ -282,18 +289,33 @@ pub const DEFAULT_AGGREGATION_INTERVAL_MS: u64 = 200;
 /// two unlinked representations is exactly the split-brain that built backfill
 /// `.idx` at 2× live density → renko bpd ratio-of-two. Failing fast at boot is
 /// strictly better than shipping a divergent series.
-fn resolve_aggregation_interval_ms(hint: crate::pipeline_config::ConfigHint) -> u64 {
+fn resolve_intervals_ms(hint: crate::pipeline_config::ConfigHint) -> (u64, u64) {
     use crate::pipeline_config::PipelineYml;
 
     let env_val: Option<u64> = env_opt("NXR_AGGREGATION_INTERVAL_MS");
-    let yaml_val: Option<u64> = PipelineYml::load_default(hint)
-        .ok()
-        .and_then(|y| y.network.aggregation_interval_ms);
-
-    reconcile_aggregation_interval_ms(env_val, yaml_val)
+    let net = PipelineYml::load_default(hint).ok().map(|y| y.network);
+    let agg = reconcile_aggregation_interval_ms(
+        env_val,
+        net.as_ref().and_then(|n| n.aggregation_interval_ms),
+    );
+    (agg, check_signing_interval_ms(net.and_then(|n| n.signing_interval_ms), agg))
 }
 
-/// Pure reconciliation core (no IO) for [`resolve_aggregation_interval_ms`].
+/// `network.signing_interval_ms` against the row spacing. PANICS unless it
+/// divides `agg`: a tick that does not land on every row would space rows
+/// unevenly, the split-brain the boot assertion above exists for.
+fn check_signing_interval_ms(signing: Option<u64>, agg: u64) -> u64 {
+    match signing {
+        None => agg,
+        Some(s) if s > 0 && s <= agg && agg % s == 0 => s,
+        Some(s) => panic!(
+            "network.signing_interval_ms={s} must be > 0 and divide \
+             network.aggregation_interval_ms={agg}"
+        ),
+    }
+}
+
+/// Pure reconciliation core (no IO) for [`resolve_intervals_ms`].
 /// Extracted so the boot-assertion semantics are unit-testable without env /
 /// filesystem state. PANICS when both sources are present and disagree.
 fn reconcile_aggregation_interval_ms(env_val: Option<u64>, yaml_val: Option<u64>) -> u64 {
@@ -377,6 +399,17 @@ mod tests {
         assert_eq!(split_sink_hosts("::1", 40010).0, ("::1".into(), 40010));
         // Empty/degenerate input keeps the raw host + default port (old path).
         assert_eq!(split_sink_hosts("", 40010).0, ("".into(), 40010));
+    }
+
+    #[test]
+    fn signing_interval_divides_the_row_spacing() {
+        assert_eq!(check_signing_interval_ms(None, 200), 200, "absent = one grid");
+        assert_eq!(check_signing_interval_ms(Some(100), 200), 100);
+        assert_eq!(check_signing_interval_ms(Some(200), 200), 200);
+        for bad in [0, 150, 300] {
+            let r = std::panic::catch_unwind(|| check_signing_interval_ms(Some(bad), 200));
+            assert!(r.is_err(), "{bad} ms must not boot");
+        }
     }
 
     #[test]

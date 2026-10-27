@@ -25,6 +25,7 @@ pub mod f64_frame;
 pub mod grid;
 pub mod hot_reload;
 pub mod ipc;
+pub mod lag;
 pub mod logging;
 pub mod memory;
 #[cfg(feature = "server-metrics")]

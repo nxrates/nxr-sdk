@@ -139,6 +139,18 @@ where
     let _ = READY.set(Box::new(f));
 }
 
+/// Process-global `/stats/feeds` body (compact JSON). Unset = 404. A separate
+/// path from `/metrics`, so the scrape never sees it and it adds no series.
+static STATS_FEEDS: OnceLock<Box<dyn Fn() -> String + Send + Sync>> = OnceLock::new();
+
+/// Register the `/stats/feeds` renderer. Call once before `serve`.
+pub fn set_stats_feeds<F>(f: F)
+where
+    F: Fn() -> String + Send + Sync + 'static,
+{
+    let _ = STATS_FEEDS.set(Box::new(f));
+}
+
 /// Install the Prometheus recorder and spawn an HTTP server on the given port.
 ///
 /// Returns immediately once the listener is bound; the server runs on a
@@ -159,6 +171,7 @@ pub async fn serve(port: u16) -> Result<()> {
         .route("/metrics", get(render_metrics))
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/stats/feeds", get(stats_feeds))
         .with_state(handle.clone());
 
     // install_recorder leaves upkeep to the caller: histogram samples sit in unbounded buckets
@@ -217,6 +230,18 @@ async fn ready() -> (StatusCode, &'static str) {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "warming")
+    }
+}
+
+async fn stats_feeds() -> (
+    StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
+    match STATS_FEEDS.get() {
+        Some(render) => (StatusCode::OK, json, render()),
+        None => (StatusCode::NOT_FOUND, json, "{}".into()),
     }
 }
 

@@ -307,7 +307,7 @@ fn resolve_intervals_ms(hint: crate::pipeline_config::ConfigHint) -> (u64, u64) 
 fn check_signing_interval_ms(signing: Option<u64>, agg: u64) -> u64 {
     match signing {
         None => agg,
-        Some(s) if s > 0 && s <= agg && agg % s == 0 => s,
+        Some(s) if s > 0 && s <= agg && agg.is_multiple_of(s) => s,
         Some(s) => panic!(
             "network.signing_interval_ms={s} must be > 0 and divide \
              network.aggregation_interval_ms={agg}"

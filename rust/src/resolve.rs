@@ -578,44 +578,24 @@ impl AssetResolver {
 
 static RESOLVER: LazyLock<AssetResolver> = LazyLock::new(AssetResolver::new);
 
-/// Normalized symbol -> the class an UNPINNED lookup resolves it in
+/// Ticker -> the class a class-blind lookup resolves it in
 /// (`data/class-pins.csv`). Exact ties otherwise go to the lowest class id
-/// (EQ 0, CM 4 < CR 6), so `SUI/USD` named Sun Communities and `W` named Wheat
-/// while NXR collects both as crypto. Compiled in: every binary, tool and
-/// client SDK resolves a symbol to the same id. A row must name an exact
-/// alias of its class and a symbol another class wins today (else it panics,
-/// the `class_pins` test).
+/// (EQ 0, CM 4 < CR 6): `SUI/USD` named Sun Communities, `W` named Wheat.
+/// Compiled in, so every binary, tool and client SDK agrees. A row without an
+/// exact alias in its class is inert, never a runtime panic (`class_pins` test).
 static CLASS_PINS: LazyLock<HashMap<String, AssetClass>> = LazyLock::new(|| {
     include_str!("../data/class-pins.csv")
         .lines()
         .skip(1)
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            let (sym, cls) = l.split_once(',').unwrap_or_else(|| panic!("class-pins.csv: bad row {l:?}"));
-            let class = (0u8..16)
-                .map(AssetClass::from_id)
-                .find(|c| format!("{c:?}") == cls.trim())
-                .unwrap_or_else(|| panic!("class-pins.csv: unknown class {cls:?}"));
-            let key = normalize_asset_name(sym);
-            assert!(
-                key == sym.trim().to_ascii_lowercase(),
-                "class-pins.csv: {sym} must be a plain ticker"
-            );
-            assert!(
-                RESOLVER.exact_by_class.get(&class).is_some_and(|m| m.contains_key(&key)),
-                "class-pins.csv: {sym} has no exact {class:?} row"
-            );
-            assert!(
-                RESOLVER.by_normalized.get(&key).is_some_and(|(a, _)| a.class != class),
-                "class-pins.csv: {sym} already resolves {class:?}, drop the row"
-            );
-            (key, class)
+        .filter_map(|l| {
+            let (sym, cls) = l.split_once(',')?;
+            let class = (0u8..16).map(AssetClass::from_id).find(|c| format!("{c:?}") == cls.trim())?;
+            let key = sym.trim().to_ascii_lowercase();
+            RESOLVER.exact_by_class.get(&class)?.contains_key(&key).then_some((key, class))
         })
         .collect()
 });
 
-/// Pin of a token AS SPELLED (case-folded): `F&F`, the equity's name,
-/// normalizes to the pinned `ff` and must keep resolving to the equity.
 fn pinned_class(token: &str) -> Option<AssetClass> {
     CLASS_PINS.get(&token.trim().to_ascii_lowercase()).copied()
 }
@@ -637,7 +617,7 @@ pub fn unpinned_clashes<'a>(class: AssetClass, symbols: impl IntoIterator<Item =
         .filter(|sym| {
             let key = normalize_asset_name(sym);
             RESOLVER.exact_by_class.get(&class).is_some_and(|m| m.contains_key(&key))
-                && pinned_class(sym).is_none()
+                && pinned_class(sym) != Some(class)
                 && RESOLVER.by_normalized.get(&key).is_some_and(|(a, _)| a.class != class)
         })
         .map(str::to_string)
@@ -788,7 +768,7 @@ pub fn resolve_ticker(
 
     // Step 1: strip suffixes
     let cleaned = strip_ticker_suffixes(symbol);
-    // Class pins ([`set_class_pins`]) apply to the symbol as spelled: a stripped
+    // Class pins ([`CLASS_PINS`]) apply to the symbol as spelled: a stripped
     // broker suffix (`CVX.US`, `W-B`) is an equity spelling and keeps its class.
     let stripped = cleaned != symbol.to_lowercase();
     let pin = |token: &str| (!stripped).then(|| pinned_class(token)).flatten();

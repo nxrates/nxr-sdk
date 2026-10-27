@@ -713,7 +713,7 @@ where
     // freshness (reaching 0 no later than eviction) × join ramp: it fades a leg
     // out of `n`, the bloc bound and the excess together. `s_ref²` keeps `w`
     // dimensionless; it cancels in the shares.
-    let weigh = |e: &ProviderEntry| {
+    let weigh_raw = |e: &ProviderEntry| {
         kernel.leg(e, now, s_ref, stale).map(|(tau, u, t_evict)| {
             // A leg that was out (its last gap ran past its own eviction age)
             // re-joins: the ramp runs from the frame that brought it back.
@@ -726,10 +726,19 @@ where
                 let window = (RAMP_IPI * e.ema_ipi_secs).max(f64::MIN_POSITIVE);
                 (now.duration_since(j).as_f64() / window).clamp(RAMP_MIN, 1.0)
             });
-            let g = freshness(tau, stale.min(t_evict)) * ramp;
-            (tau, g, e.base_weight * ramp * s_ref * s_ref * u)
+            let fr = freshness(tau, stale.min(t_evict));
+            let g = fr * ramp;
+            (tau, g, e.base_weight * ramp * s_ref * s_ref * u, fr)
         })
     };
+    // Raw weight is a prior on a leg's level, freshness says it is still being
+    // confirmed: once any leg is fresh, a leg with `freshness = 0` (silent past
+    // `stale`, not yet evicted) must not keep its decayed prior in the price.
+    // Weight is scaled by `fr + 1 - fr_max` (the join ramp is already in `w`):
+    // `fr_max = 0` leaves every weight untouched (an all-stale ticker publishes
+    // its last level as before) and the factor is continuous in every `fr`.
+    let fr_max = entries.clone().filter_map(|e| weigh_raw(e).map(|l| l.3)).fold(0.0f64, f64::max);
+    let weigh = |e: &ProviderEntry| weigh_raw(e).map(|(tau, g, w, fr)| (tau, g, w * (fr + 1.0 - fr_max)));
 
     // One pass: mass by evidence, and `n_eff` sums over mapped and over all
     // observed legs (the latter used only when no mapped leg is live).
@@ -2149,6 +2158,9 @@ mod unmapped_bloc_tests {
 mod tests {
     use super::*;
 
+    const ALL_STALE_MAIN: f64 = 0.973;
+    const TWO_FRESH_MAIN: f64 = 0.973;
+
     /// PEGGED weighting under the mean: these pin the kernel, not the level.
     const WEIGHTS: Kernel = Kernel { median: false, ..Kernel::PEGGED };
 
@@ -2714,13 +2726,13 @@ mod tests {
     /// The floor on final shares: the live legs carry at least 0.20 of the
     /// mark. Of ten equal pegged legs, two still confirming clear it from the
     /// moment the other eight pass `stale` (those keep only their decaying
-    /// kernel share, never the cap's excess); one alone does not at the
-    /// crossing, and gains influence only as the silent ones decay (the
-    /// breadth gate, `active_count >= 2`, still refuses it).
+    /// kernel share, never the cap's excess); one alone does too once the
+    /// silent ones carry no weight (the breadth gate, `active_count >= 2`,
+    /// still refuses it).
     #[test]
     fn fresh_weight_floor_is_two_of_ten() {
         let t0 = Instant::now();
-        for (live, ok) in [(2usize, true), (1, false)] {
+        for (live, ok) in [(2usize, true), (1, true)] {
             let mut legs: Vec<ProviderEntry> =
                 (0..10).map(|_| mk_entry(0.99990, 0.99991, 1_000, 1_000, 1.0, t0)).collect();
             for secs in (5u64..=300).step_by(5) {
@@ -2913,6 +2925,36 @@ mod tests {
         let at = |s: u64| compute_vwap_at(1, [e].iter(), 10.0, k, t0 + Duration::from_secs(s));
         assert!(at(4).is_some(), "evicted before stale/2");
         assert!(at(6).is_none(), "past max(diffusion, stale/2) the leg is gone");
+    }
+
+    /// A leg whose presence reached 0 (silent past `stale`) while fresher evidence
+    /// exists leaves the price; a ticker with no fresh leg keeps today's blend.
+    #[test]
+    fn a_zero_presence_leg_does_not_pull_the_price() {
+        let t0 = Instant::now();
+        let leg = |mid: f64, base: f64, age_ms: u64| {
+            let mut e = mk_entry(mid - 5e-5, mid + 5e-5, 1_000, 1_000, base, t0);
+            e.last_update = t0 - Duration::from_millis(age_ms);
+            e
+        };
+        let mid = |legs: &[ProviderEntry]| {
+            compute_vwap_at(1, legs.iter(), 10.0, Kernel::PEGGED, t0).expect("mark").mid()
+        };
+        let m = mid(&[leg(0.97, 9.0, 0), leg(1.0, 1.0, 10_500)]);
+        assert!((m - 0.97).abs() < 1e-4 * 0.97, "dead leg pulled the mid to {m}");
+        // Nothing fresh: unchanged blend of the stale legs (main: 0.973).
+        let all = mid(&[leg(0.97, 9.0, 10_500), leg(1.0, 1.0, 10_500)]);
+        assert!((all - ALL_STALE_MAIN).abs() < 1e-9, "all-stale moved to {all}");
+        // Two fresh legs: unchanged.
+        let two = mid(&[leg(0.97, 9.0, 0), leg(1.0, 1.0, 0)]);
+        assert!((two - TWO_FRESH_MAIN).abs() < 1e-9, "two fresh moved to {two}");
+        // Fading 5..10.5 s: no step, monotone toward the fresh leg.
+        let mut prev = f64::INFINITY;
+        for ms in (5_000..=10_500).step_by(50) {
+            let m = mid(&[leg(0.97, 9.0, 0), leg(1.0, 1.0, ms)]);
+            assert!(m <= prev + 1e-12 && prev - m < 5e-4 || prev.is_infinite(), "step at {ms} ms: {prev} -> {m}");
+            prev = m;
+        }
     }
 
     #[test]

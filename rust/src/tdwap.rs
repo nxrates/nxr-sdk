@@ -197,6 +197,14 @@ impl Kernel {
         s_ref: f64,
         stale: f64,
     ) -> Option<(f64, f64, f64)> {
+        let (tau, t_eff, t_evict, var) = self.clocks(e, now, s_ref, stale)?;
+        let s = self.spread(e);
+        Some((tau, (1.0 - t_eff / t_evict) / (s * s + var * t_eff + e.resid), t_evict))
+    }
+
+    /// `(τ, τ_eff, τ_evict, σ²)` of a live leg, the clocks behind [`Self::leg`].
+    #[inline]
+    fn clocks(&self, e: &ProviderEntry, now: Instant, s_ref: f64, stale: f64) -> Option<(f64, f64, f64, f64)> {
         let tau = self.age(e, now)?;
         let var = (self.sigma * self.sigma).max(f64::MIN_POSITIVE);
         // The BINDING bound: whichever of the diffusion age and the class
@@ -207,10 +215,25 @@ impl Kernel {
             .max(0.5 * stale)
             .min(self.horizon_secs);
         let t_eff = tau.max(e.ema_ipi_secs.min(0.5 * t_evict));
-        (t_eff <= t_evict).then(|| {
-            let s = self.spread(e);
-            (tau, (1.0 - t_eff / t_evict) / (s * s + var * t_eff + e.resid), t_evict)
-        })
+        (t_eff <= t_evict).then_some((tau, t_eff, t_evict, var))
+    }
+
+    /// Kernel multipliers `(spread, age, sigma)` of a live leg with weight `w`:
+    /// `spread = s_ref²/(s²+ρ)`, `sigma = (s²+ρ)/(s²+σ²τ_eff+ρ)`, `age` = taper ×
+    /// join ramp, so `spread · age · sigma = w / base_weight`.
+    fn factors(&self, e: &ProviderEntry, now: Instant, s_ref: f64, stale: f64, w: f64) -> (f64, f64, f64) {
+        let Some((_, t_eff, t_evict, var)) = self.clocks(e, now, s_ref, stale) else {
+            return (0.0, 0.0, 0.0);
+        };
+        let s = self.spread(e);
+        let d0 = s * s + e.resid;
+        let (k_spread, k_sigma) = (s_ref * s_ref / d0, d0 / (d0 + var * t_eff));
+        let k_age = if e.base_weight > 0.0 {
+            w / (e.base_weight * k_spread * k_sigma)
+        } else {
+            1.0 - t_eff / t_evict
+        };
+        (k_spread, k_age, k_sigma)
     }
 }
 
@@ -372,6 +395,34 @@ pub struct WeightProfile {
     /// error of the mean; alone it is a population std-dev and grows with
     /// breadth.
     pub dispersion: f64,
+}
+
+/// The cap that bound a leg's final share in [`compute_vwap_profiled_into`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    None,
+    /// Held at `w_max(n)` by the water-fill.
+    Wmax,
+    /// Scaled down with the unmapped bloc.
+    UnmappedBloc,
+}
+
+/// One entry's final weight from [`compute_vwap_profiled_into`]. Row `i` is
+/// entry `i`; an invalid or evicted entry reads all zero, [`Bound::None`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LegShare {
+    /// FINAL share of the blend (kernel, bloc bound, water-fill cap); the rows
+    /// sum to 1 and their max is `WeightProfile::top_weight_share`.
+    pub share: f64,
+    /// Kernel multipliers, `k_spread · k_age · k_sigma = w / base_weight`.
+    pub k_spread: f64,
+    pub k_age: f64,
+    pub k_sigma: f64,
+    pub bound: Bound,
+}
+
+impl LegShare {
+    const ZERO: Self = Self { share: 0.0, k_spread: 0.0, k_age: 0.0, k_sigma: 0.0, bound: Bound::None };
 }
 
 /// No-book effective-spread reconstruction (operator 2026-07-05): when the
@@ -619,6 +670,27 @@ where
     I: IntoIterator<Item = &'a ProviderEntry>,
     I::IntoIter: Clone,
 {
+    compute_vwap_profiled_into(ticker_id, entries, stale_threshold_secs, kernel, now, None)
+}
+
+/// [`compute_vwap_profiled_at`] that also writes one [`LegShare`] per entry
+/// into `sink` (cleared first; left empty when the result is `None`). `None`
+/// sink = the same arithmetic and no allocation.
+pub fn compute_vwap_profiled_into<'a, I>(
+    ticker_id: u64,
+    entries: I,
+    stale_threshold_secs: f64,
+    kernel: Kernel,
+    now: Instant,
+    mut sink: Option<&mut Vec<LegShare>>,
+) -> Option<(Index, WeightProfile)>
+where
+    I: IntoIterator<Item = &'a ProviderEntry>,
+    I::IntoIter: Clone,
+{
+    if let Some(s) = sink.as_deref_mut() {
+        s.clear();
+    }
     let entries = entries.into_iter();
 
     // Reference half-spread: base-weighted mean of the admissible legs' `s_v`.
@@ -772,12 +844,37 @@ where
     for entry in entries {
         if !is_valid_tick(entry.index.bid, entry.index.ask) {
             rejected = rejected.saturating_add(1);
+            if let Some(s) = sink.as_deref_mut() {
+                s.push(LegShare::ZERO);
+            }
             continue;
         }
         let Some((age, g, w)) = weigh(entry) else {
+            if let Some(s) = sink.as_deref_mut() {
+                s.push(LegShare::ZERO);
+            }
             continue;
         };
         let sh = share(entry, g, w);
+        if let Some(s) = sink.as_deref_mut() {
+            let (r, x) = raw(entry, g, w);
+            let at_cap = match (lam, all_eligible) {
+                (Some(l), _) => r + l * x >= cap,
+                (None, Some(Some(l))) => r + l * r >= cap,
+                (None, _) => false,
+            };
+            let bound = if at_cap {
+                Bound::Wmax
+            } else if any_mapped && !entry.mapped && k_un < 1.0 {
+                Bound::UnmappedBloc
+            } else {
+                Bound::None
+            };
+            let (k_spread, k_age, k_sigma) = kernel.factors(entry, now, s_ref, stale, w);
+            // Shares at or under 1e-12 are out of the blend below.
+            let share = if sh > 1e-12 { sh } else { 0.0 };
+            s.push(LegShare { share, k_spread, k_age, k_sigma, bound });
+        }
         // `active_count` is a money-path gate (`server::signed`
         // MIN_ACTIVE_PROVIDERS). `!injected`: `inject_at` refreshes
         // `last_update` every cycle the triangulated product moves.
@@ -818,7 +915,15 @@ where
     }
 
     if s_sum < 1e-12 {
+        if let Some(s) = sink {
+            s.clear();
+        }
         return None;
+    }
+    if let Some(s) = sink {
+        for l in s.iter_mut() {
+            l.share /= s_sum;
+        }
     }
 
     let tdwap_bid = w_bid_sum / s_sum;
@@ -1722,6 +1827,55 @@ mod unmapped_bloc_tests {
         compute_vwap_profiled_at(448509915440349184, entries.iter(), 10.0, Kernel::ALT, now)
             .expect("legs blend")
             .1
+    }
+
+    /// The sink sees the blend's own final shares and changes nothing: rows
+    /// align with entries, sum to 1, max = `top_weight_share`, and the index
+    /// and profile are bit-identical with and without it.
+    #[test]
+    fn leg_share_sink_reports_final_shares_without_moving_the_mark() {
+        let now = coarse_now();
+        let mut legs = vec![
+            (100.0, true, 0u64, 100.0),
+            (1.0, true, 8_000, 100.02),
+            (1.0, true, 0, 99.99),
+            (30.0, false, 0, 100.01),
+            (30.0, false, 3_000, 100.03),
+        ];
+        legs.extend((0..9).map(|i| (1.0, true, 0, 100.0 + f64::from(i) * 0.001)));
+        let mut entries: Vec<ProviderEntry> = legs
+            .iter()
+        .map(|(w, mapped, age_ms, mid)| {
+            let mut e = ProviderEntry::new_at(leg(*mid), *w, coarse_now_backdated(*age_ms)).with_mapped(*mapped);
+            e.joined = None;
+            e
+        })
+        .collect();
+        let mut bad = ProviderEntry::new_at(leg(100.0), 1.0, now);
+        bad.index.bid = f64::NAN;
+        entries.push(bad);
+        let id = 448509915440349184;
+        let plain = compute_vwap_profiled_at(id, entries.iter(), 10.0, Kernel::ALT, now).unwrap();
+        let mut sink = vec![LegShare::ZERO; 3];
+        let with = compute_vwap_profiled_into(id, entries.iter(), 10.0, Kernel::ALT, now, Some(&mut sink)).unwrap();
+        assert_eq!(plain.0.bid.to_bits(), with.0.bid.to_bits());
+        assert_eq!(plain.0.ask.to_bits(), with.0.ask.to_bits());
+        assert_eq!(plain.0, with.0);
+        assert_eq!(plain.1, with.1);
+        assert_eq!(sink.len(), entries.len());
+        let sum: f64 = sink.iter().map(|l| l.share).sum();
+        assert!((sum - 1.0).abs() < 1e-12, "sum {sum}");
+        let max = sink.iter().map(|l| l.share).fold(0.0, f64::max);
+        assert_eq!(max, with.1.top_weight_share);
+        assert_eq!(sink[0].bound, Bound::Wmax, "{sink:?}");
+        assert_eq!(sink[3].bound, Bound::UnmappedBloc, "{sink:?}");
+        assert_eq!(sink[legs.len()], LegShare::ZERO);
+        for (l, e) in sink.iter().zip(&entries).take(legs.len()) {
+            let k = l.k_spread * l.k_age * l.k_sigma;
+            assert!(k > 0.0 && k.is_finite(), "{l:?}");
+            assert!(e.base_weight > 0.0);
+        }
+        assert!(sink[1].k_age < sink[2].k_age, "the aged leg tapers: {sink:?}");
     }
 
     /// Owner calibration: ~0.99 alone, falling with breadth to ~0.41 at 8.

@@ -1878,6 +1878,31 @@ mod unmapped_bloc_tests {
         assert!(sink[1].k_age < sink[2].k_age, "the aged leg tapers: {sink:?}");
     }
 
+    /// Uncapped, all mapped: final shares are `base · k_spread · k_age · k_sigma`
+    /// normalised, so the factors are the kernel's own weight.
+    #[test]
+    fn leg_share_factors_multiply_to_the_kernel_weight() {
+        let now = coarse_now();
+        let entries: Vec<ProviderEntry> = [(1.0, 0u64, 100.0, 1.0), (2.0, 7_000, 100.02, 3.0), (1.5, 0, 99.98, 0.5)]
+            .iter()
+            .map(|(w, age_ms, mid, wide)| {
+                let mut e = ProviderEntry::new_at(leg(*mid), *w, coarse_now_backdated(*age_ms)).with_mapped(true);
+                e.index.ask += mid * 1e-4 * wide;
+                e.joined = None;
+                e
+            })
+            .collect();
+        let mut sink = Vec::new();
+        compute_vwap_profiled_into(1, entries.iter(), 10.0, Kernel::ALT, now, Some(&mut sink)).unwrap();
+        let w: Vec<f64> =
+            sink.iter().zip(&entries).map(|(l, e)| e.base_weight * l.k_spread * l.k_age * l.k_sigma).collect();
+        let total: f64 = w.iter().sum();
+        for (l, w) in sink.iter().zip(&w) {
+            assert_eq!(l.bound, Bound::None, "{sink:?}");
+            assert!((l.share - w / total).abs() < 1e-12, "{sink:?}");
+        }
+    }
+
     /// Owner calibration: ~0.99 alone, falling with breadth to ~0.41 at 8.
     #[test]
     fn w_max_decays_with_the_live_leg_count() {

@@ -1,5 +1,11 @@
 //! Lock-free log2 latency histogram for hot paths: one relaxed RMW per
-//! sample, no allocation, no lock. A reader drains it once per window.
+//! sample, no allocation, no lock. Either one owner drains it per window
+//! ([`LagHist::take`]), or readers snapshot the cumulative counts
+//! ([`LagHist::snap`]) and diff them ([`LagSnap::since`]), which any number
+//! of readers can do without splitting a window.
+//!
+//! Quantiles are bucket UPPER edges (bucket k = [2^(k-1), 2^k - 1] ms),
+//! capped at the max: an upper bound, at most 2x the true value.
 
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -9,6 +15,11 @@ pub const BUCKETS: usize = 16;
 #[inline]
 pub fn bucket(ms: u32) -> usize {
     ((u32::BITS - ms.leading_zeros()) as usize).min(BUCKETS - 1)
+}
+
+/// Upper edge of bucket `k`; the open last bucket has none.
+fn edge(k: usize) -> u32 {
+    if k + 1 == BUCKETS { u32::MAX } else { (1u32 << k) - 1 }
 }
 
 #[derive(Debug, Default)]
@@ -31,6 +42,14 @@ impl LagHist {
         // A plain load first: the max RMW runs only on a new high.
         if ms > self.max.load(Relaxed) {
             self.max.fetch_max(ms, Relaxed);
+        }
+    }
+
+    /// Cumulative counts and max since start; nothing reset.
+    pub fn snap(&self) -> LagSnap {
+        LagSnap {
+            b: std::array::from_fn(|i| self.b[i].load(Relaxed)),
+            max: self.max.load(Relaxed),
         }
     }
 
@@ -61,6 +80,22 @@ impl LagSnap {
         self.max = self.max.max(o.max);
     }
 
+    /// The window between an earlier cumulative `prev` and this one. A count
+    /// that went down means the source restarted: the whole of `self` is the
+    /// window. The window max is the top non-empty bucket's upper edge, capped
+    /// at the cumulative max (the exact window max is not kept).
+    pub fn since(&self, prev: &LagSnap) -> LagSnap {
+        if self.b.iter().zip(prev.b).any(|(n, p)| *n < p) {
+            return *self;
+        }
+        let b: [u32; BUCKETS] = std::array::from_fn(|i| self.b[i] - prev.b[i]);
+        let max = b
+            .iter()
+            .rposition(|&c| c > 0)
+            .map_or(0, |k| edge(k).min(self.max));
+        LagSnap { b, max }
+    }
+
     /// Upper edge of the bucket holding quantile `q`, capped at `max`; `None` when empty.
     pub fn quantile(&self, q: f64) -> Option<u32> {
         let n = self.n();
@@ -72,8 +107,7 @@ impl LagSnap {
         for (k, &c) in self.b.iter().enumerate() {
             acc += u64::from(c);
             if acc >= rank {
-                let hi = if k + 1 == BUCKETS { u32::MAX } else { (1u32 << k) - 1 };
-                return Some(hi.min(self.max));
+                return Some(edge(k).min(self.max));
             }
         }
         Some(self.max)
@@ -109,6 +143,27 @@ mod tests {
         assert_eq!(h.take(), LagSnap::default(), "take zeroes the window");
         h.record(60_000);
         assert_eq!(h.take().quantile(0.5), Some(60_000), "open bucket reports max");
+    }
+
+    #[test]
+    fn snap_is_non_destructive_and_since_diffs_windows() {
+        let h = LagHist::new();
+        h.record(3);
+        h.record(900);
+        let a = h.snap();
+        assert_eq!(h.snap(), a, "reading resets nothing");
+        h.record(5);
+        h.record(6);
+        let w = h.snap().since(&a);
+        assert_eq!((w.n(), w.b[3]), (2, 2));
+        assert_eq!(w.max, 7, "top bucket edge, not the 900 of an older window");
+        assert_eq!(w.quantile(0.5), Some(7));
+        assert_eq!(h.snap().since(&h.snap()), LagSnap::default(), "empty window");
+        let restarted = LagHist::new();
+        restarted.record(2);
+        assert_eq!(restarted.snap().since(&a), restarted.snap(), "count went down: all of it");
+        h.record(40_000);
+        assert_eq!(h.snap().since(&a).max, 40_000, "open bucket: capped at the cumulative max");
     }
 
     #[test]

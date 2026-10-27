@@ -239,9 +239,11 @@ async fn stats_feeds() -> (
     String,
 ) {
     let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
-    match STATS_FEEDS.get() {
-        Some(render) => (StatusCode::OK, json, render()),
-        None => (StatusCode::NOT_FOUND, json, "{}".into()),
+    // Rendering walks every slot: off the async workers.
+    match tokio::task::spawn_blocking(|| STATS_FEEDS.get().map(|render| render())).await {
+        Ok(Some(body)) => (StatusCode::OK, json, body),
+        Ok(None) => (StatusCode::NOT_FOUND, json, "{}".into()),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, json, "{}".into()),
     }
 }
 

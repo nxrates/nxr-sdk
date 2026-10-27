@@ -1848,6 +1848,9 @@ pub struct NetworkYml {
     pub listen_port: Option<u16>,
     #[serde(default)]
     pub aggregation_interval_ms: Option<u64>,
+    /// See `NxrConfig::signing_interval_ms`.
+    #[serde(default)]
+    pub signing_interval_ms: Option<u64>,
     #[serde(default)]
     pub stale_threshold_ms: Option<u64>,
     #[serde(default)]

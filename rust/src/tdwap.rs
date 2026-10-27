@@ -88,6 +88,10 @@ const RAMP_IPI: f64 = 3.0;
 /// Ramp floor: a lone joining leg still prices its ticker.
 const RAMP_MIN: f64 = 1e-3;
 
+/// Minimum price-presence factor for a leg to count as active (`confidence`
+/// bits 0..7); core's live-coverage test uses the same bar.
+pub const ACTIVE_PRESENCE: f64 = 0.5;
+
 /// Liveness on the confirmation clock: 1 while `τ <= window/2`, linear to 0
 /// at `window` (`min(stale, τ_evict)`; a live book re-affirms every stale/2).
 #[inline]
@@ -660,21 +664,32 @@ where
         })
     };
     // Raw weight is a prior on a leg's level, freshness says it is still being
-    // confirmed: once any leg is fresh, a leg with `freshness = 0` (silent past
-    // `stale`, not yet evicted) must not keep its decayed prior in the price.
-    // Weight is scaled by `fr + 1 - fr_max` (the join ramp is already in `w`):
-    // `fr_max = 0` leaves every weight untouched (an all-stale ticker publishes
-    // its last level as before) and the factor is continuous in every `fr`.
-    let fr_max = entries.clone().filter_map(|e| weigh_raw(e).map(|l| l.3)).fold(0.0f64, f64::max);
-    let weigh = |e: &ProviderEntry| weigh_raw(e).map(|(tau, g, w, fr)| (tau, g, w * (fr + 1.0 - fr_max)));
+    // confirmed: once a real leg is present, a leg with `freshness = 0` (silent
+    // past `stale`, not yet evicted) must not keep its decayed prior in the
+    // price. Weight is scaled by `f = fr + 1 - g_max` (the join ramp is already
+    // in `w`), `g_max` = best `fr × ramp` among non-injected legs: `g_max = 0`
+    // leaves every weight untouched (an all-stale ticker publishes its last
+    // level as before) and `f` is continuous in every input. Each leg is
+    // evaluated once: `(τ, g, w, f)`, `None` when evicted.
+    let mut legs: Vec<Option<(f64, f64, f64, f64)>> = entries.clone().map(weigh_raw).collect();
+    let g_max = entries
+        .clone()
+        .zip(&legs)
+        .filter(|(e, _)| !e.injected)
+        .filter_map(|(_, l)| l.map(|l| l.1))
+        .fold(0.0f64, f64::max);
+    for (_, _, w, fr) in legs.iter_mut().flatten() {
+        *fr += 1.0 - g_max;
+        *w *= *fr;
+    }
 
     // One pass: mass by evidence, and `n_eff` sums over mapped and over all
     // observed legs (the latter used only when no mapped leg is live).
     let clip = n_clip();
     let (mut w_sum, mut w_map, mut w_map_g) = (0.0f64, 0.0f64, 0.0f64);
     let (mut nm1, mut nm2, mut na1, mut na2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    for e in entries.clone() {
-        let Some((_, g, w)) = weigh(e) else { continue };
+    for (e, l) in entries.clone().zip(&legs) {
+        let Some((_, g, w, _)) = *l else { continue };
         w_sum += w;
         let x = e.base_weight.min(clip) * g;
         if e.mapped {
@@ -730,7 +745,7 @@ where
     };
     let cap = Concentration::get().w_max(n);
     let lam = water_fill(
-        entries.clone().filter_map(|e| weigh(e).map(|(_, f, w)| raw(e, f, w))),
+        legs.iter().zip(entries.clone()).filter_map(|(l, e)| l.map(|(_, g, w, _)| raw(e, g, w))),
         cap,
     );
     // No eligible home for the excess: rather than skip the cap, water-fill
@@ -738,9 +753,9 @@ where
     // single live leg (nothing to move share to) then keeps its raw 1.0.
     let all_eligible = lam.is_none().then(|| {
         water_fill(
-            entries
-                .clone()
-                .filter_map(|e| weigh(e).map(|(_, g, w)| raw(e, g, w)))
+            legs.iter()
+                .zip(entries.clone())
+                .filter_map(|(l, e)| l.map(|(_, g, w, _)| raw(e, g, w)))
                 .map(|(r, _)| (r, r)),
             cap,
         )
@@ -778,19 +793,22 @@ where
     // `(mid, share)` of every contributing leg, for `kernel.median` only.
     let mut mids: Vec<(f64, f64)> = Vec::new();
 
-    for entry in entries {
+    for (entry, l) in entries.zip(&legs) {
         if !is_valid_tick(entry.index.bid, entry.index.ask) {
             rejected = rejected.saturating_add(1);
             continue;
         }
-        let Some((age, g, w)) = weigh(entry) else {
+        let Some((age, g, w, f)) = *l else {
             continue;
         };
         let sh = share(entry, g, w);
         // `active_count` is a money-path gate (`server::signed`
         // MIN_ACTIVE_PROVIDERS). `!injected`: `inject_at` refreshes
         // `last_update` every cycle the triangulated product moves.
-        if g > 0.0 && !entry.injected {
+        // Active = counts in the price: presence factor `f >= ACTIVE_PRESENCE`,
+        // else a venue in the W/2..W gap would satisfy the breadth and
+        // fresh-weight gates while the mark is already one thin venue.
+        if g > 0.0 && f >= ACTIVE_PRESENCE && !entry.injected {
             active_count = active_count.saturating_add(1);
             active_share += sh;
         }
@@ -1979,9 +1997,6 @@ mod unmapped_bloc_tests {
 mod tests {
     use super::*;
 
-    const ALL_STALE_MAIN: f64 = 0.973;
-    const TWO_FRESH_MAIN: f64 = 0.973;
-
     /// PEGGED weighting under the mean: these pin the kernel, not the level.
     const WEIGHTS: Kernel = Kernel { median: false, ..Kernel::PEGGED };
 
@@ -2765,17 +2780,56 @@ mod tests {
         assert!((m - 0.97).abs() < 1e-4 * 0.97, "dead leg pulled the mid to {m}");
         // Nothing fresh: unchanged blend of the stale legs (main: 0.973).
         let all = mid(&[leg(0.97, 9.0, 10_500), leg(1.0, 1.0, 10_500)]);
-        assert!((all - ALL_STALE_MAIN).abs() < 1e-9, "all-stale moved to {all}");
+        assert!((all - 0.973).abs() < 1e-9, "all-stale moved to {all}");
         // Two fresh legs: unchanged.
         let two = mid(&[leg(0.97, 9.0, 0), leg(1.0, 1.0, 0)]);
-        assert!((two - TWO_FRESH_MAIN).abs() < 1e-9, "two fresh moved to {two}");
-        // Fading 5..10.5 s: no step, monotone toward the fresh leg.
+        assert!((two - 0.973).abs() < 1e-9, "two fresh moved to {two}");
+        // Fading 5..10.5 s (mean kernel): linear taper, <= 0.04% per 50 ms of a 2.8% swing; the old jump was the whole swing.
         let mut prev = f64::INFINITY;
         for ms in (5_000..=10_500).step_by(50) {
-            let m = mid(&[leg(0.97, 9.0, 0), leg(1.0, 1.0, ms)]);
-            assert!(m <= prev + 1e-12 && prev - m < 5e-4 || prev.is_infinite(), "step at {ms} ms: {prev} -> {m}");
+            let legs = [leg(0.97, 9.0, 0), leg(1.0, 1.0, ms)];
+            let m = compute_vwap_at(1, legs.iter(), 10.0, WEIGHTS, t0).unwrap().mid();
+            assert!(m <= prev + 1e-12 && prev - m < 4e-4 || prev.is_infinite(), "step at {ms} ms: {prev} -> {m}");
             prev = m;
         }
+    }
+
+    /// Active = carries the price: a leg at freshness ~0.05 next to a fresh one
+    /// is ~all of nothing in the mark, so it must not satisfy `active_count >= 2`.
+    #[test]
+    fn a_fading_leg_does_not_count_as_active() {
+        let t0 = Instant::now();
+        let leg = |mid: f64, age_ms: u64| {
+            let mut e = mk_entry(mid - 5e-5, mid + 5e-5, 1_000, 1_000, 1.0, t0);
+            e.last_update = t0 - Duration::from_millis(age_ms);
+            e
+        };
+        let active = |b_ms: u64| {
+            let idx =
+                compute_vwap_at(1, [leg(0.97, 0), leg(1.0, b_ms)].iter(), 10.0, Kernel::PEGGED, t0)
+                    .unwrap();
+            mitch::index::conf_active_count(idx.confidence)
+        };
+        assert_eq!(active(1_000), 2);
+        assert_eq!(active(9_750), 1, "fr 0.05 leg counted active");
+    }
+
+    /// A just-joined leg (ramp ~0.1) must not zero the silent legs: it is a
+    /// ~10% voice, not the whole price.
+    #[test]
+    fn a_joiner_does_not_zero_the_silent_legs() {
+        let t0 = Instant::now();
+        let mut joiner = mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, t0);
+        joiner.joined = Some(t0 - Duration::from_millis(300));
+        let silent = |mid: f64| {
+            let mut e = mk_entry(mid - 5e-5, mid + 5e-5, 1_000, 1_000, 1.0, t0);
+            e.last_update = t0 - Duration::from_millis(10_500);
+            e
+        };
+        let m = compute_vwap_at(1, [joiner, silent(0.97), silent(0.97)].iter(), 10.0, WEIGHTS, t0)
+            .unwrap()
+            .mid();
+        assert!(m < 0.985, "joiner alone set the price: {m}");
     }
 
     #[test]

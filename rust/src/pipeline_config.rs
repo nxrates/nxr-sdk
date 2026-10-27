@@ -1633,12 +1633,15 @@ impl PipelineYml {
             .with_context(|| format!("read pipeline yaml {}", path.display()))?;
         let parsed = serde_yml::from_str::<Self>(&s)
             .with_context(|| format!("parse pipeline yaml {}", path.display()))?;
-        // `cexs.assets` IS the crypto universe: before anything resolves, a
-        // bare or USD-quoted symbol there names its CR row, not a same-ticker
-        // equity/commodity (SUI, W, ...). Same pins in every binary that loads.
-        crate::resolve::set_class_pins(
+        // `cexs.assets` IS the crypto universe: a token there that an equity or
+        // commodity row also holds must be pinned CR, or it stores under that id.
+        let clashes = crate::resolve::unpinned_clashes(
             mitch::common::AssetClass::CR,
             parsed.cexs.assets.iter().map(String::as_str),
+        );
+        anyhow::ensure!(
+            clashes.is_empty(),
+            "cexs.assets {clashes:?} resolve outside CR: add them to sdk/rust/data/class-pins.csv"
         );
         parsed.oracles.z_gate.validate()?;
         if parsed.oracles.public_api.enabled {

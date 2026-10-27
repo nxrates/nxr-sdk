@@ -15,7 +15,7 @@ use mitch::constants::{
 };
 use mitch::ticker::{Asset, AssetMatch, Ticker, TickerId, TickerMatch, pack_asset};
 use std::collections::HashMap;
-use std::sync::{LazyLock, RwLock};
+use std::sync::LazyLock;
 
 // ---- String normalization (internal) ----
 
@@ -492,9 +492,6 @@ impl AssetResolver {
             if key.is_empty() {
                 continue;
             }
-            // An unpinned lookup of a configured symbol takes its pinned class
-            // ([`set_class_pins`]); an explicit filter always wins.
-            let class_filter = class_filter.or_else(|| pinned_class(&key));
             if let Some((asset, _)) = self.by_normalized.get(&key)
                 && class_filter.is_none_or(|c| c == asset.class)
             {
@@ -581,42 +578,70 @@ impl AssetResolver {
 
 static RESOLVER: LazyLock<AssetResolver> = LazyLock::new(AssetResolver::new);
 
-/// Normalized symbol -> the class an UNPINNED lookup resolves it in. Exact ties
-/// otherwise go to the lowest class id (EQ 0, CM 4 < CR 6), so `SUI/USD` named
-/// Sun Communities and `W` named Wheat while NXR collects both as crypto.
-static CLASS_PINS: LazyLock<RwLock<HashMap<String, AssetClass>>> = LazyLock::new(Default::default);
+/// Normalized symbol -> the class an UNPINNED lookup resolves it in
+/// (`data/class-pins.csv`). Exact ties otherwise go to the lowest class id
+/// (EQ 0, CM 4 < CR 6), so `SUI/USD` named Sun Communities and `W` named Wheat
+/// while NXR collects both as crypto. Compiled in: every binary, tool and
+/// client SDK resolves a symbol to the same id. A row must name an exact
+/// alias of its class and a symbol another class wins today (else it panics,
+/// the `class_pins` test).
+static CLASS_PINS: LazyLock<HashMap<String, AssetClass>> = LazyLock::new(|| {
+    include_str!("../data/class-pins.csv")
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let (sym, cls) = l.split_once(',').unwrap_or_else(|| panic!("class-pins.csv: bad row {l:?}"));
+            let class = (0u8..16)
+                .map(AssetClass::from_id)
+                .find(|c| format!("{c:?}") == cls.trim())
+                .unwrap_or_else(|| panic!("class-pins.csv: unknown class {cls:?}"));
+            let key = normalize_asset_name(sym);
+            assert!(
+                key == sym.trim().to_ascii_lowercase(),
+                "class-pins.csv: {sym} must be a plain ticker"
+            );
+            assert!(
+                RESOLVER.exact_by_class.get(&class).is_some_and(|m| m.contains_key(&key)),
+                "class-pins.csv: {sym} has no exact {class:?} row"
+            );
+            assert!(
+                RESOLVER.by_normalized.get(&key).is_some_and(|(a, _)| a.class != class),
+                "class-pins.csv: {sym} already resolves {class:?}, drop the row"
+            );
+            (key, class)
+        })
+        .collect()
+});
 
-fn pinned_class(key: &str) -> Option<AssetClass> {
-    CLASS_PINS.read().unwrap_or_else(|e| e.into_inner()).get(key).copied()
+/// Pin of a token AS SPELLED (case-folded): `F&F`, the equity's name,
+/// normalizes to the pinned `ff` and must keep resolving to the equity.
+fn pinned_class(token: &str) -> Option<AssetClass> {
+    CLASS_PINS.get(&token.trim().to_ascii_lowercase()).copied()
 }
 
-/// Pin `symbols` to `class` for unpinned lookups (bare `SUI`, `SUI/USD`).
-/// Only a symbol with an EXACT name/alias row in `class` whose unpinned winner
-/// sits in another class is pinned; every other symbol resolves exactly as
-/// before. Additive for the process lifetime: a config reload can add a pin,
-/// never flip one back mid-run. Returns the symbols with no exact row in
-/// `class` (an unmapped class assignment, for the caller to refuse or log).
-pub fn set_class_pins<'a>(class: AssetClass, symbols: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut unmapped = Vec::new();
-    let mut add = Vec::new();
-    for sym in symbols {
-        let key = normalize_asset_name(sym);
-        if !RESOLVER.exact_by_class.get(&class).is_some_and(|m| m.contains_key(&key)) {
-            unmapped.push(sym.to_string());
-        } else if RESOLVER.by_normalized.get(&key).is_some_and(|(a, _)| a.class != class) {
-            add.push(key);
-        }
-    }
-    let mut pins = CLASS_PINS.write().unwrap_or_else(|e| e.into_inner());
-    let before = pins.len();
-    for key in add {
-        pins.entry(key).or_insert(class);
-    }
-    if pins.len() != before {
-        drop(pins);
-        crate::ticker::clear_resolved_memo();
-    }
-    unmapped
+/// The pinned symbols (normalized), sorted.
+pub fn class_pins() -> Vec<(String, AssetClass)> {
+    let mut v: Vec<_> = CLASS_PINS.iter().map(|(k, c)| (k.clone(), *c)).collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
+
+/// `symbols` a class-blind lookup would NOT resolve in `class` although a row
+/// of `class` holds them exactly: each needs a `data/class-pins.csv` row.
+/// `PipelineYml::load` refuses a config whose `cexs.assets` (the CR universe)
+/// has any, so a new clashing token cannot ship under an equity id again.
+pub fn unpinned_clashes<'a>(class: AssetClass, symbols: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    symbols
+        .into_iter()
+        .filter(|sym| {
+            let key = normalize_asset_name(sym);
+            RESOLVER.exact_by_class.get(&class).is_some_and(|m| m.contains_key(&key))
+                && pinned_class(sym).is_none()
+                && RESOLVER.by_normalized.get(&key).is_some_and(|(a, _)| a.class != class)
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 // ---- Quote currency detection ----
@@ -763,7 +788,11 @@ pub fn resolve_ticker(
 
     // Step 1: strip suffixes
     let cleaned = strip_ticker_suffixes(symbol);
-    if cleaned != symbol.to_lowercase() {
+    // Class pins ([`set_class_pins`]) apply to the symbol as spelled: a stripped
+    // broker suffix (`CVX.US`, `W-B`) is an equity spelling and keeps its class.
+    let stripped = cleaned != symbol.to_lowercase();
+    let pin = |token: &str| (!stripped).then(|| pinned_class(token)).flatten();
+    if stripped {
         steps.push(format!("Stripped suffixes: {} -> {}", symbol, cleaned));
     }
 
@@ -810,7 +839,7 @@ pub fn resolve_ticker(
             quote.name.to_lowercase().as_str(),
             "tether" | "usd coin" | "bitcoin" | "ethereum"
         );
-        let class_filter = if cr_quote { Some(AssetClass::CR) } else { None };
+        let class_filter = if cr_quote { Some(AssetClass::CR) } else { pin(&remaining) };
 
         // Base-lookup threshold. RCA ROOT1a (2026-06-01): Jaro-Winkler ≥0.9
         // let 4-char tickers absorb a same-prefix neighbour (SOL→SOLV .942,
@@ -912,7 +941,7 @@ pub fn resolve_ticker(
     // was detected at all (bare single-asset symbol like "AAPL").
     // Threshold 0.9 (same RCA as base lookup above): suppress weak fuzzy hits.
     // CAT-1 aliases resolve via CSV; CAT-2 stays distinct (see Step 2 note).
-    if let Some(asset) = RESOLVER.find(&cleaned, 0.9, None) {
+    if let Some(asset) = RESOLVER.find(&cleaned, 0.9, pin(&cleaned)) {
         let usd = RESOLVER
             .find("usd", 0.95, Some(AssetClass::FX))
             .ok_or_else(|| MitchError::InvalidData("Could not resolve USD".into()))?;

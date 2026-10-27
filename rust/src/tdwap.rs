@@ -1089,7 +1089,7 @@ fn fingerprint_of(entries: &[(u16, ProviderEntry)]) -> (u64, u32) {
 /// One instance per ticker, owned by the aggregator and kept resident across
 /// cycles. Memory: a fixed ~100 bytes per ticker, independent of provider
 /// count (it used to hold two `Vec<ProviderFingerprint>` of 40 B × N each).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct WeightCache {
     /// Last full-refresh time. `None` ⇒ never computed; first call forces refresh.
     last_refresh: Option<Instant>,

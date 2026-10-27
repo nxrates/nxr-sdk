@@ -15,7 +15,7 @@ use mitch::constants::{
 };
 use mitch::ticker::{Asset, AssetMatch, Ticker, TickerId, TickerMatch, pack_asset};
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLock};
 
 // ---- String normalization (internal) ----
 
@@ -492,6 +492,9 @@ impl AssetResolver {
             if key.is_empty() {
                 continue;
             }
+            // An unpinned lookup of a configured symbol takes its pinned class
+            // ([`set_class_pins`]); an explicit filter always wins.
+            let class_filter = class_filter.or_else(|| pinned_class(&key));
             if let Some((asset, _)) = self.by_normalized.get(&key)
                 && class_filter.is_none_or(|c| c == asset.class)
             {
@@ -577,6 +580,44 @@ impl AssetResolver {
 }
 
 static RESOLVER: LazyLock<AssetResolver> = LazyLock::new(AssetResolver::new);
+
+/// Normalized symbol -> the class an UNPINNED lookup resolves it in. Exact ties
+/// otherwise go to the lowest class id (EQ 0, CM 4 < CR 6), so `SUI/USD` named
+/// Sun Communities and `W` named Wheat while NXR collects both as crypto.
+static CLASS_PINS: LazyLock<RwLock<HashMap<String, AssetClass>>> = LazyLock::new(Default::default);
+
+fn pinned_class(key: &str) -> Option<AssetClass> {
+    CLASS_PINS.read().unwrap_or_else(|e| e.into_inner()).get(key).copied()
+}
+
+/// Pin `symbols` to `class` for unpinned lookups (bare `SUI`, `SUI/USD`).
+/// Only a symbol with an EXACT name/alias row in `class` whose unpinned winner
+/// sits in another class is pinned; every other symbol resolves exactly as
+/// before. Additive for the process lifetime: a config reload can add a pin,
+/// never flip one back mid-run. Returns the symbols with no exact row in
+/// `class` (an unmapped class assignment, for the caller to refuse or log).
+pub fn set_class_pins<'a>(class: AssetClass, symbols: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut unmapped = Vec::new();
+    let mut add = Vec::new();
+    for sym in symbols {
+        let key = normalize_asset_name(sym);
+        if !RESOLVER.exact_by_class.get(&class).is_some_and(|m| m.contains_key(&key)) {
+            unmapped.push(sym.to_string());
+        } else if RESOLVER.by_normalized.get(&key).is_some_and(|(a, _)| a.class != class) {
+            add.push(key);
+        }
+    }
+    let mut pins = CLASS_PINS.write().unwrap_or_else(|e| e.into_inner());
+    let before = pins.len();
+    for key in add {
+        pins.entry(key).or_insert(class);
+    }
+    if pins.len() != before {
+        drop(pins);
+        crate::ticker::clear_resolved_memo();
+    }
+    unmapped
+}
 
 // ---- Quote currency detection ----
 

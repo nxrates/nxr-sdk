@@ -148,6 +148,12 @@ impl Memo {
     }
 }
 
+/// Drop every memoized resolution: a new class pin changes what a symbol names.
+pub(crate) fn clear_resolved_memo() {
+    RESOLVED.map.clear();
+    RESOLVED.len.store(0, Ordering::Relaxed);
+}
+
 /// Process-wide memo, shared by every venue pre-resolve and REST lookup.
 static RESOLVED: LazyLock<Memo> = LazyLock::new(|| Memo::new(MEMO_CAP));
 const MEMO_CAP: usize = 1 << 17;

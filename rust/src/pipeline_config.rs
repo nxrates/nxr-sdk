@@ -1633,6 +1633,13 @@ impl PipelineYml {
             .with_context(|| format!("read pipeline yaml {}", path.display()))?;
         let parsed = serde_yml::from_str::<Self>(&s)
             .with_context(|| format!("parse pipeline yaml {}", path.display()))?;
+        // `cexs.assets` IS the crypto universe: before anything resolves, a
+        // bare or USD-quoted symbol there names its CR row, not a same-ticker
+        // equity/commodity (SUI, W, ...). Same pins in every binary that loads.
+        crate::resolve::set_class_pins(
+            mitch::common::AssetClass::CR,
+            parsed.cexs.assets.iter().map(String::as_str),
+        );
         parsed.oracles.z_gate.validate()?;
         if parsed.oracles.public_api.enabled {
             parsed.oracles.public_api.origin_host()?;

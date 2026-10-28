@@ -702,12 +702,19 @@ where
     compute_vwap_conc(ticker_id, entries, stale_threshold_secs, kernel, now, sink, wash_bloc_frac())
 }
 
-/// `cexs.storage.wash_bloc_frac`, read once like [`Concentration::get`]; 0 (off) when unreadable.
+/// `cexs.storage.wash_bloc_frac`, read once like [`Concentration::get`]. Unreadable config
+/// disables the bound (0) but logs an error.
 fn wash_bloc_frac() -> f64 {
     static F: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *F.get_or_init(|| {
         use crate::pipeline_config::{ConfigHint, PipelineYml};
-        PipelineYml::load_default(ConfigHint::Runtime).map_or(0.0, |p| p.cexs.storage.wash_bloc_frac)
+        match PipelineYml::load_default(ConfigHint::Runtime) {
+            Ok(p) => p.cexs.storage.wash_bloc_frac,
+            Err(e) => {
+                tracing::error!(error = %e, "wash_bloc_frac: config unreadable, wash bound OFF");
+                0.0
+            }
+        }
     })
 }
 
@@ -827,9 +834,10 @@ where
             (r * k_un, 0.0)
         }
     };
-    // Wash bloc, the same rule on the pre-cap shares: `x = Φ·min(x_raw, F) + (1−Φ)·x_raw`,
-    // Φ = the other legs' presence; wash legs take no excess, so the bound holds on final shares.
-    let (mut x_raw, mut o_raw, mut o_g) = (0.0f64, 0.0f64, 0.0f64);
+    // Wash bloc on the pre-cap shares: `x = min(x_raw, F)`, unconditionally (a presence-blended
+    // bound let the bloc through as clean legs went stale). Wash legs take no excess, so the bound
+    // holds on final shares. With no clean leg alive the bound cannot hold: fail closed, no mark.
+    let (mut x_raw, mut o_raw) = (0.0f64, 0.0f64);
     for e in entries.clone() {
         if let Some((_, g, w)) = weigh(e) {
             let r = raw0(e, g, w).0;
@@ -837,13 +845,14 @@ where
                 x_raw += r;
             } else {
                 o_raw += r;
-                o_g += r * g;
             }
         }
     }
-    let (k_wash, k_other) = if wash_frac > 0.0 && x_raw > 0.0 && o_raw > 0.0 {
-        let phi = o_g / o_raw;
-        let x = phi * x_raw.min(wash_frac) + (1.0 - phi) * x_raw;
+    if wash_frac > 0.0 && x_raw > 0.0 && o_raw <= 0.0 {
+        return None;
+    }
+    let (k_wash, k_other) = if wash_frac > 0.0 && x_raw > 0.0 {
+        let x = x_raw.min(wash_frac);
         (x / x_raw, (1.0 - x) / (1.0 - x_raw).max(f64::MIN_POSITIVE))
     } else {
         (1.0, 1.0)
@@ -2007,7 +2016,32 @@ mod unmapped_bloc_tests {
         assert!(m - 100.0 <= 0.15 + 0.01, "wash share {}", m - 100.0);
     }
 
-     /// Owner calibration: ~0.99 alone, falling with breadth to ~0.41 at 8.
+    /// Clean legs dead (or all legs wash): the bound cannot hold, so no mark. Clean legs
+    /// alive but nearly stale must still leave the bloc at `wash_bloc_frac`.
+    #[test]
+    fn wash_bloc_fails_closed_when_clean_legs_die() {
+        let now = coarse_now();
+        let mk = |clean_age_ms: u64, n_clean: usize| -> Vec<ProviderEntry> {
+            (0..4)
+                .map(|i| {
+                    let wash = i >= n_clean;
+                    let age = if wash { 0 } else { clean_age_ms };
+                    let mut e = ProviderEntry::new_at(leg(if wash { 101.0 } else { 100.0 }), 1.0, coarse_now_backdated(age))
+                        .with_mapped(true)
+                        .with_wash(wash);
+                    e.joined = None;
+                    e
+                })
+                .collect()
+        };
+        let run = |es: &[ProviderEntry]| compute_vwap_conc(1, es.iter(), 10.0, Kernel::ALT, now, None, 0.15);
+        assert!(run(&mk(60_000, 1)).is_none(), "clean venue past stale: fail closed");
+        assert!(run(&mk(0, 0)).is_none(), "all-wash market: fail closed");
+        let m = run(&mk(9_500, 1)).expect("nearly stale clean leg still counts").0.mid();
+        assert!(m - 100.0 <= 0.15 + 0.01, "wash share {}", m - 100.0);
+    }
+
+    /// Owner calibration: ~0.99 alone, falling with breadth to ~0.41 at 8.
     #[test]
     fn w_max_decays_with_the_live_leg_count() {
         let c = Concentration::default();

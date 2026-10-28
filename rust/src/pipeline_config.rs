@@ -1280,6 +1280,16 @@ pub struct OnchainRosterYml {
     pub enabled: bool,
     #[serde(default)]
     pub pools: Vec<OnchainLegYml>,
+    /// `quality.<ASSET>`: only whether a redemption-rate anchor exists (its legs
+    /// ride provider `onchain_rate`); the rest is `nxr-onchain`'s.
+    #[serde(default)]
+    pub quality: std::collections::BTreeMap<String, OnchainQualityRosterYml>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct OnchainQualityRosterYml {
+    #[serde(default)]
+    pub rate: Option<serde_yml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1293,6 +1303,12 @@ pub struct OnchainLegYml {
 }
 
 impl OnchainRosterYml {
+    /// An enabled section with at least one redemption-rate anchor: the poller
+    /// emits those rates as provider `onchain_rate`.
+    pub fn has_rate_legs(&self) -> bool {
+        self.enabled && self.quality.values().any(|q| q.rate.is_some())
+    }
+
     /// Located legs on an enabled section; a locator-less pool is a candidate.
     pub fn symbols(&self) -> impl Iterator<Item = String> + '_ {
         self.pools
@@ -1612,6 +1628,7 @@ impl PipelineYml {
             .chain(self.oracles.public_api.enabled.then_some(self.oracles.public_api.provider.as_str()))
             .chain(self.ctrader.providers.keys().map(String::as_str))
             .chain(self.onchain.symbols().next().map(|_| "onchain"))
+            .chain(self.onchain.has_rate_legs().then_some("onchain_rate"))
             .map(str::to_owned)
             .collect()
     }
@@ -2188,6 +2205,12 @@ pub struct ParityLegYml {
     /// an index composite onto its ETF (`seed` ~ 1/41, `b` the correction).
     #[serde(default)]
     pub multiplier: Option<MultiplierYml>,
+    /// FALLBACK leg (a protocol exchange rate, provider `onchain_rate`): out of
+    /// the vector while any other leg of the asset converts; alone, it prices,
+    /// the mark's confidence widened by this many bps and the asset flagged
+    /// rate-only (`nxr_storage_fallback_only`). Absent = an ordinary leg.
+    #[serde(default)]
+    pub fallback_ci_bps: Option<f64>,
 }
 
 impl Default for ParityLegYml {
@@ -2199,6 +2222,7 @@ impl Default for ParityLegYml {
             share: None,
             max_dev_bps: None,
             multiplier: None,
+            fallback_ci_bps: None,
         }
     }
 }

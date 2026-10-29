@@ -115,8 +115,9 @@ pub struct Kernel {
     /// those levels as shares age, a median moves only when half the share
     /// reprices, and one venue cannot pull it at all.
     pub median: bool,
-    /// Ceiling on any one leg's final share, on top of `w_max(n)`, faded by the
-    /// second most present evidence leg: `1 − (1 − share_cap)·g₂`. 1.0 = none.
+    /// Ceiling on any one evidence leg's final share, on top of `w_max(n)`,
+    /// faded by the best presence among its PEER evidence legs:
+    /// `1 − (1 − share_cap)·g_peer`. 1.0 = none.
     pub share_cap: f64,
 }
 
@@ -245,15 +246,15 @@ impl Kernel {
     }
 }
 
-/// Water-fill over `(raw share r, excess eligibility e)`: `λ >= 0` such that
-/// `Σ min(cap, r + λ·e) = 1`. `None` when capped excess has no eligible home
-/// (every eligible leg capped, or none): the caller still CAPS every leg at
-/// `cap` and renormalises, so the cap is never skipped.
-fn water_fill<I: Iterator<Item = (f64, f64)> + Clone>(legs: I, cap: f64) -> Option<f64> {
+/// Water-fill over `(raw share r, excess eligibility e, cap)`: `λ >= 0` such
+/// that `Σ min(cap, r + λ·e) = 1`. `None` when capped excess has no eligible
+/// home (every eligible leg capped, or none): the caller still CAPS every leg
+/// and renormalises, so the cap is never skipped.
+fn water_fill<I: Iterator<Item = (f64, f64, f64)> + Clone>(legs: I) -> Option<f64> {
     let mut lam = 0.0f64;
     loop {
         let (mut fixed, mut free_r, mut free_e) = (0.0f64, 0.0f64, 0.0f64);
-        for (r, e) in legs.clone() {
+        for (r, e, cap) in legs.clone() {
             if r + lam * e >= cap {
                 fixed += cap;
             } else {
@@ -270,7 +271,7 @@ fn water_fill<I: Iterator<Item = (f64, f64)> + Clone>(legs: I, cap: f64) -> Opti
         }
         let next = deficit / free_e;
         // The capped set only grows with λ, so this terminates in <= n rounds.
-        if legs.clone().all(|(r, e)| r + lam * e >= cap || r + next * e <= cap * (1.0 + 1e-12)) {
+        if legs.clone().all(|(r, e, cap)| r + lam * e >= cap || r + next * e <= cap * (1.0 + 1e-12)) {
             return Some(next);
         }
         lam = next;
@@ -833,20 +834,38 @@ where
         }
     };
     let w_max = Concentration::get().w_max(n);
-    // Pegged cap, faded by the second leg's presence: 1 − (1 − c)·g₂.
-    let g2 = if any_mapped { gm[1] } else { ga[1] };
-    let peg = 1.0 - (1.0 - kernel.share_cap) * g2.min(1.0);
-    let fill = |cap| {
+    // Pegged cap, per leg. A uniform cap relaxes as the FADING leg's own
+    // presence falls (g₂ is its g), so a stale leg keeps a big share. Each
+    // evidence leg is capped against its PEERS: `1 − (1 − c)·g_other`, g_other =
+    // best presence among the other evidence legs. A fading leg is held tight by
+    // its fresh peers, a fresh leg is capped loosely by the fading one, so share
+    // only moves toward the fresher leg. Non-evidence legs keep the uniform g₂.
+    let top = if any_mapped { gm } else { ga };
+    let peg_of = |g: f64| 1.0 - (1.0 - kernel.share_cap) * g.min(1.0);
+    let cap_of = |e: &ProviderEntry, g: f64, pegged: bool| {
+        if !pegged {
+            return w_max;
+        }
+        let evidence = !e.injected && (e.mapped || !any_mapped);
+        let other = if !evidence || g >= top[0] { top[1] } else { top[0] };
+        w_max.min(peg_of(other))
+    };
+    let tri = |e: &ProviderEntry, g: f64, w: f64, pegged: bool| {
+        let (r, x) = raw(e, g, w);
+        (r, x, cap_of(e, g, pegged))
+    };
+    let fill = |pegged: bool| {
         water_fill(
-            legs.iter().zip(entries.clone()).filter_map(|(l, e)| l.map(|(_, g, w, _)| raw(e, g, w))),
-            cap,
+            legs.iter()
+                .zip(entries.clone())
+                .filter_map(|(l, e)| l.map(|(_, g, w, _)| tri(e, g, w, pegged))),
         )
     };
-    let (cap, lam) = match fill(w_max.min(peg)) {
+    let (pegged, lam) = match fill(true) {
         // The pegged cap never forces share onto a leg with no evidence: no
         // eligible home falls back to the ordinary cap, not to all-eligible.
-        None if peg < w_max => (w_max, fill(w_max)),
-        l => (w_max.min(peg), l),
+        None if kernel.share_cap < 1.0 => (false, fill(false)),
+        l => (true, l),
     };
     // No eligible home for the excess: rather than skip the cap, water-fill
     // again with EVERY leg eligible in proportion to its own share. Only a
@@ -855,13 +874,13 @@ where
         water_fill(
             legs.iter()
                 .zip(entries.clone())
-                .filter_map(|(l, e)| l.map(|(_, g, w, _)| raw(e, g, w)))
-                .map(|(r, _)| (r, r)),
-            cap,
+                .filter_map(|(l, e)| l.map(|(_, g, w, _)| tri(e, g, w, pegged)))
+                .map(|(r, _, c)| (r, r, c)),
         )
     });
     let share = |e: &ProviderEntry, g: f64, w: f64| {
         let (r, x) = raw(e, g, w);
+        let cap = cap_of(e, g, pegged);
         match (lam, all_eligible) {
             (Some(l), _) => (r + l * x).min(cap),
             (None, Some(Some(l))) => (r + l * r).min(cap),
@@ -910,6 +929,7 @@ where
         let sh = share(entry, g, w);
         if let Some(s) = sink.as_deref_mut() {
             let (r, x) = raw(entry, g, w);
+            let cap = cap_of(entry, g, pegged);
             let at_cap = match (lam, all_eligible) {
                 (Some(l), _) => r + l * x >= cap,
                 (None, Some(Some(l))) => r + l * r >= cap,
@@ -2807,18 +2827,32 @@ mod tests {
     #[test]
     fn water_fill_caps_and_renormalises() {
         let rs = [0.8, 0.1, 0.1];
-        let lam = water_fill(rs.iter().map(|r| (*r, *r)), 0.6).unwrap();
+        let lam = water_fill(rs.iter().map(|r| (*r, *r, 0.6))).unwrap();
         let shares: Vec<f64> = rs.iter().map(|r| (r + lam * r).min(0.6)).collect();
         assert!((shares[0] - 0.6).abs() < 1e-12);
         assert!((shares[1] - 0.2).abs() < 1e-12);
         // An ineligible leg (e = 0) keeps its raw share; the excess goes elsewhere.
         let legs = [(0.8, 0.8), (0.1, 0.0), (0.1, 0.1)];
-        let lam = water_fill(legs.iter().copied(), 0.6).unwrap();
+        let lam = water_fill(legs.iter().map(|(r, e)| (*r, *e, 0.6))).unwrap();
         let sh: Vec<f64> = legs.iter().map(|(r, e)| (r + lam * e).min(0.6)).collect();
-        assert!((sh[1] - 0.1).abs() < 1e-12 && (sh[2] - 0.3).abs() < 1e-12, "{sh:?}");
+        assert!(
+            (sh[1] - 0.1).abs() < 1e-12 && (sh[2] - 0.3).abs() < 1e-12,
+            "{sh:?}"
+        );
         // No eligible home for the excess: raw shares stand.
-        assert!(water_fill([(1.0, 1.0)].into_iter(), 0.6).is_none());
-        assert_eq!(water_fill([(0.5, 0.5), (0.5, 0.5)].into_iter(), 0.6), Some(0.0));
+        assert!(water_fill([(1.0, 1.0, 0.6)].into_iter()).is_none());
+        assert_eq!(
+            water_fill([(0.5, 0.5, 0.6), (0.5, 0.5, 0.6)].into_iter()),
+            Some(0.0)
+        );
+        // Per-leg caps: the tight leg stops at 0.5, the loose one takes the rest.
+        let legs = [(0.9, 0.9, 0.5), (0.1, 0.1, 0.95)];
+        let lam = water_fill(legs.iter().copied()).unwrap();
+        let sh: Vec<f64> = legs.iter().map(|(r, e, c)| (r + lam * e).min(*c)).collect();
+        assert!(
+            (sh[0] - 0.5).abs() < 1e-12 && (sh[1] - 0.5).abs() < 1e-12,
+            "{sh:?}"
+        );
     }
 
     /// The cap is never skipped: with the excess having no eligible home (a
@@ -3054,5 +3088,243 @@ mod tests {
         assert_eq!(default_refresh_interval_ms(2.0, 200), 600);
         // FX-ish at agg=50ms: stale=2s → 400ms, above 3× floor (150ms) → 400.
         assert_eq!(default_refresh_interval_ms(2.0, 50), 400);
+    }
+
+    // ── Per-leg pegged cap ───────────────────────────────────────────────────
+    //
+    // Live mechanism (AUSD-USD lane dark): a thin Kraken book (base R/2 >> the
+    // onchain composite's 1.0) goes silent; its raw share stays above any cap
+    // while a UNIFORM cap `1 − (1 − c)·g₂` relaxes with Kraken's OWN fading
+    // presence (g₂), so it keeps 0.85+ while `f < ACTIVE_PRESENCE` (not counted
+    // active) and the onchain leg falls under FRESH_WEIGHT_SHARE_FLOOR (0.20).
+    // Per-leg caps hold the fading leg by its peers' presence instead.
+
+    /// Result of one frame: `(mark mid, [kraken share, onchain share], bit 7)`.
+    fn ausd_frame(
+        share_cap: f64,
+        r: f64,
+        silence_secs: f64,
+        stale: f64,
+        kraken_mid: f64,
+        onchain_mid: f64,
+    ) -> (f64, [f64; 2], bool) {
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_millis((silence_secs * 1e3) as u64);
+        let k =
+            mk_entry(kraken_mid - 5e-5, kraken_mid + 5e-5, 1_000, 1_000, r, t0).with_mapped(true);
+        let o = mk_entry(
+            onchain_mid - 5e-5,
+            onchain_mid + 5e-5,
+            1_000,
+            1_000,
+            1.0,
+            now,
+        )
+        .with_mapped(true);
+        let kernel = Kernel {
+            share_cap,
+            ..Kernel::PEGGED
+        };
+        let mut sink = Vec::new();
+        let (idx, _) = compute_vwap_profiled_into(1, [&k, &o], stale, kernel, now, Some(&mut sink))
+            .expect("mark");
+        (
+            (idx.bid + idx.ask) * 0.5,
+            [sink[0].share, sink[1].share],
+            mitch::index::conf_fresh_weight_ok(idx.confidence),
+        )
+    }
+
+    /// Silence grid covering fresh -> faded -> evicted.
+    fn silences(stale: f64) -> impl Iterator<Item = f64> {
+        (0..=72).map(move |i| stale * 1.2 * i as f64 / 72.0)
+    }
+
+    #[test]
+    fn ausd_kraken_fade_never_goes_dark_with_the_per_leg_cap() {
+        for stale in [10.0, 300.0] {
+            for r in [8.0, 20.0, 100.0, 1000.0] {
+                let mut baseline_dark = false;
+                for sil in silences(stale) {
+                    // Baseline: no pegged cap (share_cap 1.0), the live default.
+                    baseline_dark |= !ausd_frame(1.0, r, sil, stale, 1.0, 1.0).2;
+                    let (mid, sh, ok) = ausd_frame(0.5, r, sil, stale, 1.0001, 1.0);
+                    assert!(
+                        ok,
+                        "stale {stale} R {r} silence {sil:.1}: dark, shares {sh:?}"
+                    );
+                    assert!((sh[0] + sh[1] - 1.0).abs() < 1e-9);
+                    // Onchain owns at least half as soon as Kraken presence < 1.
+                    if sil > 0.5 * stale + 1e-3 {
+                        assert!(
+                            sh[1] >= 0.5 - 1e-9,
+                            "stale {stale} R {r} sil {sil:.1}: onchain {}",
+                            sh[1]
+                        );
+                        assert!(
+                            (mid - 1.0).abs() <= 1e-4 * sh[0] + 1e-9,
+                            "mark off onchain: {mid}"
+                        );
+                        // Kraken 1 bp off: the mark stays within 1 bp of onchain.
+                        assert!(
+                            (mid - 1.0).abs() <= 1e-4 + 1e-9,
+                            "mid {mid} at silence {sil:.1}"
+                        );
+                    }
+                }
+                // The slow (300 s) fade only goes dark at R = 1000 (w_max and the diffusion taper hold R <= 100).
+                if (stale == 10.0 && r >= 20.0) || r >= 1000.0 {
+                    assert!(
+                        baseline_dark,
+                        "stale {stale} R {r}: baseline never dark, mechanism not reproduced"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 12 live (dark, up) episodes: Kraken silent `dark` seconds, then re-confirms.
+    #[test]
+    fn ausd_dark_up_episodes_keep_bit7() {
+        let stale = 300.0;
+        for r in [20.0, 100.0, 1000.0] {
+            for dark in [
+                120.0, 180.0, 240.0, 300.0, 360.0, 150.0, 200.0, 270.0, 330.0, 780.0, 1200.0,
+                1980.0,
+            ] {
+                let mut sil = 0.0;
+                while sil <= dark {
+                    let (mid, _, ok) = ausd_frame(0.5, r, sil, stale, 1.0002, 1.0);
+                    assert!(ok, "R {r} dark {dark} at +{sil}s");
+                    assert!((mid - 1.0).abs() < 2.1e-4);
+                    sil += 15.0;
+                }
+                // Back up: Kraken re-confirms, still not dark.
+                assert!(ausd_frame(0.5, r, 0.0, stale, 1.0002, 1.0).2);
+            }
+        }
+    }
+
+    /// Onchain at 0.97, Kraken stale pinned at 1.0000: never worse than the
+    /// uncapped baseline toward the stale leg.
+    #[test]
+    fn ausd_depeg_stale_leg_never_pulls_more_than_baseline() {
+        for stale in [10.0, 300.0] {
+            for r in [8.0, 100.0, 1000.0] {
+                for sil in silences(stale) {
+                    let new = ausd_frame(0.5, r, sil, stale, 1.0, 0.97).0;
+                    let old = ausd_frame(1.0, r, sil, stale, 1.0, 0.97).0;
+                    // Onchain fully present: Kraken never holds above 0.5 (mid 0.985).
+                    assert!(
+                        new <= 0.985 + 1e-9,
+                        "stale {stale} R {r} sil {sil:.1}: {new}"
+                    );
+                    // The cap's pull toward the fading leg is bounded by 0.5·g·|Δ|
+                    // (same bound as the uniform cap had); at g = 0 it is nil.
+                    let g = freshness(sil, stale);
+                    assert!(
+                        new - old <= 0.5 * g * 0.03 + 1e-6,
+                        "stale {stale} R {r} sil {sil:.1}: new {new} old {old}"
+                    );
+                    if g > 0.0 {
+                        continue;
+                    }
+                    assert!(
+                        new <= old + 1e-6,
+                        "stale {stale} R {r} sil {sil:.1}: new {new} old {old}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Kraken fresh, onchain fading: Kraken is capped at 0.5 only while onchain
+    /// is present; a lone live leg keeps the whole share.
+    #[test]
+    fn ausd_symmetry_fresh_kraken_stale_onchain() {
+        let t0 = Instant::now();
+        let stale = 10.0;
+        let now = t0 + Duration::from_secs(0);
+        let kernel = Kernel {
+            share_cap: 0.5,
+            ..Kernel::PEGGED
+        };
+        let run = |onchain_age_ms: u64| {
+            let k = mk_entry(0.99995, 1.00005, 1_000, 1_000, 8.0, now).with_mapped(true);
+            let mut o = mk_entry(0.99995, 1.00005, 1_000, 1_000, 1.0, now).with_mapped(true);
+            o.last_update = t0 - Duration::from_millis(onchain_age_ms);
+            let mut sink = Vec::new();
+            let _ = compute_vwap_profiled_into(1, [&k, &o], stale, kernel, now, Some(&mut sink))
+                .unwrap();
+            [sink[0].share, sink[1].share]
+        };
+        let fresh = run(0);
+        assert!((fresh[0] - 0.5).abs() < 1e-6, "both fresh: {fresh:?}");
+        let half = run(7_500);
+        assert!(
+            half[0] > 0.5 && half[0] <= 1.0 - 0.5 * 0.5 + 1e-6,
+            "onchain g .5: kraken {half:?}"
+        );
+        let gone = run(10_500);
+        assert!(
+            gone[0] > 0.97,
+            "onchain absent: kraken keeps whole share {gone:?}"
+        );
+    }
+
+    /// Random pairs: shares sum to 1 and the new cap never moves share toward
+    /// the less fresh leg compared with the uniform-cap shares.
+    #[test]
+    fn per_leg_cap_moves_share_toward_the_fresher_leg() {
+        let mut x = 0x9E3779B97F4A7C15u64;
+        let mut u = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let stale = 10.0;
+        for _ in 0..2_000 {
+            let (ra, rb) = (0.2 + 200.0 * u(), 0.2 + 200.0 * u());
+            let (ta, tb) = (u() * 11.0, u() * 11.0);
+            let t0 = Instant::now();
+            let now = t0 + Duration::from_secs(12);
+            let at = |age: f64| now - Duration::from_millis((age * 1e3) as u64);
+            let a = mk_entry(0.99995, 1.00005, 1_000, 1_000, ra, at(ta)).with_mapped(true);
+            let b = mk_entry(0.99995, 1.00005, 1_000, 1_000, rb, at(tb)).with_mapped(true);
+            let sh = |cap: f64| {
+                let mut s = Vec::new();
+                let k = Kernel {
+                    share_cap: cap,
+                    ..Kernel::PEGGED
+                };
+                compute_vwap_profiled_into(1, [&a, &b], stale, k, now, Some(&mut s))
+                    .map(|_| [s[0].share, s[1].share])
+            };
+            let (Some(off), Some(on)) = (sh(1.0), sh(0.5)) else {
+                continue;
+            };
+            assert!((on[0] + on[1] - 1.0).abs() < 1e-9, "{on:?}");
+            // Fresher leg (smaller age) never loses share to the cap.
+            let (ga, gb) = (freshness(ta, stale), freshness(tb, stale));
+            let (fresher, staler) = if ga > gb { (0, 1) } else { (1, 0) };
+            if (ga - gb).abs() > 0.05 {
+                // Each leg capped by its PEER's presence: the stale one is held by
+                // the fresher peer, the fresher one only by the fading peer.
+                let c = |g_other: f64| 1.0 - 0.5 * g_other;
+                assert!(
+                    on[staler] <= c([ga, gb][fresher]) + 1e-9,
+                    "ages {ta:.2}/{tb:.2}: {on:?}"
+                );
+                assert!(
+                    on[fresher] <= c([ga, gb][staler]) + 1e-9,
+                    "ages {ta:.2}/{tb:.2}: {on:?}"
+                );
+                assert!(
+                    on[staler] <= off[staler].max(c([ga, gb][staler])) + 1e-9,
+                    "off {off:?} on {on:?}"
+                );
+            }
+        }
     }
 }

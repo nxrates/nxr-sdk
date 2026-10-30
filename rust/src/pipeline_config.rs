@@ -2185,15 +2185,23 @@ pub struct PerpReferenceYml {
     /// (fallback), and live this many seconds before it releases.
     #[serde(default = "perp_ref_dwell_s")]
     pub dwell_s: f64,
+    /// The last primary mark expires after this many hours: past it the sanity
+    /// band has nothing to hold and the asset stays dark.
+    #[serde(default = "perp_ref_max_primary_age_h")]
+    pub max_primary_age_h: f64,
 }
 
 fn perp_ref_dwell_s() -> f64 {
     60.0
 }
 
+fn perp_ref_max_primary_age_h() -> f64 {
+    12.0
+}
+
 impl Default for PerpReferenceYml {
     fn default() -> Self {
-        Self { enabled: false, dwell_s: perp_ref_dwell_s() }
+        Self { enabled: false, dwell_s: perp_ref_dwell_s(), max_primary_age_h: perp_ref_max_primary_age_h() }
     }
 }
 

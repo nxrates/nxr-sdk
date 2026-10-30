@@ -2145,6 +2145,10 @@ pub struct StorageYml {
     /// asset's published id is unchanged: a leg is an input, never an output.
     #[serde(default)]
     pub parity_legs: BTreeMap<String, Vec<ParityLegYml>>,
+    /// SECONDARY-source switch for `role: reference` parity legs. OFF (default):
+    /// such rows are not resolved at all.
+    #[serde(default)]
+    pub perp_reference: PerpReferenceYml,
     /// Non-pegged assets that publish a mark only with >= 1 own (volume-mapped)
     /// leg, as a pegged asset with a parity row does: Pyth alone is no price.
     #[serde(default)]
@@ -2170,6 +2174,27 @@ pub struct StorageYml {
     /// instead of following wrapper books alone. Absent class = no bound.
     #[serde(default)]
     pub unanchored_drift_bps: BTreeMap<String, f64>,
+}
+
+/// `cexs.storage.perp_reference`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PerpReferenceYml {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// What a parity leg does to the asset's mark.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegRole {
+    /// Joins the TDWAP vector (the original behaviour).
+    #[default]
+    Blend,
+    /// SECONDARY source: never in the vector while a primary prices; metered
+    /// against it (deviation gauge + flag), exposed as a labelled reference
+    /// while the primary's market is shut, and the degraded fallback mark when
+    /// the primary is dark. Never signed. Needs `cexs.storage.perp_reference`.
+    Reference,
 }
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at
@@ -2211,6 +2236,9 @@ pub struct ParityLegYml {
     /// rate-only (`nxr_storage_fallback_only`). Absent = an ordinary leg.
     #[serde(default)]
     pub fallback_ci_bps: Option<f64>,
+    /// [`LegRole`]; absent = `blend`.
+    #[serde(default)]
+    pub role: LegRole,
 }
 
 impl Default for ParityLegYml {
@@ -2223,6 +2251,7 @@ impl Default for ParityLegYml {
             max_dev_bps: None,
             multiplier: None,
             fallback_ci_bps: None,
+            role: LegRole::Blend,
         }
     }
 }

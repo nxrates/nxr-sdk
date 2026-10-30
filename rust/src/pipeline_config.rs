@@ -2175,13 +2175,12 @@ pub struct StorageYml {
     /// folded markets. Absent or 0 = one market per venue (the deepest), output
     /// unchanged. In [0, 1].
     ///
-    /// Exposure: each folded sibling adds at most `g x` the deepest market's
-    /// weight, so a leg's weight is at most `(1 + g x siblings)` times today's
-    /// (siblings <= number of allowed quotes: 5x at g = 1 with 4 quotes). Weight
-    /// is 24 h volume, not depth: wash or promo volume on a sibling (zero-fee
-    /// USD1/USDC pairs) buys weight, bounded only by the venue-level
-    /// `w_max(n_eff)` cap and by the sibling cap at the deepest weight. Tune g
-    /// from the shadow soak, not from volume alone.
+    /// Exposure: a sibling adds at most `g x` its own weight, and the TOTAL
+    /// sibling weight of a venue is capped at the deepest market's weight, so a
+    /// leg is at most 2x today's whatever the sibling count. Weight is 24 h
+    /// volume, not depth: wash or promo volume on a sibling (zero-fee USD1/USDC
+    /// pairs) buys weight, bounded by that cap and the venue-level `w_max(n_eff)`.
+    /// Tune g from the shadow soak, not from volume alone.
     #[serde(default)]
     pub multi_market_g: Option<f64>,
     /// Per base asset override of `multi_market_g`.
@@ -2192,6 +2191,11 @@ pub struct StorageYml {
     /// (BTC, ETH, ...) is refused unless `multi_market_allow_nonstable`.
     #[serde(default)]
     pub multi_market_quotes: Option<Vec<String>>,
+    /// A sibling whose mid differs from the venue's deepest market's by more
+    /// than this many bp is not folded (a thin off-market or stale book must not
+    /// pull the leg). Absent = 25.
+    #[serde(default)]
+    pub multi_market_max_div_bps: Option<f64>,
     /// Allow non-stablecoin quotes in `multi_market_quotes` (bridge noise: the
     /// counter/USD leg is itself a composite). Absent = false.
     #[serde(default)]

@@ -2174,15 +2174,28 @@ pub struct StorageYml {
     /// leg weight = deepest + g * sum(others), price = weight-averaged over the
     /// folded markets. Absent or 0 = one market per venue (the deepest), output
     /// unchanged. In [0, 1].
+    ///
+    /// Exposure: each folded sibling adds at most `g x` the deepest market's
+    /// weight, so a leg's weight is at most `(1 + g x siblings)` times today's
+    /// (siblings <= number of allowed quotes: 5x at g = 1 with 4 quotes). Weight
+    /// is 24 h volume, not depth: wash or promo volume on a sibling (zero-fee
+    /// USD1/USDC pairs) buys weight, bounded only by the venue-level
+    /// `w_max(n_eff)` cap and by the sibling cap at the deepest weight. Tune g
+    /// from the shadow soak, not from volume alone.
     #[serde(default)]
     pub multi_market_g: Option<f64>,
     /// Per base asset override of `multi_market_g`.
     #[serde(default)]
     pub multi_market_g_by_asset: BTreeMap<String, f64>,
     /// Quote assets whose markets may fold into a venue's leg. Absent = USDT,
-    /// USDC, USD1, FDUSD.
+    /// USDC, USD1, FDUSD. Unknown names warn at boot; a non-stablecoin quote
+    /// (BTC, ETH, ...) is refused unless `multi_market_allow_nonstable`.
     #[serde(default)]
     pub multi_market_quotes: Option<Vec<String>>,
+    /// Allow non-stablecoin quotes in `multi_market_quotes` (bridge noise: the
+    /// counter/USD leg is itself a composite). Absent = false.
+    #[serde(default)]
+    pub multi_market_allow_nonstable: Option<bool>,
     /// A sibling folds only when its weight is at least this fraction of the
     /// venue's deepest market. Absent = 0.1.
     #[serde(default)]

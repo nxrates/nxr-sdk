@@ -2177,10 +2177,24 @@ pub struct StorageYml {
 }
 
 /// `cexs.storage.perp_reference`.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PerpReferenceYml {
     #[serde(default)]
     pub enabled: bool,
+    /// The primary must be dark this many seconds before the reference prices
+    /// (fallback), and live this many seconds before it releases.
+    #[serde(default = "perp_ref_dwell_s")]
+    pub dwell_s: f64,
+}
+
+fn perp_ref_dwell_s() -> f64 {
+    60.0
+}
+
+impl Default for PerpReferenceYml {
+    fn default() -> Self {
+        Self { enabled: false, dwell_s: perp_ref_dwell_s() }
+    }
 }
 
 /// What a parity leg does to the asset's mark.
@@ -2239,6 +2253,10 @@ pub struct ParityLegYml {
     /// [`LegRole`]; absent = `blend`.
     #[serde(default)]
     pub role: LegRole,
+    /// Reference leg: the fallback mark must stay within this many bps of the
+    /// last primary mark, else the asset stays dark. Absent = 150.
+    #[serde(default)]
+    pub fallback_band_bps: Option<f64>,
 }
 
 impl Default for ParityLegYml {
@@ -2252,6 +2270,7 @@ impl Default for ParityLegYml {
             multiplier: None,
             fallback_ci_bps: None,
             role: LegRole::Blend,
+            fallback_band_bps: None,
         }
     }
 }

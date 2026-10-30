@@ -505,7 +505,8 @@ pub fn coarse_now() -> Instant {
 /// backdating past the corpse-filter horizon is indistinguishable from dead.
 #[inline]
 pub fn coarse_now_backdated(lateness_ms: u64) -> Instant {
-    coarse_now() - Duration::from_millis(lateness_ms)
+    // Saturates at the clock's origin: a node up for less than `lateness_ms` must not panic.
+    coarse_now().checked_sub(Duration::from_millis(lateness_ms)).unwrap_or_default()
 }
 
 /// Per-provider, per-ticker leg state.

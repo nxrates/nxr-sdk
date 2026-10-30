@@ -2170,6 +2170,23 @@ pub struct StorageYml {
     /// instead of following wrapper books alone. Absent class = no bound.
     #[serde(default)]
     pub unanchored_drift_bps: BTreeMap<String, f64>,
+    /// Weight of a venue's NON-deepest admissible markets in its single leg:
+    /// leg weight = deepest + g * sum(others), price = weight-averaged over the
+    /// folded markets. Absent or 0 = one market per venue (the deepest), output
+    /// unchanged. In [0, 1].
+    #[serde(default)]
+    pub multi_market_g: Option<f64>,
+    /// Per base asset override of `multi_market_g`.
+    #[serde(default)]
+    pub multi_market_g_by_asset: BTreeMap<String, f64>,
+    /// Quote assets whose markets may fold into a venue's leg. Absent = USDT,
+    /// USDC, USD1, FDUSD.
+    #[serde(default)]
+    pub multi_market_quotes: Option<Vec<String>>,
+    /// A sibling folds only when its weight is at least this fraction of the
+    /// venue's deepest market. Absent = 0.1.
+    #[serde(default)]
+    pub multi_market_min_ratio: Option<f64>,
 }
 
 /// One parity leg. `provider` absent = NXR's own composite for `pair`, read at

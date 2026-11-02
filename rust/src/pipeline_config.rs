@@ -311,6 +311,11 @@ pub struct SignedDomainYml {
     /// tier's `tierVerifier`.
     #[serde(default)]
     pub tier: Option<u8>,
+    /// `packedP8` ONLY: the `MarkStoreP8` wire the oracle decodes, 2 (absent: header 13 B
+    /// srcSecs, EIP-712 version "2") or 3 (15 B srcMs, version "3"). Selects the segment frame
+    /// AND the digest, so it is the consumer's, declared per domain.
+    #[serde(default)]
+    pub wire: Option<u8>,
     /// `packedV2`/`packedV4` ONLY: the oracle's immutable deciseconds clock
     /// origin in SECONDS (`sourceTsDs = (sourceSec - epoch) * 10`). Persisted
     /// alongside BTR's deploy record; Arc (chainId 5042002) = 1735689600
@@ -817,6 +822,7 @@ impl SignedQuotesYml {
                 // was already written.
                 record_format: None,
                 tier: None,
+                wire: None,
                 epoch: None,
                 // The singleton alias predates per-domain lane maps too: it
                 // takes the per-feed catalog fields, as it always has.

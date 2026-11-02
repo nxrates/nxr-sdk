@@ -2308,13 +2308,18 @@ pub struct StorageYml {
     #[serde(default)]
     pub unanchored_drift_bps: BTreeMap<String, f64>,
     /// Pegged mark guard: a move past this many bp from the published mid is
-    /// held, ci widened over the gap, until it is confirmed. Absent = 2.
+    /// held (wire confidence widened over the gap, sourceTs frozen) until it is
+    /// confirmed; inside it the mid is EMA-smoothed. Absent = 4. > 0.
     #[serde(default)]
     pub peg_confirm_bps: Option<f64>,
-    /// How long, in ms, a held pegged move must keep its side and half its
-    /// largest excursion before it publishes. Absent = 1500; 0 = no hold.
+    /// A held pegged move publishes once every sample for this many ms sat past
+    /// the band on one side, at the smallest such level. Absent = 1500. >= 0.
     #[serde(default)]
     pub peg_confirm_ms: Option<f64>,
+    /// Hard bound: raw publishes this many ms after the mark first left the
+    /// band, whatever the path. Absent = 3000. >= `peg_confirm_ms`.
+    #[serde(default)]
+    pub peg_confirm_max_ms: Option<f64>,
     /// Weight of a venue's NON-deepest admissible markets in its single leg:
     /// leg weight = deepest + g * sum(others), price = weight-averaged over the
     /// folded markets. Absent or 0 = one market per venue (the deepest), output
@@ -2538,6 +2543,15 @@ fn mult_seed() -> f64 {
 }
 
 impl StorageYml {
+    /// `(peg_confirm_bps, peg_confirm_ms, peg_confirm_max_ms)` with their defaults.
+    pub fn peg_confirm(&self) -> (f64, f64, f64) {
+        (
+            self.peg_confirm_bps.unwrap_or(4.0),
+            self.peg_confirm_ms.unwrap_or(1500.0),
+            self.peg_confirm_max_ms.unwrap_or(3000.0),
+        )
+    }
+
     /// The storage hub: the default stored quote (`storage_quote`, else USD).
     pub fn hub(&self) -> String {
         self.storage_quote.as_deref().unwrap_or("USD").to_ascii_uppercase()
@@ -2596,6 +2610,11 @@ impl StorageYml {
     /// override pair resolve, keys are upper-case asset symbols, and no crypto
     /// asset (`cexs.assets`) is overridden off the hub.
     pub fn validate(&self, assets: &[String]) -> anyhow::Result<()> {
+        let (bps, ms, max) = self.peg_confirm();
+        anyhow::ensure!(
+            bps.is_finite() && bps > 0.0 && ms.is_finite() && ms >= 0.0 && max.is_finite() && max >= ms,
+            "peg_confirm: bps {bps} > 0, ms {ms} >= 0 and max_ms {max} >= ms, all finite"
+        );
         let hub = self.hub();
         anyhow::ensure!(
             crate::try_resolve_ticker_id(&format!("BTC/{hub}")).is_some(),

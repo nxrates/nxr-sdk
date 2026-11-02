@@ -1094,29 +1094,28 @@ where
     ))
 }
 
-/// Share-weighted median of `(mid, share)`, `shares > 0`, non-empty.
+/// Share-weighted median of `(mid, share)`, `shares > 0`, non-empty: the mean
+/// of the share quantile over the central [`MEDIAN_BAND`] of the mass.
 ///
-/// Interpolated between the mass centres of adjacent legs (`C_{i-1} + w_i/2`),
-/// so the level is continuous in both prices and shares: a plain lower median
-/// steps a whole venue gap whenever ageing carries the half-mass point across
-/// a leg boundary.
+/// Continuous in prices and in shares, a share reaching 0 included: a plain
+/// lower median steps a whole venue gap when the half-mass point crosses a leg
+/// boundary, and interpolating between leg mass centres stepped it when a leg's
+/// share faded to 0 (the vanishing leg still placed a knot; USDT/USD 15 bp,
+/// 2026-10-25 replay). A 1% share shift moves it at most 5% of a gap.
 pub fn weighted_median(mids: &mut [(f64, f64)]) -> f64 {
     mids.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let half = 0.5 * mids.iter().map(|m| m.1).sum::<f64>();
-    let (mut c, mut prev) = (0.0f64, None::<(f64, f64)>);
+    let total = mids.iter().map(|m| m.1).sum::<f64>();
+    let (lo, hi) = (total * (0.5 - MEDIAN_BAND / 2.0), total * (0.5 + MEDIAN_BAND / 2.0));
+    let (mut c, mut acc) = (0.0f64, 0.0f64);
     for &(m, w) in mids.iter() {
-        let centre = c + 0.5 * w;
-        if centre >= half {
-            return match prev {
-                Some((pm, pc)) => pm + (m - pm) * (half - pc) / (centre - pc),
-                None => m,
-            };
-        }
-        prev = Some((m, centre));
+        acc += m * ((c + w).min(hi) - c.max(lo)).max(0.0);
         c += w;
     }
-    mids[mids.len() - 1].0
+    if hi > lo { acc / (hi - lo) } else { mids[0].0 }
 }
+
+/// Central mass fraction [`weighted_median`] averages over.
+pub const MEDIAN_BAND: f64 = 0.2;
 
 // ── Throttled TDWAP: weight-vector freeze with change-triggered refresh ─────
 //
@@ -1860,8 +1859,12 @@ mod median_tests {
     fn interpolated_median_is_continuous() {
         let a = weighted_median(&mut [(1.0, 0.5), (1.0002, 0.5)]);
         let b = weighted_median(&mut [(1.0, 0.51), (1.0002, 0.49)]);
-        assert!((a - b).abs() < 0.1e-4, "{a} {b}");
+        assert!((a - b).abs() <= 0.0002 * 0.01 / MEDIAN_BAND + 1e-12, "{a} {b}");
         assert_eq!(weighted_median(&mut [(1.0, 1.0)]), 1.0);
+        // A leg whose share fades to 0 leaves the level where it was.
+        let base = weighted_median(&mut [(1.0, 0.45), (1.0018, 0.55)]);
+        let fade = weighted_median(&mut [(1.0, 0.45), (1.0018, 1e-9), (1.0018, 0.55)]);
+        assert!((base - fade).abs() < 1e-9, "{base} {fade}");
     }
 }
 
@@ -3020,12 +3023,12 @@ mod tests {
         };
         let m = mid(&[leg(0.97, 9.0, 0), leg(1.0, 1.0, 10_500)]);
         assert!((m - 0.97).abs() < 1e-4 * 0.97, "dead leg pulled the mid to {m}");
-        // Nothing fresh: unchanged blend of the stale legs (main: 0.973).
+        // Nothing fresh: unchanged blend of the stale legs (median of a 0.9 / 0.1 split).
         let all = mid(&[leg(0.97, 9.0, 10_500), leg(1.0, 1.0, 10_500)]);
-        assert!((all - 0.973).abs() < 1e-9, "all-stale moved to {all}");
+        assert!((all - 0.97).abs() < 1e-9, "all-stale moved to {all}");
         // Two fresh legs: unchanged.
         let two = mid(&[leg(0.97, 9.0, 0), leg(1.0, 1.0, 0)]);
-        assert!((two - 0.973).abs() < 1e-9, "two fresh moved to {two}");
+        assert!((two - 0.97).abs() < 1e-9, "two fresh moved to {two}");
         // Fading 5..10.5 s (mean kernel): linear taper, <= 0.04% per 50 ms of a 2.8% swing; the old jump was the whole swing.
         let mut prev = f64::INFINITY;
         for ms in (5_000..=10_500).step_by(50) {

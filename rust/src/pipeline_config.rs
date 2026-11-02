@@ -1461,6 +1461,10 @@ pub struct BasisGateYml {
     /// Band (bp) per canonical symbol, winning over the class band.
     #[serde(default)]
     pub overrides_bps: BTreeMap<String, f64>,
+    /// Asset classes whose validated challenger legs are evaluated and metered but
+    /// NOT pooled (shadow). Absent/empty = every validated leg pools.
+    #[serde(default)]
+    pub shadow_classes: Vec<String>,
 }
 
 impl BasisGateYml {
@@ -1479,6 +1483,15 @@ impl BasisGateYml {
         );
         let classes: std::collections::BTreeSet<String> =
             (0..16u8).map(|i| format!("{:?}", AssetClass::from_id(i))).collect();
+        for n in providers.keys() {
+            anyhow::ensure!(
+                crate::get_market_provider_id_by_name(n).is_some(),
+                "ctrader.providers.{n} is not a registered provider"
+            );
+        }
+        for k in &self.shadow_classes {
+            anyhow::ensure!(classes.contains(k), "ctrader.basis_gate.shadow_classes: unknown class {k:?}");
+        }
         for (k, v) in &self.bands_bps {
             anyhow::ensure!(classes.contains(k), "ctrader.basis_gate.bands_bps: unknown class {k:?}");
             anyhow::ensure!(v.is_finite() && *v > 0.0, "ctrader.basis_gate.bands_bps.{k} must be > 0");
@@ -3759,6 +3772,10 @@ lane_map:
         };
         let d = ct(&format!("{base}{{incumbent: pepperstone}}")).basis_gate.unwrap();
         assert_eq!(d.minutes, 5);
+        assert!(d.shadow_classes.is_empty());
+        assert!(ok("{incumbent: pepperstone, shadow_classes: [IP]}").is_ok());
+        let c = ct("providers: {pepperstone: {}, nobroker: {}}\nbasis_gate: {incumbent: pepperstone}");
+        assert!(c.basis_gate.unwrap().validate(&c.providers).is_err(), "unregistered challenger");
         assert!(ok("{incumbent: pepperstone, bands_bps: {FX: 3, IP: 10}, overrides_bps: {WTI/USD: 8}}").is_ok());
         for bad in [
             "{incumbent: pepperstone, minutes: 0}",
@@ -3768,6 +3785,7 @@ lane_map:
             "{incumbent: pepperstone, bands_bps: {ZZ: 3}}",
             "{incumbent: pepperstone, overrides_bps: {WTI/USD: 0}}",
             "{incumbent: pepperstone, overrides_bps: {NOPE/NOPE: 5}}",
+            "{incumbent: pepperstone, shadow_classes: [ZZ]}",
         ] {
             assert!(ok(bad).is_err(), "{bad}");
         }

@@ -1108,6 +1108,9 @@ where
 pub fn weighted_median(mids: &mut [(f64, f64)]) -> f64 {
     mids.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let total = mids.iter().map(|m| m.1).sum::<f64>();
+    if !(total.is_finite() && total > 0.0) {
+        return mids[mids.len() / 2].0;
+    }
     let (lo, hi) = (total * (0.5 - MEDIAN_BAND / 2.0), total * (0.5 + MEDIAN_BAND / 2.0));
     let (mut c, mut acc) = (0.0f64, 0.0f64);
     for &(m, w) in mids.iter() {
@@ -1868,6 +1871,13 @@ mod median_tests {
         let base = weighted_median(&mut [(1.0, 0.3), (1.0005, 0.3), (1.0018, 0.39)]);
         let fade = weighted_median(&mut [(1.0, 0.3), (1.0005, 0.3), (1.0012, 1e-9), (1.0018, 0.39)]);
         assert!((base - fade).abs() < 1e-9, "{base} {fade}");
+    }
+
+    /// No usable shares (all 0, or non-finite): the plain middle leg, never NaN.
+    #[test]
+    fn a_median_without_usable_shares_is_the_middle_leg() {
+        assert_eq!(weighted_median(&mut [(1.0002, 0.0), (1.0, 0.0), (1.0001, 0.0)]), 1.0001);
+        assert_eq!(weighted_median(&mut [(1.0, f64::NAN), (1.0001, 1.0)]), 1.0001);
     }
 
     /// A heavy leg at a deviating end: under 40% of the mass it cannot move the

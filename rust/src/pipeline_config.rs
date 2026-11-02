@@ -1412,6 +1412,34 @@ pub struct CtraderYml {
     /// Basis gate for the later brokers against the incumbent. Absent = off.
     #[serde(default)]
     pub basis_gate: Option<BasisGateYml>,
+    /// Class default base weight of a broker leg (no volume to survey). Absent =
+    /// the non-CEX default; see core `weights::resolve`.
+    #[serde(default)]
+    pub prior_weight: Option<f64>,
+}
+
+/// Ceiling on a configured `prior_weight`; core `weights` clamps runtime weights to the same.
+pub const PRIOR_WEIGHT_MAX: f64 = 100.0;
+
+impl CtraderYml {
+    /// Base weight prior of provider `name`: its own, else the class default.
+    pub fn prior_weight_of(&self, name: &str) -> Option<f64> {
+        self.providers.get(name).and_then(|p| p.prior_weight).or(self.prior_weight)
+    }
+
+    /// Every configured prior is finite, > 0 and <= [`PRIOR_WEIGHT_MAX`].
+    pub fn validate_priors(&self) -> anyhow::Result<()> {
+        let own = self.providers.iter().map(|(k, p)| (k.as_str(), p.prior_weight));
+        for (k, w) in std::iter::once(("ctrader", self.prior_weight)).chain(own) {
+            if let Some(w) = w {
+                anyhow::ensure!(
+                    w.is_finite() && w > 0.0 && w <= PRIOR_WEIGHT_MAX,
+                    "{k}.prior_weight must be in (0, {PRIOR_WEIGHT_MAX}]"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `ctrader.basis_gate:` - a broker leg whose per-minute mean basis against the
@@ -1511,6 +1539,9 @@ pub struct CtraderProviderYml {
     /// cTrader UI). Selects one `ctidTraderAccountId` out of the token grant.
     #[serde(default)]
     pub trader_login: i64,
+    /// Base weight prior of this broker; wins over `ctrader.prior_weight`.
+    #[serde(default)]
+    pub prior_weight: Option<f64>,
 }
 
 /// One broker-side symbol name, or the spellings to try for it.
@@ -1719,6 +1750,7 @@ impl PipelineYml {
         if let Some(g) = &parsed.ctrader.basis_gate {
             g.validate(&parsed.ctrader.providers)?;
         }
+        parsed.ctrader.validate_priors()?;
         if parsed.oracles.public_api.enabled {
             parsed.oracles.public_api.origin_host()?;
             for symbol in &parsed.oracles.public_api.symbols {
@@ -3740,6 +3772,21 @@ lane_map:
             assert!(ok(bad).is_err(), "{bad}");
         }
         assert!(serde_yml::from_str::<CtraderYml>(&format!("{base}{{incumbent: pepperstone, band_bps: {{}}}}")).is_err());
+    }
+
+    #[test]
+    fn ctrader_prior_weight_resolution_and_validation() {
+        let ct = |y: &str| serde_yml::from_str::<CtraderYml>(y).unwrap();
+        let c = ct("providers: {pepperstone: {}, icmarkets: {prior_weight: 2.0}}");
+        assert_eq!(c.prior_weight_of("pepperstone"), None, "absent = unchanged");
+        let c = ct("prior_weight: 4.0\nproviders: {pepperstone: {}, icmarkets: {prior_weight: 2.0}}");
+        assert_eq!(c.prior_weight_of("pepperstone"), Some(4.0));
+        assert_eq!(c.prior_weight_of("icmarkets"), Some(2.0), "per-provider wins");
+        assert!(c.validate_priors().is_ok());
+        for bad in ["prior_weight: 0", "prior_weight: -1", "prior_weight: 101", "prior_weight: .nan",
+            "providers: {x: {prior_weight: 0}}", "providers: {x: {prior_weight: 1e9}}"] {
+            assert!(ct(bad).validate_priors().is_err(), "{bad}");
+        }
     }
 
 }

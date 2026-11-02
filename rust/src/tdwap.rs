@@ -1095,13 +1095,16 @@ where
 }
 
 /// Share-weighted median of `(mid, share)`, `shares > 0`, non-empty: the mean
-/// of the share quantile over the central [`MEDIAN_BAND`] of the mass.
+/// of the share quantile over the central [`MEDIAN_BAND`] of the mass. One leg at
+/// an end holding `s` of the mass enters it only past 40%, and moves the level by
+/// at most `(s − 0.4) / 0.2` of its own deviation (half of it at `s` = 0.5).
 ///
 /// Continuous in prices and in shares, a share reaching 0 included: a plain
 /// lower median steps a whole venue gap when the half-mass point crosses a leg
 /// boundary, and interpolating between leg mass centres stepped it when a leg's
 /// share faded to 0 (the vanishing leg still placed a knot; USDT/USD 15 bp,
-/// 2026-10-25 replay). A 1% share shift moves it at most 5% of a gap.
+/// 2026-10-25 replay). At the full band, a 1% share shift moves it at most 5%
+/// of a gap.
 pub fn weighted_median(mids: &mut [(f64, f64)]) -> f64 {
     mids.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let total = mids.iter().map(|m| m.1).sum::<f64>();
@@ -1111,7 +1114,7 @@ pub fn weighted_median(mids: &mut [(f64, f64)]) -> f64 {
         acc += m * ((c + w).min(hi) - c.max(lo)).max(0.0);
         c += w;
     }
-    if hi > lo { acc / (hi - lo) } else { mids[0].0 }
+    acc / (hi - lo)
 }
 
 /// Central mass fraction [`weighted_median`] averages over.
@@ -1862,9 +1865,19 @@ mod median_tests {
         assert!((a - b).abs() <= 0.0002 * 0.01 / MEDIAN_BAND + 1e-12, "{a} {b}");
         assert_eq!(weighted_median(&mut [(1.0, 1.0)]), 1.0);
         // A leg whose share fades to 0 leaves the level where it was.
-        let base = weighted_median(&mut [(1.0, 0.45), (1.0018, 0.55)]);
-        let fade = weighted_median(&mut [(1.0, 0.45), (1.0018, 1e-9), (1.0018, 0.55)]);
+        let base = weighted_median(&mut [(1.0, 0.3), (1.0005, 0.3), (1.0018, 0.39)]);
+        let fade = weighted_median(&mut [(1.0, 0.3), (1.0005, 0.3), (1.0012, 1e-9), (1.0018, 0.39)]);
         assert!((base - fade).abs() < 1e-9, "{base} {fade}");
+    }
+
+    /// A heavy leg at a deviating end: under 40% of the mass it cannot move the
+    /// level at all; at 45% it moves it at most a quarter of its deviation.
+    #[test]
+    fn a_heavy_deviating_leg_is_bounded() {
+        let m = weighted_median(&mut [(1.0, 0.31), (1.0001, 0.3), (1.01, 0.39)]);
+        assert!((m - 1.0001).abs() < 1e-12, "a 39% leg: {m}");
+        let m = weighted_median(&mut [(1.0, 0.3), (1.0001, 0.25), (1.01, 0.45)]);
+        assert!(m - 1.0001 <= 0.25 * (1.01 - 1.0001) + 1e-12, "a 45% leg: {m}");
     }
 }
 

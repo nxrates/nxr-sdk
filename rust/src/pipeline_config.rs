@@ -1409,6 +1409,61 @@ pub struct CtraderYml {
     pub aggregation_interval_ms: Option<u64>,
     #[serde(default)]
     pub providers: BTreeMap<String, CtraderProviderYml>,
+    /// Basis gate for the later brokers against the incumbent. Absent = off.
+    #[serde(default)]
+    pub basis_gate: Option<BasisGateYml>,
+}
+
+/// `ctrader.basis_gate:` - a broker leg whose per-minute mean basis against the
+/// incumbent's mid sits beyond its class band for `minutes` consecutive
+/// minutes is not pooled (core `basis_gate`). Every `ctrader.providers` entry
+/// but `incumbent` is gated.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BasisGateYml {
+    /// Provider name (`ctrader.providers` key) whose mid is the reference.
+    pub incumbent: String,
+    /// Consecutive breaching minutes to exclude; as many in-hysteresis minutes to re-admit.
+    #[serde(default = "BasisGateYml::default_minutes")]
+    pub minutes: u32,
+    /// Band (bp) per mitch asset-class alias of the ticker's base (FX, CM, IP, EQ...).
+    /// A class without an entry is not gated.
+    #[serde(default)]
+    pub bands_bps: BTreeMap<String, f64>,
+    /// Band (bp) per canonical symbol, winning over the class band.
+    #[serde(default)]
+    pub overrides_bps: BTreeMap<String, f64>,
+}
+
+impl BasisGateYml {
+    fn default_minutes() -> u32 {
+        5
+    }
+
+    pub fn validate(&self, providers: &BTreeMap<String, CtraderProviderYml>) -> anyhow::Result<()> {
+        use mitch::common::AssetClass;
+        anyhow::ensure!(self.minutes > 0, "ctrader.basis_gate.minutes must be > 0");
+        anyhow::ensure!(
+            providers.contains_key(&self.incumbent)
+                && crate::get_market_provider_id_by_name(&self.incumbent).is_some(),
+            "ctrader.basis_gate.incumbent {:?} is not a configured, registered provider",
+            self.incumbent
+        );
+        let classes: std::collections::BTreeSet<String> =
+            (0..16u8).map(|i| format!("{:?}", AssetClass::from_id(i))).collect();
+        for (k, v) in &self.bands_bps {
+            anyhow::ensure!(classes.contains(k), "ctrader.basis_gate.bands_bps: unknown class {k:?}");
+            anyhow::ensure!(v.is_finite() && *v > 0.0, "ctrader.basis_gate.bands_bps.{k} must be > 0");
+        }
+        for (k, v) in &self.overrides_bps {
+            anyhow::ensure!(
+                crate::try_resolve_ticker_id(k).is_some(),
+                "ctrader.basis_gate.overrides_bps: unresolvable symbol {k:?}"
+            );
+            anyhow::ensure!(v.is_finite() && *v > 0.0, "ctrader.basis_gate.overrides_bps.{k} must be > 0");
+        }
+        Ok(())
+    }
 }
 
 /// `ctrader.providers.<name>:` — one broker session + its symbol manifest.
@@ -1661,6 +1716,9 @@ impl PipelineYml {
             "cexs.assets {clashes:?} resolve outside CR: add them to sdk/rust/data/class-pins.csv"
         );
         parsed.oracles.z_gate.validate()?;
+        if let Some(g) = &parsed.ctrader.basis_gate {
+            g.validate(&parsed.ctrader.providers)?;
+        }
         if parsed.oracles.public_api.enabled {
             parsed.oracles.public_api.origin_host()?;
             for symbol in &parsed.oracles.public_api.symbols {
@@ -3656,6 +3714,32 @@ lane_map:
             .is_err(),
             "deny_unknown_fields must catch a typo'd lane key"
         );
+    }
+
+    #[test]
+    fn ctrader_basis_gate_defaults_and_validation() {
+        let ct = |y: &str| serde_yml::from_str::<CtraderYml>(y).unwrap();
+        assert!(ct("providers: {}").basis_gate.is_none(), "absent = off, consumers unchanged");
+        let base = "providers: {pepperstone: {}, icmarkets: {}}\nbasis_gate: ";
+        let ok = |g: &str| {
+            let c = ct(&format!("{base}{g}"));
+            c.basis_gate.as_ref().unwrap().validate(&c.providers)
+        };
+        let d = ct(&format!("{base}{{incumbent: pepperstone}}")).basis_gate.unwrap();
+        assert_eq!(d.minutes, 5);
+        assert!(ok("{incumbent: pepperstone, bands_bps: {FX: 3, IP: 10}, overrides_bps: {WTI/USD: 8}}").is_ok());
+        for bad in [
+            "{incumbent: pepperstone, minutes: 0}",
+            "{incumbent: nobody}",
+            "{incumbent: pepperstone, bands_bps: {FX: 0}}",
+            "{incumbent: pepperstone, bands_bps: {FX: -3}}",
+            "{incumbent: pepperstone, bands_bps: {ZZ: 3}}",
+            "{incumbent: pepperstone, overrides_bps: {WTI/USD: 0}}",
+            "{incumbent: pepperstone, overrides_bps: {NOPE/NOPE: 5}}",
+        ] {
+            assert!(ok(bad).is_err(), "{bad}");
+        }
+        assert!(serde_yml::from_str::<CtraderYml>(&format!("{base}{{incumbent: pepperstone, band_bps: {{}}}}")).is_err());
     }
 
 }

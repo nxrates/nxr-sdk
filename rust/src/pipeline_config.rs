@@ -2307,6 +2307,14 @@ pub struct StorageYml {
     /// instead of following wrapper books alone. Absent class = no bound.
     #[serde(default)]
     pub unanchored_drift_bps: BTreeMap<String, f64>,
+    /// Pegged mark guard: a move past this many bp from the published mid is
+    /// held, ci widened over the gap, until it is confirmed. Absent = 2.
+    #[serde(default)]
+    pub peg_confirm_bps: Option<f64>,
+    /// How long, in ms, a held pegged move must keep its side and half its
+    /// largest excursion before it publishes. Absent = 1500; 0 = no hold.
+    #[serde(default)]
+    pub peg_confirm_ms: Option<f64>,
     /// Weight of a venue's NON-deepest admissible markets in its single leg:
     /// leg weight = deepest + g * sum(others), price = weight-averaged over the
     /// folded markets. Absent or 0 = one market per venue (the deepest), output

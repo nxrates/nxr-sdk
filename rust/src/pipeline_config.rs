@@ -283,6 +283,21 @@ pub struct LaneYml {
     pub exp_bias: i16,
 }
 
+/// [`SignedQuotesYml::cosign_compat`]: the previous image's commitments, accepted until `until_ms`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CosignCompatYml {
+    /// Unix ms after which the bridge is inert.
+    pub until_ms: u64,
+    /// The previous image's wrapped-basis policy hash (hex, as its proposals carry it).
+    pub basis_policy: String,
+    /// Highest feed `idx` the previous catalog carried: its lane-map commitment is recomputed
+    /// over this replica's own feeds up to it.
+    pub legacy_max_idx: u16,
+    /// Domain labels the bridge spans; each must be a wire-2 domain of this config.
+    pub domains: Vec<String>,
+}
+
 /// One allow-listed EIP-712 domain. Signers are CONSUMER AGNOSTIC: the domain
 /// is a per-REQUEST parameter validated against this allow-list, never pod
 /// identity, so one replica set serves every consumer.
@@ -496,6 +511,12 @@ pub struct SignedQuotesYml {
     /// to the exact signer address expected in its response.
     #[serde(default)]
     pub peers: Vec<SignedPeerYml>,
+    /// Rolling-upgrade bridge for the NEW image's CM only (an old image refuses the key): until
+    /// `until_ms` this replica countersigns proposals carrying the previous image's commitments
+    /// and proposes under them, so old and new seats stay one quorum through a seat-by-seat roll.
+    /// Gates peer acceptance only; what is signed is unchanged. Expires on its own.
+    #[serde(default)]
+    pub cosign_compat: Option<CosignCompatYml>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
     /// cosign peers, in the same fan-out. Operator config only, never a peer's
     /// or a request's claim, and never a mark source: a cold FLEET has no warm

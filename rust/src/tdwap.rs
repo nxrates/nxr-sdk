@@ -1123,6 +1123,24 @@ pub fn weighted_median(mids: &mut [(f64, f64)]) -> f64 {
 /// Central mass fraction [`weighted_median`] averages over.
 pub const MEDIAN_BAND: f64 = 0.2;
 
+/// Share-weighted median interpolated between adjacent legs' mass centres
+/// (`C_{i-1} + w_i/2`): the depeg detector's level. [`weighted_median`] would move its
+/// exit verdicts both ways (up to 67 bp on 2-4 groups).
+pub fn interpolated_median(mids: &mut [(f64, f64)]) -> f64 {
+    mids.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let half = 0.5 * mids.iter().map(|m| m.1).sum::<f64>();
+    let (mut c, mut prev) = (0.0f64, None::<(f64, f64)>);
+    for &(m, w) in mids.iter() {
+        let centre = c + 0.5 * w;
+        if centre >= half {
+            return prev.map_or(m, |(pm, pc)| pm + (m - pm) * (half - pc) / (centre - pc));
+        }
+        prev = Some((m, centre));
+        c += w;
+    }
+    mids[mids.len() - 1].0
+}
+
 // ── Throttled TDWAP: weight-vector freeze with change-triggered refresh ─────
 //
 // Problem: on quiet markets where no provider's quote changes between

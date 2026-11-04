@@ -33,6 +33,30 @@
 //! only 300 s pegged / 30 s otherwise past the last price change). Price
 //! change is not liveness; confirmation is.
 //!
+//! **Carried legs.** A frameless forwarder re-send (`shard::FLAG_CARRY`) moves
+//! `live_at` only, whatever the configuration: `last_update` stays the last REAL
+//! frame, so every age reader (kernel, corpse filters, signers, reporting) sees
+//! the true age. From the first carry to the next real frame a leg with a
+//! [`CarryCfg`] is carried: its liveness runs on `live_at` (it fades `stale` after
+//! the carries stop) and its eviction age is `carry.secs`, a hard ceiling. Two
+//! sets of other legs judge it, both limited to legs whose last real frame is newer
+//! than its own and both needing `carry.min_peers` members:
+//!
+//! - EJECTORS: any such leg, carried or dark included. Their base-weighted median is
+//!   the reference (on the long path, only the HOLDERS' median, so a heavy dark leg at the
+//!   old price cannot shield a frozen one); the carried leg keeps full presence within `carry.tol` of it and
+//!   loses it linearly to 0 at `carry.zero`, and stays out until its own next real
+//!   frame.
+//! - HOLDERS: such legs that are not carried and younger than `stale`. Only they
+//!   keep the leg on the long path (flat to 85% of `carry.secs`, then linear to 0,
+//!   with no diffusion growth meanwhile). Without them it is held for the short
+//!   `carry.lone` window only (flat to half of it, then linear to 0), whatever
+//!   window the forwarder carried it for.
+//!
+//! The state outlives the carries, so a leg evicted at the ceiling does not
+//! return when they stop. Without `carry.secs` a carry changes no weight: the leg
+//! ages by diffusion from its real age.
+//!
 //! **Liveness** ([`freshness`]), one test for `n` and `active_count`: 1 inside
 //! half the window, linear to 0 at `min(stale, τ_evict)`; `stale/2` is one
 //! re-affirm interval of a live book.
@@ -68,7 +92,8 @@
 // Time source: `coarsetime::Instant` is `repr(transparent) u64` with
 // `derive(Copy)`, which lets `ProviderEntry` itself be `Copy` on the hot
 // aggregator path. Millisecond resolution is enough for every age here.
-use coarsetime::Duration;
+/// Re-exported with [`Instant`]: a replay or test advances a simulated clock with it.
+pub use coarsetime::Duration;
 /// The clock [`ProviderEntry::last_update`] is stamped in. Re-exported so a
 /// caller outside this crate can carry an observation instant around without a
 /// direct `coarsetime` dependency: `coarse_now` alone is half the API, since a
@@ -82,6 +107,9 @@ use crate::agg::is_valid_tick;
 /// Smoothing factor for the inter-arrival time EMA.
 /// alpha = 0.1 -> converges to true inter-arrival time after ~10 updates.
 const IPI_ALPHA: f64 = 0.1;
+
+/// A carried leg judged against live peers keeps full time factor to this share of its ceiling.
+const CARRY_FLAT: f64 = 0.85;
 
 /// Join ramp length in units of the leg's `ema_ipi_secs`.
 const RAMP_IPI: f64 = 3.0;
@@ -205,10 +233,16 @@ impl Kernel {
         now: Instant,
         s_ref: f64,
         stale: f64,
+        peers: bool,
     ) -> Option<(f64, f64, f64)> {
         let (tau, t_eff, t_evict, var) = self.clocks(e, now, s_ref, stale)?;
         let s = self.spread(e);
-        Some((tau, (1.0 - t_eff / t_evict) / (s * s + var * t_eff + e.resid), t_evict))
+        // A carried leg's time taper is its carry shape; its divergence factor is applied by the caller.
+        let taper = if e.carried() { e.carry.time(t_eff, peers) } else { 1.0 - t_eff / t_evict };
+        // With peers to judge it by, divergence prices a carried leg's staleness: the
+        // diffusion term stays at the leg's cadence instead of growing with its real age.
+        let t_var = if e.carried() && peers { 0.0 } else { t_eff };
+        Some((tau, taper / (s * s + var * t_var + e.resid), t_evict))
     }
 
     /// `(τ, τ_eff, τ_evict, σ²)` of a live leg, the clocks behind [`Self::leg`].
@@ -220,8 +254,9 @@ impl Kernel {
         // backstop comes first. Tapering against the diffusion bound alone let
         // a wide book (whose diffusion age runs past the backstop) leave at
         // full weight, which is exactly the step the taper exists to remove.
-        let t_evict = ((EVICT_SPREADS * s_ref).powi(2) / var)
-            .max(0.5 * stale)
+        let diffusion = ((EVICT_SPREADS * s_ref).powi(2) / var).max(0.5 * stale);
+        // A carried leg's horizon is the carry window, whichever way that moves it.
+        let t_evict = if e.carried() { e.carry.secs.max(0.5 * stale) } else { diffusion }
             .min(self.horizon_secs);
         let t_eff = tau.max(e.ema_ipi_secs.min(0.5 * t_evict));
         (t_eff <= t_evict).then_some((tau, t_eff, t_evict, var))
@@ -509,6 +544,46 @@ pub fn coarse_now_backdated(lateness_ms: u64) -> Instant {
     coarse_now().checked_sub(Duration::from_millis(lateness_ms)).unwrap_or_default()
 }
 
+/// Policy of a carried leg (`shard::FLAG_CARRY`, module header **Carried legs**).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CarryCfg {
+    /// Hard time ceiling in seconds: a carried leg is evicted this long after its last
+    /// real frame. 0 = never carried.
+    pub secs: f64,
+    /// A carried leg keeps full presence while it sits within `tol` (fraction of mid)
+    /// of the live peers' median, and loses it linearly to 0 at `zero`.
+    pub tol: f64,
+    pub zero: f64,
+    /// Divergence may only push a carried leg out when at least this many live peers
+    /// agree on the reference (`reject_min_providers`: the core's own median veto
+    /// needs as many); with fewer, only the time taper applies.
+    pub min_peers: usize,
+    /// Seconds a carried leg may be held when NO reference exists (fewer than `min_peers` newer
+    /// legs), whatever window the forwarder carried it for: the short window. Linear to 0.
+    pub lone: f64,
+}
+
+impl CarryCfg {
+    pub const NONE: Self = Self { secs: 0.0, tol: 0.0, zero: 0.0, min_peers: 0, lone: 0.0 };
+
+    /// Presence factor for a leg `div` (fraction of mid) away from the live peers.
+    #[inline]
+    fn divergence(&self, div: f64) -> f64 {
+        ((self.zero - div) / (self.zero - self.tol).max(f64::MIN_POSITIVE)).clamp(0.0, 1.0)
+    }
+
+    /// Time factor at real age `tau`: flat to 85% of the ceiling then linear to 0 (peers
+    /// to judge by), or flat to half the short `lone` window then linear to 0 at it (nobody to judge by).
+    #[inline]
+    fn time(&self, tau: f64, peers: bool) -> f64 {
+        if peers {
+            ((1.0 - tau / self.secs.max(f64::MIN_POSITIVE)) / (1.0 - CARRY_FLAT)).clamp(0.0, 1.0)
+        } else {
+            (2.0 * (1.0 - tau / self.lone.max(f64::MIN_POSITIVE))).clamp(0.0, 1.0)
+        }
+    }
+}
+
 /// Per-provider, per-ticker leg state.
 ///
 /// Wraps a MITCH `Index` (the provider's latest aggregated quote) with the
@@ -529,6 +604,12 @@ pub struct ProviderEntry {
     /// Last CONFIRMATION: the frame time of the latest admitted frame, a new
     /// price or a re-affirm. The kernel's `τ` runs from here.
     pub last_update: Instant,
+    /// Last LIVENESS proof: `last_update`, or a later frameless carry
+    /// (`shard::FLAG_CARRY`). Never read as an age of the price.
+    pub live_at: Instant,
+    /// Carry policy (all zero = this leg is never carried). Set by the caller from
+    /// `cexs.pegged_carry`.
+    pub carry: CarryCfg,
     /// EMA of inter-arrival time in seconds (alpha = 0.1).
     /// Initialized to 5 s - crypto adapts down quickly, FX stays near actual cadence.
     pub ema_ipi_secs: f64,
@@ -584,6 +665,8 @@ impl ProviderEntry {
             index,
             base_weight,
             last_update: now,
+            live_at: now,
+            carry: CarryCfg::NONE,
             ema_ipi_secs: 5.0,
             injected: false,
             mapped: false,
@@ -609,17 +692,39 @@ impl ProviderEntry {
 
     /// Replace the stored Index and update timing against an explicit clock.
     pub fn update_at(&mut self, index: Index, now: Instant) {
+        // The cadence EMA and the join gap measure CONFIRMATION cadence (real frames and
+        // carries): a quiet pegged book confirmed every 500 ms is not a 48 s leg.
+        let gap = now.duration_since(self.live_at).as_f64();
+        // A carried re-send proves liveness only: the price is as old as its last real frame.
+        if index.flags & crate::shard::FLAG_CARRY != 0 {
+            self.confirm(gap);
+            self.live_at = self.live_at.max(now);
+            return;
+        }
         // `coarsetime::Instant::duration_since` saturates on underflow
         // (uses `u64::saturating_sub` internally), so the previous
         // `saturating_duration_since` → `duration_since` rename is safe.
-        let gap = now.duration_since(self.last_update).as_f64();
         self.last_gap_secs = gap;
-        let ipi = gap.clamp(1e-6, 300.0);
-        self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
+        self.confirm(gap);
         self.last_update = now;
+        self.live_at = now;
         self.index = index;
         // A real provider frame supersedes any earlier injected value.
         self.injected = false;
+    }
+
+    #[inline]
+    fn confirm(&mut self, gap_secs: f64) {
+        self.ema_ipi_secs = IPI_ALPHA * gap_secs.clamp(1e-6, 300.0) + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
+    }
+
+    /// `true` once a frameless carry is newer than the last real frame, for a leg with a
+    /// carry horizon. It stays true until the next real frame, so a leg the horizon
+    /// evicted cannot come back when the carries stop. Without a horizon a carry changes
+    /// no weight: the leg ages by diffusion from its real age.
+    #[inline]
+    pub fn carried(&self) -> bool {
+        self.carry.secs > 0.0 && self.live_at > self.last_update
     }
 
     /// Directly set prices for injection/triangulation.
@@ -637,6 +742,7 @@ impl ProviderEntry {
             .clamp(1e-6, 300.0);
         self.ema_ipi_secs = IPI_ALPHA * ipi + (1.0 - IPI_ALPHA) * self.ema_ipi_secs;
         self.last_update = now;
+        self.live_at = now;
         self.index.bid = bid;
         self.index.ask = ask;
         self.index.vbid = vbid;
@@ -723,8 +829,43 @@ where
     // freshness (reaching 0 no later than eviction) × join ramp: it fades a leg
     // out of `n`, the bloc bound and the excess together. `s_ref²` keeps `w`
     // dimensionless; it cancels in the shares.
+    // A carried leg is judged against every other leg whose LAST REAL FRAME is newer than its own
+    // (carried or not: peers that moved and then went quiet are carried themselves, and still say
+    // where the market went), weighted by base weight. Too few of them = no reference and only the
+    // time taper applies; a reference that exists does not lapse until the leg has a real frame
+    // of its own, so a diverged leg cannot come back when the peers go quiet.
+    let peer_mid = |q: &ProviderEntry, live: bool| -> Option<f64> {
+        let mut mids: Vec<(f64, f64)> = entries
+            .clone()
+            .filter(|e| !e.injected && e.last_update > q.last_update && kernel.age(e, now).is_some())
+            // On the long path only the legs that hold it (live, not carried) set the reference: a
+            // heavier dark or carried leg at the old price must not shield a frozen one.
+            .filter(|e| !live || (!e.carried() && kernel.age(e, now).is_some_and(|t| t <= stale)))
+            .map(|e| (e.index.mid(), e.base_weight.max(f64::MIN_POSITIVE)))
+            .collect();
+        (mids.len() >= q.carry.min_peers.max(1)).then(|| weighted_median(&mut mids))
+    };
+    // Only live legs can HOLD a carried leg on the long path: at least `min_peers` that are not
+    // carried themselves, with a real frame newer than its own and younger than `stale`. Dark or
+    // carried legs may still eject it (the reference above) but never keep it.
+    let holders = |q: &ProviderEntry| {
+        entries
+            .clone()
+            .filter(|e| !e.injected && !e.carried() && e.last_update > q.last_update)
+            .filter(|e| kernel.age(e, now).is_some_and(|t| t <= stale))
+            .count()
+            >= q.carry.min_peers.max(1)
+    };
     let weigh_raw = |e: &ProviderEntry| {
-        kernel.leg(e, now, s_ref, stale).map(|(tau, u, t_evict)| {
+        let (reference, long) = if e.carried() {
+            let long = holders(e);
+            (peer_mid(e, long), long)
+        } else {
+            (None, false)
+        };
+        let div = reference.map_or(1.0, |m| e.carry.divergence((e.index.mid() - m).abs() / m.max(f64::MIN_POSITIVE)));
+        kernel.leg(e, now, s_ref, stale, long).map(|(tau, u, t_evict)| {
+            let u = u * div;
             // A leg that was out (its last gap ran past its own eviction age)
             // re-joins: the ramp runs from the frame that brought it back.
             let joined = if e.last_gap_secs > t_evict {
@@ -736,7 +877,12 @@ where
                 let window = (RAMP_IPI * e.ema_ipi_secs).max(f64::MIN_POSITIVE);
                 (now.duration_since(j).as_f64() / window).clamp(RAMP_MIN, 1.0)
             });
-            let fr = freshness(tau, stale.min(t_evict));
+            // Liveness runs on the last proof of life, the price taper on the real age.
+            let live = if e.carried() { now.duration_since(e.live_at).as_f64() } else { tau };
+            // Presence (weight mass in the median, `n_eff`, the caps) falls with the
+            // carry taper too: a frozen book must not keep full presence for the horizon.
+            let taper = if e.carried() { e.carry.time(tau, long) * div } else { 1.0 };
+            let fr = freshness(live, stale.min(t_evict)) * taper;
             let g = fr * ramp;
             (tau, g, e.base_weight * ramp * s_ref * s_ref * u, fr)
         })
@@ -3373,3 +3519,709 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod carry_tests {
+    use super::*;
+    use crate::shard::{FLAG_CARRY, FLAG_REAFFIRM};
+
+    const STALE: f64 = 2.0;
+
+    fn idx(mid: f64, flags: u8) -> Index {
+        let mut i = Index::new(1, mid - 0.00005, mid + 0.00005, 0, 1_000, 1_000, 1, 1, 1, 0);
+        i.flags = flags;
+        i
+    }
+
+    fn leg(mid: f64, t: Instant) -> ProviderEntry {
+        let mut e = ProviderEntry::new_at(idx(mid, 0), 1.0, t).with_mapped(true);
+        e.ema_ipi_secs = 1.0;
+        e.joined = None;
+        e
+    }
+
+    /// Shares of `[frozen, live]` after `secs` of the frozen leg being carried
+    /// (`carry.secs`) while the live leg prints a real frame every second.
+    fn shares(carry_secs: f64, secs: u64) -> (f64, ProviderEntry) {
+        let t0 = Instant::now();
+        let (mut a, mut b) = (leg(1.0, t0), leg(1.0, t0));
+        a.carry = CarryCfg { secs: carry_secs, tol: 0.00005, zero: 0.0002, min_peers: 1, lone: 5.0 };
+        for t in 1..=secs {
+            let now = t0 + Duration::from_secs(t);
+            b.update_at(idx(1.0, 0), now);
+            a.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+        }
+        let now = t0 + Duration::from_secs(secs);
+        let mut sink = Vec::new();
+        compute_vwap_profiled_into(1, [&a, &b], STALE, Kernel::PEGGED, now, Some(&mut sink)).unwrap();
+        (sink[0].share, a)
+    }
+
+    /// Frozen 60 s replay: the carried leg's share falls monotonically from ~1/2
+    /// to 0 at the carry horizon, and its age is the real-frame age throughout.
+    #[test]
+    fn a_frozen_carried_leg_decays_monotonically_to_the_horizon() {
+        let mut prev = f64::MAX;
+        for t in 1..=60u64 {
+            let (share, a) = shares(60.0, t);
+            assert!(share <= prev + 1e-12, "t {t}: {share} > {prev}");
+            prev = share;
+            let age = Instant::now().duration_since(a.last_update).as_f64();
+            assert!(age >= 0.0 && a.live_at > a.last_update, "t {t}");
+        }
+        assert!(shares(60.0, 1).0 > 0.45);
+        assert!(prev < 1e-6, "zero at the horizon: {prev}");
+    }
+
+    /// Carry frames never refresh `last_update`: the leg's age is the real age.
+    #[test]
+    fn carry_frames_keep_the_real_frame_time() {
+        let t0 = Instant::now();
+        let mut a = leg(1.0, t0);
+        a.carry = CarryCfg { secs: 60.0, tol: 0.00005, zero: 0.0002, min_peers: 1, lone: 5.0 };
+        let t = t0 + Duration::from_secs(30);
+        a.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), t);
+        assert_eq!(a.last_update, t0);
+        assert_eq!(a.live_at, t);
+        assert!(a.carried());
+        // A real frame resets both clocks and ends the carry.
+        a.update_at(idx(1.0, FLAG_REAFFIRM), t);
+        assert_eq!((a.last_update, a.live_at), (t, t));
+        assert!(!a.carried());
+    }
+
+    /// No horizon configured: a carry is liveness only, never a fresh frame.
+    #[test]
+    fn carry_flag_without_a_horizon_never_moves_last_update() {
+        let t0 = Instant::now();
+        let mut a = leg(1.0, t0);
+        let t = t0 + Duration::from_secs(5);
+        a.update_at(idx(1.0, FLAG_CARRY), t);
+        assert_eq!((a.last_update, a.live_at), (t0, t));
+    }
+
+    /// Production stale (10 s): once the carries stop the leg neither returns
+    /// after the horizon evicted it nor jumps back up in weight; its share only falls.
+    #[test]
+    fn a_leg_evicted_at_the_horizon_stays_gone_after_the_carry_stops() {
+        let t0 = Instant::now();
+        let (mut a, mut b) = (leg(1.0, t0), leg(1.0, t0));
+        a.carry = CarryCfg { secs: 60.0, tol: 0.00005, zero: 0.0002, min_peers: 1, lone: 5.0 };
+        let mut prev = f64::MAX;
+        for t in 1..=120u64 {
+            let now = t0 + Duration::from_secs(t);
+            b.update_at(idx(1.0, 0), now);
+            if t <= 40 {
+                a.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now); // carries stop at 40 s
+            }
+            let mut sink = Vec::new();
+            compute_vwap_profiled_into(1, [&a, &b], 10.0, Kernel::PEGGED, now, Some(&mut sink)).unwrap();
+            let share = sink[0].share;
+            assert!(share <= prev + 1e-12, "t {t}: {share} > {prev}");
+            prev = share;
+            if t >= 60 {
+                assert!(share < 1e-9, "t {t}: back at {share}");
+            }
+        }
+    }
+
+    /// The carried leg's presence falls with its time taper near the ceiling (it feeds
+    /// `n_eff` and the caps), instead of staying at 1.
+    #[test]
+    fn a_carried_legs_presence_decays_with_the_taper() {
+        let t0 = Instant::now();
+        let mut a = leg(1.0, t0);
+        a.carry = CarryCfg { secs: 60.0, tol: 0.00005, zero: 0.0002, min_peers: 1, lone: 5.0 };
+        let now = t0 + Duration::from_secs(54);
+        let b = leg(1.0, now);
+        a.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+        let p = compute_vwap_profiled_into(1, [&a, &b], 10.0, Kernel::PEGGED, now, None).unwrap().1;
+        // Time factor at 54 s of 60 s is 0.4: the carried leg counts for well under a leg.
+        assert!(p.n_eff < 1.95 && p.n_eff > 1.0, "n_eff {}", p.n_eff);
+    }
+
+    /// Frozen carried leg, peers real every second, calm (same price): its share is
+    /// constant across a 45 s silence, so the quiet-but-alive book neither fades nor flaps.
+    #[test]
+    fn a_calm_carried_leg_keeps_its_share_across_a_long_gap() {
+        let t0 = Instant::now();
+        let (mut a, mut b) = (leg(1.0, t0), leg(1.0, t0));
+        a.carry = CarryCfg { secs: 60.0, tol: 0.00005, zero: 0.0002, min_peers: 1, lone: 5.0 };
+        let mut first = None;
+        for t in 1..=45u64 {
+            let now = t0 + Duration::from_secs(t);
+            b.update_at(idx(1.00001, 0), now);
+            a.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+            let mut sink = Vec::new();
+            compute_vwap_profiled_into(1, [&a, &b], 10.0, Kernel::PEGGED, now, Some(&mut sink)).unwrap();
+            let s = *first.get_or_insert(sink[0].share);
+            assert!((sink[0].share - s).abs() < 1e-6, "t {t}: {} vs {s}", sink[0].share);
+        }
+    }
+
+    /// Bias of the mark while one carried leg is frozen at 1.0000 and its three peers jump
+    /// 20 bp at t = 10 s (the pegged band): per initial share, the seconds the mark equals the
+    /// frozen price and the seconds with bias over 10 bp, after the jump.
+    /// `cargo test -p nxr-sdk bias_table -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bias_table() {
+        for (name, w0) in [("USDE 0.69", 0.69), ("USDC bridge 0.87", 0.87)] {
+            let t0 = Instant::now();
+            let mut q = leg(1.0, t0);
+            q.base_weight = w0;
+            q.carry = CFG3;
+            let mut peers: Vec<ProviderEntry> = (0..3).map(|_| leg(1.0, t0)).collect();
+            for p in &mut peers {
+                p.base_weight = (1.0 - w0) / 3.0;
+            }
+            let (mut full, mut over10) = (0u32, 0u32);
+            let mut row = String::new();
+            for t in 1..=40u64 {
+                let now = t0 + Duration::from_secs(t);
+                q.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+                let px = if t >= 10 { 1.002 } else { 1.0 };
+                for p in &mut peers {
+                    p.update_at(idx(px, 0), now);
+                }
+                let mut sink = Vec::new();
+                let legs = [&q, &peers[0], &peers[1], &peers[2]];
+                let m = compute_vwap_profiled_into(1, legs, 10.0, Kernel::PEGGED, now, Some(&mut sink)).unwrap().0;
+                let bias = ((px - (m.bid + m.ask) / 2.0) * 1e4).max(0.0);
+                if t >= 10 && bias > 19.9 { full += 1; }
+                if t >= 10 && bias > 10.0 { over10 += 1; }
+                if [9, 10, 11, 12, 15].contains(&t) {
+                    row += &format!(" t{t}: share {:.2} bias {:.1}bp;", sink[0].share, bias);
+                }
+            }
+            println!("{name}: on-frozen {full}s, >10bp {over10}s |{row}");
+        }
+    }
+
+    const CFG3: CarryCfg = CarryCfg { secs: 60.0, tol: 0.00005, zero: 0.0002, min_peers: 2, lone: 5.0 };
+
+    fn leg_w(mid: f64, t: Instant, w: f64) -> ProviderEntry {
+        let mut e = leg(mid, t);
+        e.base_weight = w;
+        e
+    }
+
+    fn blend(legs: &[&ProviderEntry], now: Instant) -> (f64, Vec<f64>, f64) {
+        let mut sink = Vec::new();
+        let (m, p) = compute_vwap_profiled_into(1, legs.iter().copied(), 10.0, Kernel::PEGGED, now, Some(&mut sink)).unwrap();
+        ((m.bid + m.ask) / 2.0, sink.iter().map(|s| s.share).collect(), p.n_eff)
+    }
+
+    /// One thin live peer is no consensus: it cannot judge (or eject) a big carried leg, which
+    /// is held for the short lone window only. No sudden push-out: its share only falls.
+    #[test]
+    fn a_single_thin_peer_cannot_eject_a_big_carried_leg_but_the_lone_window_applies() {
+        let t0 = Instant::now();
+        let (mut big, mut thin) = (leg_w(1.0, t0, 0.9), leg_w(1.0, t0, 0.1));
+        big.carry = CFG3;
+        let mut prev = f64::MAX;
+        for t in 1..=12u64 {
+            let now = t0 + Duration::from_secs(t);
+            big.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+            thin.update_at(idx(if t >= 5 { 1.0005 } else { 1.0 }, 0), now);
+            let share = blend(&[&big, &thin], now).1[0];
+            assert!(share <= prev + 1e-9, "t {t}: share rose {prev} -> {share}");
+            prev = share;
+            if t >= 5 {
+                assert!(share < 1e-9, "t {t}: held past the lone window: {share}");
+            }
+        }
+    }
+
+    /// Three live peers agreeing do push a diverged carried leg out, and the reference is
+    /// weighted: a thin outlier among them does not move it.
+    #[test]
+    fn a_peer_consensus_pushes_a_diverged_carried_leg_out_and_the_reference_is_weighted() {
+        let t0 = Instant::now();
+        let mut q = leg_w(1.0, t0, 0.6);
+        q.carry = CFG3;
+        let mut peers = [leg_w(1.0, t0, 0.2), leg_w(1.0, t0, 0.15), leg_w(1.0, t0, 0.05)];
+        let now = t0 + Duration::from_secs(5);
+        q.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+        for (p, px) in peers.iter_mut().zip([1.0, 1.0, 1.002]) {
+            p.update_at(idx(px, 0), now);
+        }
+        assert!(blend(&[&q, &peers[0], &peers[1], &peers[2]], now).1[0] > 0.5, "thin outlier is outweighed");
+        for p in &mut peers[..2] {
+            p.update_at(idx(1.002, 0), now);
+        }
+        assert!(blend(&[&q, &peers[0], &peers[1], &peers[2]], now).1[0] < 1e-9, "the peer weight moved");
+    }
+
+    /// Peers drift +2 bp over 10 s and hold: the frozen leg stops pinning the mark quickly.
+    #[test]
+    fn a_slow_depeg_does_not_ride_the_frozen_price() {
+        for w0 in [0.69, 0.87] {
+            let t0 = Instant::now();
+            let mut q = leg_w(1.0, t0, w0);
+            q.carry = CFG3;
+            let mut peers: Vec<_> = (0..3).map(|_| leg_w(1.0, t0, (1.0 - w0) / 3.0)).collect();
+            let (mut over1, mut max_bias) = (0, 0.0f64);
+            for t in 1..=60u64 {
+                let now = t0 + Duration::from_secs(t);
+                q.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+                let px = 1.0 + 0.0002f64.min(0.00002 * t as f64);
+                for p in &mut peers {
+                    p.update_at(idx(px, 0), now);
+                }
+                let bias = (px - blend(&[&q, &peers[0], &peers[1], &peers[2]], now).0) * 1e4;
+                max_bias = max_bias.max(bias);
+                over1 += usize::from(bias > 1.0);
+            }
+            println!("slow depeg w0 {w0}: bias>1bp {over1}s max {max_bias:.2}bp");
+            assert!(over1 <= 8 && max_bias < 2.0, "w0 {w0}: {over1}s over 1 bp, max {max_bias}");
+        }
+    }
+
+    /// A quiet leg confirmed by carries every 500 ms is a 0.5 s cadence leg, not a 48 s one:
+    /// right after each real frame its share does not dip.
+    #[test]
+    fn the_cadence_ema_follows_confirmations_not_real_frames() {
+        let t0 = Instant::now();
+        let (mut a, mut b) = (leg(1.0, t0), leg(1.0, t0));
+        a.carry = CarryCfg { secs: 60.0, tol: 0.00005, zero: 0.0002, min_peers: 1, lone: 5.0 };
+        a.ema_ipi_secs = 48.0;
+        let (mut lo, mut hi) = (1.0f64, 0.0f64);
+        for ms in (0..=200_000u64).step_by(250) {
+            let now = t0 + Duration::from_millis(ms);
+            if ms % 1000 == 0 {
+                b.update_at(idx(1.0, 0), now);
+            }
+            if ms % 48_000 == 0 && ms > 0 {
+                a.update_at(idx(1.0, FLAG_REAFFIRM), now);
+            } else if ms % 1000 == 500 {
+                a.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+            }
+            if ms > 100_000 {
+                let s = blend(&[&a, &b], now).1[0];
+                (lo, hi) = (lo.min(s), hi.max(s));
+            }
+        }
+        assert!(hi - lo < 0.02, "share ranged {lo}..{hi}");
+    }
+
+    /// Quiet night: every leg carried, nobody to judge by. The lone window applies; past it
+    /// nothing is alive (the same as the 5 s carry it replaces).
+    #[test]
+    fn all_legs_carried_are_held_for_the_lone_window_only() {
+        let t0 = Instant::now();
+        let mut ls: Vec<_> = (0..3).map(|_| { let mut e = leg(1.0, t0); e.carry = CFG3; e }).collect();
+        for t in 1..=12u64 {
+            let now = t0 + Duration::from_secs(t);
+            for l in &mut ls {
+                l.update_at(idx(1.0, FLAG_REAFFIRM | FLAG_CARRY), now);
+            }
+            let alive = compute_vwap_profiled_into(1, ls.iter(), 10.0, Kernel::PEGGED, now, None).is_some();
+            assert_eq!(alive, t < 5, "t {t}");
+        }
+    }
+}
+
+/// Ports of the adversarial review hunts N1 to N6 (frozen carried leg against peers that
+/// jump, go quiet, drop out, or confirm slowly).
+#[cfg(test)]
+mod carry_hunts {
+    use super::*;
+    use crate::shard::{FLAG_CARRY, FLAG_REAFFIRM};
+    const C: u8 = FLAG_REAFFIRM | FLAG_CARRY;
+    const CFG: CarryCfg = CarryCfg { secs: 60.0, tol: 0.5e-4, zero: 2e-4, min_peers: 2, lone: 5.0 };
+
+    fn idx(mid: f64, flags: u8) -> Index {
+        let mut i = Index::new(1, mid - 0.00005, mid + 0.00005, 0, 1_000, 1_000, 1, 1, 1, 0);
+        i.flags = flags;
+        i
+    }
+    fn leg(mid: f64, t: Instant, w: f64) -> ProviderEntry {
+        let mut e = ProviderEntry::new_at(idx(mid, 0), w, t).with_mapped(true);
+        e.ema_ipi_secs = 1.0;
+        e.joined = None;
+        e
+    }
+    fn run(legs: &[&ProviderEntry], now: Instant) -> Option<(f64, Vec<f64>)> {
+        let mut sink = Vec::new();
+        let (m, _) = compute_vwap_profiled_into(1, legs.iter().copied(), 10.0, Kernel::PEGGED, now, Some(&mut sink))?;
+        Some(((m.bid + m.ask) / 2.0, sink.iter().map(|s| s.share).collect()))
+    }
+    fn t0() -> Instant {
+        Instant::now() + Duration::from_secs(100)
+    }
+
+    /// Frozen leg + ONE live venue that jumps 20 bp 0.5 s after the leg's last real frame (fewer
+    /// than `min_peers`), carried for `carry_ms`. Returns `(seconds the leg is still in the
+    /// blend, seconds above 10 bp of bias)`.
+    fn two_venue(w0: f64, carry_ms: u64, third_dark: bool) -> (f64, f64) {
+        let t0 = t0();
+        let mut q = leg(1.0, t0, w0);
+        q.carry = CFG;
+        let mut p = leg(1.0, t0, 1.0 - w0);
+        let d = leg(1.0, t0, 0.0001);
+        let (mut last_in, mut o10) = (0.0, 0.0);
+        for ms in (100..=90_000u64).step_by(100) {
+            let now = t0 + Duration::from_millis(ms);
+            let px = if ms >= 500 { 1.002 } else { 1.0 };
+            if ms % 1000 == 0 {
+                p.update_at(idx(px, 0), now);
+            }
+            if ms % 500 == 0 && ms <= carry_ms {
+                q.update_at(idx(1.0, C), now);
+            }
+            let legs: Vec<&ProviderEntry> = if third_dark { vec![&q, &p, &d] } else { vec![&q, &p] };
+            let Some((m, sh)) = run(&legs, now) else { continue };
+            if ms >= 500 {
+                o10 += 0.1 * f64::from(u8::from((px - m) * 1e4 > 10.0));
+                if sh[0] > 1e-9 {
+                    last_in = ms as f64 / 1000.0;
+                }
+            }
+        }
+        (last_in, o10)
+    }
+
+    /// N1: a lone live venue (below `min_peers`, even with a dark third listed) cannot hold a
+    /// frozen leg past the lone window, whatever the forwarder carried it for.
+    #[test]
+    fn n1_a_lone_live_venue_cannot_hold_a_frozen_leg_past_the_lone_window() {
+        for w0 in [0.5, 0.69, 0.87] {
+            // Carries for 5 s, or for the forwarder's full 60 s window (a Bybit-style duplicate
+            // snapshot made it pick the long one): the core holds the leg for the lone window only.
+            for carry_ms in [5_000u64, 60_000] {
+                for dark in [false, true] {
+                    let (last_in, o10) = two_venue(w0, carry_ms, dark);
+                    assert!(last_in <= 5.6 && o10 <= 5.0, "w0 {w0} carry {carry_ms} dark {dark}: in until {last_in}s, >10bp {o10}s");
+                }
+            }
+        }
+    }
+
+    /// N3: peers confirming every `cad` s sit `d` bp from a calm frozen carried leg; the excess
+    /// pull of the mark toward the frozen price stays under half a bp (measured peak 0.32).
+    #[test]
+    fn n3_slow_peers_pull_the_mark_toward_a_calm_carried_leg_by_under_half_a_bp() {
+        for cad in [1u64, 5, 10] {
+            for w0 in [1.0 / 3.0, 0.69] {
+                for d_bp in [0.25, 0.5, 1.0, 1.5] {
+                    let t0 = t0();
+                    let wp = (1.0 - w0) / 2.0;
+                    let mut q = leg(1.0, t0, w0);
+                    q.carry = CFG;
+                    let px = 1.0 + d_bp * 1e-4;
+                    let mut ps = [leg(px, t0, wp), leg(px, t0, wp)];
+                    for p in &mut ps {
+                        p.ema_ipi_secs = cad as f64;
+                    }
+                    for ms in (100..=50_000u64).step_by(100) {
+                        let now = t0 + Duration::from_millis(ms);
+                        if ms % (cad * 1000) == 0 {
+                            for p in &mut ps {
+                                p.update_at(idx(px, 0), now);
+                            }
+                        }
+                        if ms % 500 == 0 {
+                            q.update_at(idx(1.0, C), now);
+                        }
+                        if ms >= 20_000
+                            && let Some((_, sh)) = run(&[&q, &ps[0], &ps[1]], now)
+                        {
+                            // Excess pull toward the frozen price vs. the leg at its base share.
+                            let excess = (sh[0] - w0).max(0.0) * d_bp;
+                            assert!(excess < 0.5, "cad {cad} w0 {w0:.2} d {d_bp}: excess pull {excess} bp at {ms} ms");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// N4: calm carried leg against a 1 s peer sampled every 100 ms: no sawtooth.
+    #[test]
+    fn n4_no_sawtooth_between_peer_frames() {
+        let cfg = CarryCfg { secs: 60.0, tol: 2e-4, zero: 5e-4, min_peers: 1, lone: 5.0 };
+        let t0 = t0();
+        let (mut a, mut b) = (leg(1.0, t0, 1.0), leg(1.0, t0, 1.0));
+        a.carry = cfg;
+        let (mut lo, mut hi) = (1.0f64, 0.0f64);
+        for ms in (100..=40_000u64).step_by(100) {
+            let now = t0 + Duration::from_millis(ms);
+            if ms % 1000 == 0 {
+                b.update_at(idx(1.0, 0), now);
+            }
+            if ms % 500 == 0 {
+                a.update_at(idx(1.0, C), now);
+            }
+            if ms > 5_000 {
+                let s = run(&[&a, &b], now).unwrap().1[0];
+                (lo, hi) = (lo.min(s), hi.max(s));
+            }
+        }
+        assert!(hi - lo < 0.02, "share ranged {lo}..{hi}");
+    }
+
+    /// H1: two live peers jump 20 bp and eject q; one then goes fully dark. q stays out.
+    #[test]
+    fn h1_an_ejected_leg_stays_out_when_a_peer_goes_dark() {
+        for (w0, dark_at) in [(0.87, 10_000u64), (0.69, 10_000), (0.87, 3_000)] {
+            let t0 = t0();
+            let mut q = leg(1.0, t0, w0);
+            q.carry = CFG;
+            let mut p1 = leg(1.0, t0, (1.0 - w0) * 0.6);
+            let mut p2 = leg(1.0, t0, (1.0 - w0) * 0.4);
+            let (mut o10, mut ejected) = (0.0, false);
+            for ms in (100..=60_000u64).step_by(100) {
+                let now = t0 + Duration::from_millis(ms);
+                let px = if ms >= 500 { 1.002 } else { 1.0 };
+                if ms % 1000 == 0 {
+                    p1.update_at(idx(px, 0), now);
+                    if ms <= dark_at {
+                        p2.update_at(idx(px, 0), now);
+                    }
+                }
+                if ms % 500 == 0 {
+                    q.update_at(idx(1.0, C), now);
+                }
+                let Some((m, sh)) = run(&[&q, &p1, &p2], now) else { continue };
+                if ms >= 2_000 {
+                    ejected |= sh[0] < 1e-9;
+                    // Once ejected it stays out, even after p2 is dark and ages past `stale`.
+                    assert!(!ejected || sh[0] < 1e-9, "w0 {w0} dark at {dark_at}: back at {ms} ms ({})", sh[0]);
+                    o10 += 0.1 * f64::from(u8::from((px - m) * 1e4 > 10.0));
+                }
+            }
+            assert!(ejected && o10 <= 1.0, "w0 {w0} dark at {dark_at}: ejected {ejected}, >10bp {o10}s");
+        }
+    }
+
+    /// D1: q frozen and carried; d's last real frame is 200 ms NEWER than q's at the old price,
+    /// then d goes dark (mode 0) or is carried itself (mode 1); one live venue p jumps 20 bp.
+    /// d may eject q but never hold it past `stale`: only p (one live holder) is left, so q is
+    /// not on the long path (54 to 58 s above 10 bp before).
+    #[test]
+    fn d1_a_dark_or_carried_newer_leg_cannot_hold_a_frozen_leg() {
+        for mode in [0u8, 1] {
+            for (w0, wd) in [(0.5, 0.3), (0.69, 0.2), (0.5, 0.1), (0.3, 0.4), (0.87, 0.1)] {
+                let t0 = t0();
+                let mut q = leg(1.0, t0, w0);
+                q.carry = CFG;
+                let mut d = leg(1.0, t0, wd);
+                d.carry = CFG;
+                let mut p = leg(1.0, t0, 1.0 - w0 - wd);
+                let (mut last_in, mut o10) = (0.0, 0.0);
+                for ms in (100..=90_000u64).step_by(100) {
+                    let now = t0 + Duration::from_millis(ms);
+                    let px = if ms >= 500 { 1.002 } else { 1.0 };
+                    if ms == 200 {
+                        d.update_at(idx(1.0, 0), now);
+                    }
+                    if mode == 1 && ms % 500 == 0 && ms > 200 {
+                        d.update_at(idx(1.0, C), now);
+                    }
+                    if ms % 1000 == 0 {
+                        p.update_at(idx(px, 0), now);
+                    }
+                    if ms % 500 == 0 {
+                        q.update_at(idx(1.0, C), now);
+                    }
+                    let Some((m, sh)) = run(&[&q, &d, &p], now) else { continue };
+                    if ms >= 500 {
+                        o10 += 0.1 * f64::from(u8::from((px - m) * 1e4 > 10.0));
+                        if sh[0] > 1e-9 {
+                            last_in = ms as f64 / 1000.0;
+                        }
+                    }
+                }
+                // Dark (mode 0) it still counts as a holder until `stale` (10 s) passes; carried
+                // (mode 1) it never holds: the lone window.
+                let bound = if mode == 0 { 10.3 } else { 5.6 };
+                assert!(last_in <= bound && o10 <= bound, "mode {mode} w0 {w0} wd {wd}: in until {last_in}s, >10bp {o10}s");
+            }
+        }
+    }
+
+    /// N6: peers move 20 bp with real frames, then go quiet at the new level and are carried
+    /// themselves: the frozen old-price leg does not come back (~20 bp bias for 49 to 56 s before).
+    #[test]
+    fn n6_peers_that_move_then_go_quiet_still_eject_the_frozen_leg() {
+        for (w0, quiet_after) in [(0.69, 3_000u64), (0.87, 3_000), (0.87, 8_000)] {
+            let t0 = t0();
+            let mut q = leg(1.0, t0, w0);
+            q.carry = CFG;
+            let mut ps: Vec<_> = (0..3)
+                .map(|_| {
+                    let mut e = leg(1.0, t0, (1.0 - w0) / 3.0);
+                    e.carry = CFG;
+                    e
+                })
+                .collect();
+            let (mut on, mut o10) = (0.0, 0.0);
+            for ms in (100..=60_000u64).step_by(100) {
+                let now = t0 + Duration::from_millis(ms);
+                let px = if ms >= 500 { 1.002 } else { 1.0 };
+                for p in &mut ps {
+                    if ms % 1000 == 0 && ms <= quiet_after {
+                        p.update_at(idx(px, 0), now);
+                    } else if ms % 500 == 0 && ms > quiet_after {
+                        p.update_at(idx(px, C), now);
+                    }
+                }
+                if ms % 500 == 0 {
+                    q.update_at(idx(1.0, C), now);
+                }
+                let Some((m, _)) = run(&[&q, &ps[0], &ps[1], &ps[2]], now) else { break };
+                let b = (px - m) * 1e4;
+                if ms >= 500 {
+                    on += 0.1 * f64::from(u8::from(b > 19.9));
+                    o10 += 0.1 * f64::from(u8::from(b > 10.0));
+                }
+            }
+            assert!(o10 <= 1.0 && on <= 1.0, "w0 {w0} quiet after {quiet_after}: on-frozen {on:.1}s >10bp {o10:.1}s");
+        }
+    }
+
+    /// S1: q carried at the old price; `nd` newer legs (total weight `wd`) print one real frame at
+    /// the old price then go dark (mode 0) or are carried (mode 1); TWO live venues jump 20 bp.
+    /// The live legs hold q and set the reference, so the dark or carried ones cannot shield it
+    /// (59.9 s in, 52 s above 10 bp before).
+    #[test]
+    fn s1_dark_newer_legs_shield_while_live_legs_hold() {
+        for mode in [0u8, 1] {
+            for (w0, wd, nd) in [(0.3, 0.0, 0usize), (0.3, 0.4, 1), (0.3, 0.4, 3), (0.2, 0.5, 2), (0.4, 0.4, 2), (0.5, 0.3, 1)] {
+                let t0 = t0();
+                let mut q = leg(1.0, t0, w0);
+                q.carry = CFG;
+                let mut ds: Vec<ProviderEntry> = (0..nd)
+                    .map(|_| {
+                        let mut d = leg(1.0, t0, wd / nd as f64);
+                        d.carry = CFG;
+                        d
+                    })
+                    .collect();
+                let wl = (1.0 - w0 - wd) / 2.0;
+                let (mut p1, mut p2) = (leg(1.0, t0, wl), leg(1.0, t0, wl));
+                let (mut last_in, mut o10) = (0.0, 0.0);
+                for ms in (100..=90_000u64).step_by(100) {
+                    let now = t0 + Duration::from_millis(ms);
+                    let px = if ms >= 500 { 1.002 } else { 1.0 };
+                    for d in ds.iter_mut() {
+                        if ms == 200 {
+                            d.update_at(idx(1.0, 0), now);
+                        }
+                        if mode == 1 && ms % 500 == 0 && ms > 200 {
+                            d.update_at(idx(1.0, C), now);
+                        }
+                    }
+                    if ms % 1000 == 0 {
+                        p1.update_at(idx(px, 0), now);
+                    }
+                    if ms % 1000 == 300 {
+                        p2.update_at(idx(px, 0), now);
+                    }
+                    if ms % 500 == 0 {
+                        q.update_at(idx(1.0, C), now);
+                    }
+                    let mut all: Vec<&ProviderEntry> = vec![&q, &p1, &p2];
+                    all.extend(ds.iter());
+                    let Some((m, sh)) = run(&all, now) else { continue };
+                    if ms >= 1_500 {
+                        o10 += 0.1 * f64::from(u8::from((px - m) * 1e4 > 10.0));
+                        if sh[0] > 1e-9 {
+                            last_in = ms as f64 / 1000.0;
+                        }
+                    }
+                }
+                // Dark legs still count as peers until `stale` (10 s); carried ones never.
+                let bound = if mode == 0 { 9.0 } else { 0.5 };
+                assert!(o10 <= bound && last_in <= if mode == 0 { 10.3 } else { 5.6 },
+                    "mode {mode} w0 {w0} wd {wd} nd {nd}: in until {last_in}s, >10bp {o10}s");
+            }
+        }
+    }
+
+    /// P1: peers drift away linearly from t = 10 s (2 bp per second of 10): the frozen leg never
+    /// pins the mark more than a bp or two, and the mark never steps more than a bp in a second.
+    #[test]
+    fn p1_linear_drift_never_rides_the_frozen_price() {
+        for w0 in [0.69, 0.87] {
+            let t0 = t0();
+            let mut q = leg(1.0, t0, w0);
+            q.carry = CFG;
+            let mut peers: Vec<_> = (0..3).map(|_| leg(1.0, t0, (1.0 - w0) / 3.0)).collect();
+            let (mut maxb, mut maxstep, mut prev) = (0.0f64, 0.0f64, 1.0f64);
+            for t in 1..=60u64 {
+                let now = t0 + Duration::from_secs(t);
+                q.update_at(idx(1.0, C), now);
+                let px = 1.0 + 0.00002 * (t.saturating_sub(10)) as f64;
+                for p in &mut peers {
+                    p.update_at(idx(px, 0), now);
+                }
+                let (m, _) = run(&[&q, &peers[0], &peers[1], &peers[2]], now).unwrap();
+                maxb = maxb.max((px - m) * 1e4);
+                maxstep = maxstep.max(((m - prev) * 1e4).abs());
+                prev = m;
+            }
+            assert!(maxb < 2.0 && maxstep < 3.0, "w0 {w0}: max bias {maxb} bp, max 1 s step {maxstep} bp");
+        }
+    }
+
+    /// P1c: peers jump 20 bp at t = 10 s: the mark is on the frozen price for at most a second.
+    #[test]
+    fn p1c_a_20bp_jump_leaves_the_frozen_price_at_once() {
+        for w0 in [0.69, 0.87] {
+            let t0 = t0();
+            let mut q = leg(1.0, t0, w0);
+            q.carry = CFG;
+            let mut peers: Vec<_> = (0..3).map(|_| leg(1.0, t0, (1.0 - w0) / 3.0)).collect();
+            let (mut on, mut o10) = (0, 0);
+            for t in 1..=40u64 {
+                let now = t0 + Duration::from_secs(t);
+                q.update_at(idx(1.0, C), now);
+                let px = if t >= 10 { 1.002 } else { 1.0 };
+                for p in &mut peers {
+                    p.update_at(idx(px, 0), now);
+                }
+                let (m, _) = run(&[&q, &peers[0], &peers[1], &peers[2]], now).unwrap();
+                let b = (px - m) * 1e4;
+                on += i32::from(t >= 10 && b > 19.9);
+                o10 += i32::from(t >= 10 && b > 10.0);
+            }
+            assert!(on <= 1 && o10 <= 1, "w0 {w0}: on-frozen {on}s, >10bp {o10}s");
+        }
+    }
+
+    /// S2: a holder confirming around the `stale` edge (p2 every k s) churns the holder count.
+    /// Calm quotes: q never flips out of the blend or moves the mark; 1 bp off: no step above 1 bp.
+    #[test]
+    fn s2_holder_churn_at_the_stale_edge_does_not_flip_a_calm_leg() {
+        for px in [1.0, 1.0001, 1.00015] {
+            for k in [5_000u64, 9_500, 10_000, 10_100, 10_500, 12_000, 20_000] {
+                let t0 = t0();
+                let mut q = leg(1.0, t0, 0.5);
+                q.carry = CFG;
+                let (mut p1, mut p2) = (leg(px, t0, 0.25), leg(px, t0, 0.25));
+                let (mut prev_m, mut maxstep) = (None::<f64>, 0.0f64);
+                for ms in (100..=40_000u64).step_by(100) {
+                    let now = t0 + Duration::from_millis(ms);
+                    if ms % 1000 == 0 {
+                        p1.update_at(idx(px, 0), now);
+                    }
+                    if ms % k == 0 {
+                        p2.update_at(idx(px, 0), now);
+                    }
+                    if ms % 500 == 0 {
+                        q.update_at(idx(1.0, C), now);
+                    }
+                    let Some((m, _)) = run(&[&q, &p1, &p2], now) else { continue };
+                    if let Some(pm) = prev_m {
+                        maxstep = maxstep.max(((m - pm) * 1e4).abs());
+                    }
+                    prev_m = Some(m);
+                }
+                assert!(maxstep < 1.0, "px {px} k {k}: mark stepped {maxstep} bp");
+            }
+        }
+    }
+}
+

@@ -269,6 +269,37 @@ impl std::fmt::Display for RecordFormat {
     }
 }
 
+/// `cexs.pegged_carry`: `lone_ms` for a pair with too few peers for the core's
+/// median to veto a carried frame, `multi_ms` otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeggedCarryYml {
+    pub lone_ms: u64,
+    pub multi_ms: u64,
+    /// A carried leg keeps full presence within `tol_bp` of the live peers' median...
+    pub tol_bp: f64,
+    /// ...and loses it linearly to 0 at `zero_bp`.
+    pub zero_bp: f64,
+}
+
+impl PeggedCarryYml {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.lone_ms > 0 && self.lone_ms <= self.multi_ms,
+            "cexs.pegged_carry needs 0 < lone_ms <= multi_ms, got {} / {}",
+            self.lone_ms,
+            self.multi_ms
+        );
+        anyhow::ensure!(
+            self.tol_bp.is_finite() && self.tol_bp > 0.0 && self.tol_bp < self.zero_bp && self.zero_bp.is_finite(),
+            "cexs.pegged_carry needs 0 < tol_bp < zero_bp, got {} / {}",
+            self.tol_bp,
+            self.zero_bp
+        );
+        Ok(())
+    }
+}
+
 /// One feed's lane assignment on ONE consumer, the value of a
 /// [`SignedDomainYml::lane_map`] entry. Both fields are REQUIRED: a
 /// half-specified lane is how a feed lands in the wrong slot.
@@ -1787,6 +1818,9 @@ impl PipelineYml {
             "cexs.assets {clashes:?} resolve outside CR: add them to sdk/rust/data/class-pins.csv"
         );
         parsed.oracles.z_gate.validate()?;
+        if let Some(c) = &parsed.cexs.pegged_carry {
+            c.validate()?;
+        }
         if let Some(g) = &parsed.ctrader.basis_gate {
             g.validate(&parsed.ctrader.providers)?;
         }
@@ -2186,6 +2220,11 @@ pub struct CexsYml {
     /// `signed_quotes.single_source` legal on a feed.
     #[serde(default)]
     pub pegged: Vec<String>,
+    /// Frameless carry windows of a quiet pegged book on a live shard socket
+    /// (`nxr-crypto`; core decays the carried leg over `multi_ms`). Absent =
+    /// the 5 s short carry everywhere.
+    #[serde(default)]
+    pub pegged_carry: Option<PeggedCarryYml>,
     /// Tokens pegged to a NON-USD fiat, as `TOKEN: ISO4217`. Deliberately NOT
     /// part of `pegged`, which means USD-pegged specifically and carries an
     /// absolute $1 anchor: EURC trades ~1.14, and its 2026-08-02 membership in
@@ -2892,6 +2931,16 @@ mod tests {
     }
 
     /// Raw serde bypasses `validate`; `PipelineYml::load` is the production path.
+    #[test]
+    fn pegged_carry_needs_positive_ordered_windows() {
+        let ok = |lone_ms, multi_ms| PeggedCarryYml { lone_ms, multi_ms, tol_bp: 1.5, zero_bp: 5.0 }.validate().is_ok();
+        assert!(ok(5_000, 60_000) && ok(5_000, 5_000));
+        assert!(!ok(0, 60_000) && !ok(9, 5));
+        let bp = |tol_bp, zero_bp| PeggedCarryYml { lone_ms: 1, multi_ms: 2, tol_bp, zero_bp }.validate().is_ok();
+        assert!(bp(1.5, 5.0) && !bp(0.0, 5.0) && !bp(5.0, 5.0) && !bp(1.0, f64::NAN));
+        assert!(serde_yml::from_str::<PeggedCarryYml>("{lone_ms: 1}").is_err());
+    }
+
     #[test]
     fn load_rejects_a_bad_z_gate() {
         let Ok(base) = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.yml")) else {

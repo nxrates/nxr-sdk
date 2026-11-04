@@ -159,6 +159,9 @@ pub struct TickAccumulator {
     /// Every tick this window was a [`Self::reaffirm`]: flushed as
     /// [`crate::shard::FLAG_REAFFIRM`].
     acc_reaffirm_only: bool,
+    /// Every tick this window was a [`Self::carry`]: flushed with
+    /// [`crate::shard::FLAG_CARRY`] too.
+    acc_carry_only: bool,
 }
 
 impl TickAccumulator {
@@ -172,6 +175,7 @@ impl TickAccumulator {
             acc_count: 0,
             acc_rejected: 0,
             acc_reaffirm_only: true,
+            acc_carry_only: true,
         }
     }
 
@@ -200,6 +204,7 @@ impl TickAccumulator {
         self.acc_ask_vol += vask as u64;
         self.acc_count += 1;
         self.acc_reaffirm_only = false;
+        self.acc_carry_only = false;
     }
 
     /// Buffer an unchanged quote the caller has PROVEN live (venue sequence
@@ -210,6 +215,17 @@ impl TickAccumulator {
         let only = self.acc_reaffirm_only;
         self.ingest(bid, ask, vbid, vask);
         self.acc_reaffirm_only = only;
+    }
+
+    /// Buffer the last quote re-sent WITHOUT a venue frame (socket alive, book
+    /// quiet). Flushes as `FLAG_REAFFIRM | FLAG_CARRY` when the window holds only
+    /// these; any real tick or proven [`Self::reaffirm`] in the window clears the
+    /// carry bit.
+    #[inline]
+    pub fn carry(&mut self, bid: f64, ask: f64, vbid: u32, vask: u32) {
+        let (re, ca) = (self.acc_reaffirm_only, self.acc_carry_only);
+        self.ingest(bid, ask, vbid, vask);
+        (self.acc_reaffirm_only, self.acc_carry_only) = (re, ca);
     }
 
     /// Record that a raw tick was dropped by the caller's pre-filter
@@ -231,10 +247,10 @@ impl TickAccumulator {
             self.acc_rejected = 0;
             return None;
         }
-        let flags = if self.acc_reaffirm_only {
-            crate::shard::FLAG_REAFFIRM
-        } else {
-            0
+        let flags = match (self.acc_reaffirm_only, self.acc_carry_only) {
+            (true, true) => crate::shard::FLAG_REAFFIRM | crate::shard::FLAG_CARRY,
+            (true, false) => crate::shard::FLAG_REAFFIRM,
+            _ => 0,
         };
         let rejected = self.acc_rejected.min(u8::MAX as u32) as u8;
         let index = Index {
@@ -255,6 +271,7 @@ impl TickAccumulator {
         self.acc_count = 0;
         self.acc_rejected = 0;
         self.acc_reaffirm_only = true;
+        self.acc_carry_only = true;
         Some(index)
     }
 }
@@ -262,7 +279,7 @@ impl TickAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shard::FLAG_REAFFIRM;
+    use crate::shard::{FLAG_CARRY, FLAG_REAFFIRM};
 
     #[test]
     fn locked_book_is_not_a_book() {
@@ -270,6 +287,21 @@ mod tests {
         assert!(!is_valid_book(1.0, 1.0), "locked");
         assert!(!is_valid_book(1.0, 0.9), "crossed");
         assert!(is_valid_tick(1.0, 1.0), "a trades-only tick stays valid");
+    }
+
+    #[test]
+    fn a_window_of_only_carries_flushes_carry_flagged() {
+        let mut acc = TickAccumulator::new(7);
+        acc.carry(1.0, 1.0001, 5, 5);
+        assert_eq!(acc.flush().unwrap().flags, FLAG_REAFFIRM | FLAG_CARRY);
+        acc.carry(1.0, 1.0001, 5, 5);
+        acc.reaffirm(1.0, 1.0001, 5, 5);
+        assert_eq!(acc.flush().unwrap().flags, FLAG_REAFFIRM, "a proven re-affirm clears the carry bit");
+        acc.carry(1.0, 1.0001, 5, 5);
+        acc.ingest(1.0, 1.0002, 5, 5);
+        assert_eq!(acc.flush().unwrap().flags, 0);
+        acc.carry(1.0, 1.0001, 5, 5);
+        assert_eq!(acc.flush().unwrap().flags, FLAG_REAFFIRM | FLAG_CARRY, "flush resets the window");
     }
 
     #[test]

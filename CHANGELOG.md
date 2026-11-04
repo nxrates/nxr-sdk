@@ -6,6 +6,14 @@ end of fixed-width structs. REST surface follows the same additive rule.
 
 ## Unreleased
 
+- **Carried legs (Rust, 0.4.0).** `shard::FLAG_CARRY` (`Index.flags` bit 4, forwarder to
+  core, always with `FLAG_REAFFIRM`) marks a frameless re-send of a quiet pegged book on a
+  live socket. `ProviderEntry` gains `live_at` and `carry: CarryCfg` (ceiling plus divergence tolerances) and `carried()`;
+  a carry moves `live_at` only, so `last_update` stays the last real frame for every age
+  reader. A carried leg keeps its presence while it sits within `tol` of the base-weighted median of the legs with a newer real frame (at least `min_peers` of them, carried or not) and loses it by `zero`, staying out until its next real frame. Only non-carried legs younger than `stale` can hold it past the short `lone` window; dark or carried legs can eject it but never hold it. Time only caps it. The cadence EMA now measures confirmations (real frames and carries).
+  `TickAccumulator::carry`, `PeggedCarryYml` / `cexs.pegged_carry`, and `tdwap::Duration`
+  are new public items. Struct literals of `ProviderEntry` must add the `live_at` and `carry` fields.
+
 ⚠ **BREAKING: `/v1/tickers/detail` no longer serves the whole universe.** The
 unparameterised JSON body used to be the full DERIVED universe (156,656 rows,
 ~32 MB). That shape is REMOVED, not moved behind a flag: 32 MB per call should

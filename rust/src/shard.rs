@@ -76,6 +76,16 @@ pub const FLAG_RENKO_SYNTHETIC_BRICK: u8 = 0b0000_0100;
 /// `FLAG_RENKO_SYNTHETIC_BRICK` in the *Bar* space, which never sees it.
 pub const FLAG_REAFFIRM: u8 = 0b0000_0100;
 
+/// `Index.flags` bit 4 (INDEX flag space, FORWARDER -> CORE WIRE ONLY, always
+/// sent WITH [`FLAG_REAFFIRM`]): the forwarder re-sent the last quote WITHOUT a
+/// venue frame, because the socket is alive but the book went quiet (venues push
+/// on change). It refreshes the leg's liveness only; `ProviderEntry::last_update`
+/// stays the last real frame, so every age reader sees the true age and the leg's
+/// weight decays over its carry horizon (`tdwap` module header, **Carried legs**).
+/// Like `FLAG_REAFFIRM` it lives only in provider state and never reaches a
+/// composite, where bit 4 is [`FLAG_IDX_HEALED`].
+pub const FLAG_CARRY: u8 = 0b0001_0000;
+
 /// `Index.flags` bit 3: LEGACY (pre-2026-07-25 cutover) — this INDEX record's
 /// `confidence` byte (Index body offset 36) carries a continuous freshness
 /// FRACTION (`f = byte / 255 ∈ [0,1]`, ~1 when all providers fresh) rather than

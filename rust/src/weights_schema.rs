@@ -85,6 +85,10 @@ pub struct WeightsFile {
     /// cmc_slug -> { mitch_id, name, weight }
     #[serde(default)]
     pub exchanges: BTreeMap<String, ExchangeMeta>,
+    /// DEX pools: `chain:dex:pool` -> { "USDE/USDC": volume_usd }. Kept apart from
+    /// `pair_volumes`/`asset_markets` (CEX only) until a pool has its own provider id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pool_volumes: BTreeMap<String, BTreeMap<String, f64>>,
     /// Per-CR-asset market ranking derived from `pair_volumes`. FACTS only: the
     /// conversion belongs to core, which has the bridges and the liveness view.
     #[serde(default)]

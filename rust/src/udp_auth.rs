@@ -4,6 +4,12 @@
 //! payload | HMAC-SHA256`. All integers are big-endian. The HMAC covers the
 //! entire header and payload. Inner MITCH bytes are not decoded until the tag
 //! has verified.
+//!
+//! Version 1 carries one 56 B Index or 32 B heartbeat. Version 2 carries 2 to
+//! [`MAX_PACKED_FRAMES`] whole 56 B Index frames back to back, each with its own
+//! MITCH header; `source_ms` is the OLDEST frame's, so the freshness gate covers
+//! all of them. A v1-only verifier refuses v2 as an unsupported version, so a
+//! sender packs only to receivers declared able to read it.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -18,11 +24,16 @@ use crate::pipeline_config::{UdpAuthMode, UdpAuthYml};
 
 pub const MAGIC: &[u8; 4] = b"NXR1";
 pub const VERSION: u8 = 1;
+/// Packed envelope: 2..=MAX_PACKED_FRAMES Index frames.
+pub const VERSION_PACKED: u8 = 2;
 pub const HEADER_LEN: usize = 26;
 pub const TAG_LEN: usize = 32;
-pub const MAX_DATAGRAM_LEN: usize = HEADER_LEN + 56 + TAG_LEN;
+pub const INDEX_LEN: usize = 56;
+/// Index frames per packed datagram: 26 + 20 x 56 + 32 = 1178 B, under a 1200 B
+/// payload so no path MTU (WireGuard 1420, tunnels) fragments it.
+pub const MAX_PACKED_FRAMES: usize = 20;
+pub const MAX_DATAGRAM_LEN: usize = HEADER_LEN + MAX_PACKED_FRAMES * INDEX_LEN + TAG_LEN;
 const KEY_LEN: usize = 32;
-const INDEX_LEN: usize = 56;
 const HEARTBEAT_LEN: usize = 32;
 /// Replay bitmap capacity. The window must exceed `max_age_ms` x peak frame
 /// rate, otherwise a duplicate that is still fresh enough to pass the
@@ -153,12 +164,10 @@ impl UdpAuthSender {
 
     /// Seal into reusable caller storage. This is one local HMAC and has no
     /// network/consensus round trip.
+    /// A payload of 2+ whole Index frames seals as [`VERSION_PACKED`].
     pub fn seal_into(&self, payload: &[u8], source_ts_ms: u64, out: &mut Vec<u8>) -> Result<u64> {
-        ensure!(
-            matches!(payload.len(), INDEX_LEN | HEARTBEAT_LEN),
-            "invalid inner frame length {}",
-            payload.len()
-        );
+        let version = payload_version(payload.len())
+            .with_context(|| format!("invalid inner frame length {}", payload.len()))?;
         // Wrapping is unreachable in practice (2^64 frames at the 70k/s design
         // ceiling is ~8 million years); the old `sequence != u64::MAX` guard
         // tested the value already handed out and so could never prevent it.
@@ -166,7 +175,7 @@ impl UdpAuthSender {
         out.clear();
         out.reserve(HEADER_LEN + payload.len() + TAG_LEN);
         out.extend_from_slice(MAGIC);
-        out.push(VERSION);
+        out.push(version);
         out.push(0);
         out.extend_from_slice(&self.key_id.to_be_bytes());
         out.extend_from_slice(&sequence.to_be_bytes());
@@ -379,7 +388,7 @@ impl UdpAuthVerifier {
         if &datagram[..4] != MAGIC {
             return Err(Malformed("bad UDP auth magic"));
         }
-        if datagram[4] != VERSION {
+        if !matches!(datagram[4], VERSION | VERSION_PACKED) {
             return Err(Malformed("unsupported UDP auth version"));
         }
         if datagram[5] != 0 {
@@ -389,7 +398,7 @@ impl UdpAuthVerifier {
         let sequence = u64::from_be_bytes(datagram[8..16].try_into().unwrap());
         let source_ts_ms = u64::from_be_bytes(datagram[16..24].try_into().unwrap());
         let payload_len = u16::from_be_bytes(datagram[24..26].try_into().unwrap()) as usize;
-        if !matches!(payload_len, INDEX_LEN | HEARTBEAT_LEN) {
+        if payload_version(payload_len) != Some(datagram[4]) {
             return Err(Malformed("invalid authenticated payload length"));
         }
         if datagram.len() != HEADER_LEN + payload_len + TAG_LEN {
@@ -546,6 +555,15 @@ impl UdpAuthVerifier {
                 self.replay.remove(&victim);
             }
         }
+    }
+}
+
+/// Envelope version a payload length seals as; `None` = not a valid payload.
+fn payload_version(len: usize) -> Option<u8> {
+    match len {
+        INDEX_LEN | HEARTBEAT_LEN => Some(VERSION),
+        n if n % INDEX_LEN == 0 && (2..=MAX_PACKED_FRAMES).contains(&(n / INDEX_LEN)) => Some(VERSION_PACKED),
+        _ => None,
     }
 }
 
@@ -910,6 +928,49 @@ mod tests {
             1e9 / seal_ns,
             1e9 / verify_ns,
         );
+    }
+
+    /// Packed v2 round trip, and every malformed packing refused: a v1 header
+    /// over a packed payload, a v2 header over one frame, a partial frame, too
+    /// many frames. A single frame still seals as v1, byte-compatible with
+    /// v1-only receivers.
+    #[test]
+    fn packed_envelope_round_trip_and_bounds() {
+        let key = [6u8; 32];
+        let sender = UdpAuthSender::new(7, key, 0);
+        let mut v = verifier(key);
+        let payload: Vec<u8> = (0..3 * INDEX_LEN).map(|i| i as u8).collect();
+        let mut out = Vec::new();
+        sender.seal_into(&payload, 1_000, &mut out).unwrap();
+        assert_eq!((out[4], out.len()), (VERSION_PACKED, HEADER_LEN + 3 * INDEX_LEN + TAG_LEN));
+        let f = v.verify(&out, PEER, 1_001).unwrap();
+        assert_eq!((f.payload, f.source_ts_ms), (&payload[..], 1_000));
+        sender.seal_into(&[1u8; INDEX_LEN], 1_000, &mut out).unwrap();
+        assert_eq!(out[4], VERSION, "one frame stays v1");
+        assert!(v.verify(&out, PEER, 1_001).is_ok());
+        let full = vec![0u8; MAX_PACKED_FRAMES * INDEX_LEN];
+        sender.seal_into(&full, 1_000, &mut out).unwrap();
+        assert_eq!(out.len(), MAX_DATAGRAM_LEN);
+        assert!(MAX_DATAGRAM_LEN <= 1200);
+        assert!(v.verify(&out, PEER, 1_001).is_ok());
+        for bad in [INDEX_LEN + 1, 2 * INDEX_LEN + 8, (MAX_PACKED_FRAMES + 1) * INDEX_LEN, 2 * HEARTBEAT_LEN] {
+            assert!(sender.seal_into(&vec![0u8; bad], 1_000, &mut out).is_err(), "sealed {bad} B");
+        }
+        // Forge the version byte both ways and re-tag: the length rule refuses it.
+        let retag = |mut d: Vec<u8>, ver: u8| {
+            d[4] = ver;
+            let n = d.len() - TAG_LEN;
+            let mut mac = HmacSha256::new_from_slice(&key).unwrap();
+            mac.update(&d[..n]);
+            let tag = mac.finalize().into_bytes();
+            d[n..].copy_from_slice(&tag);
+            d
+        };
+        sender.seal_into(&payload, 1_000, &mut out).unwrap();
+        assert_eq!(v.verify(&retag(out.clone(), VERSION), PEER, 1_001).unwrap_err().label(), "malformed");
+        sender.seal_into(&[1u8; INDEX_LEN], 1_000, &mut out).unwrap();
+        assert_eq!(v.verify(&retag(out.clone(), VERSION_PACKED), PEER, 1_001).unwrap_err().label(), "malformed");
+        assert_eq!(v.verify(&retag(out.clone(), 3), PEER, 1_001).unwrap_err().label(), "malformed");
     }
 
     // ── Drain grace (post-boot backlog) ──────────────────────────────────────

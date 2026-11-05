@@ -2557,20 +2557,21 @@ pub struct DecayYml {
     /// Half-life ceiling, s, (0, 300]. Bounds the lag of a move inside the band:
     /// t90 <= log2(10) x hl_max_s.
     pub hl_max_s: f64,
-    /// |published - raw EMA| > min(band / 2, max_dev_bps) for longer than this, s: publish raw. (0, hl_max_s]:
+    /// |published - raw EMA| > band / 2 for longer than this, s: publish raw. (0, hl_max_s]:
     /// past hl_max_s it never fires for a step inside the band.
     pub max_err_s: f64,
-    /// bps: the adaptive mid is clamped to the fixed smoother's mid +- this, and the error
-    /// timer fires past min(band / 2, this). Bounds the spread between replicas that warmed
-    /// differently (vs `cosign_tolerance`) and the staleness of the adaptive smoother.
-    /// Default 0.5 = 1.5 x the stable pool's `minFee / 2` (0.165 bp) and well under the
-    /// measured bands (2.5..3.3 bp).
-    #[serde(default = "default_max_dev_bps")]
-    pub max_dev_bps: f64,
-}
-
-fn default_max_dev_bps() -> f64 {
-    0.5
+    /// Clamp scale: the published adaptive mid is held within `tau` of the fixed smoother's mid,
+    /// `tau = min(k_tau x sigma_hat, tau_max_bps)` quantised down to the venue tick, `sigma_hat` the
+    /// estimator's low-passed noise sd (bps) of the asset; 0 while the estimator is cold. Fitted: `research/smoother_fit`.
+    pub k_tau: f64,
+    /// bps, hard cap of `tau`: the fee/2 of the smallest pool the mark feeds (stable pool minFee 33 PBPS =
+    /// 0.33 bp, so 0.165). Not fitted; a pool contract figure. Also bounds the replica spread
+    /// added by the clamp to 2 x this.
+    pub tau_max_bps: f64,
+    /// Half-life, s, of the raw EMA the error timer judges against and releases to. (0, max_err_s]. Fitted.
+    pub err_ema_s: f64,
+    /// s: the EMA error must stay within the threshold this long to clear the timer. (0, max_err_s]. Fitted.
+    pub err_confirm_s: f64,
 }
 
 impl DecayYml {
@@ -2595,9 +2596,26 @@ impl DecayYml {
             self.hl_max_s
         );
         anyhow::ensure!(
-            ok(self.max_dev_bps) && self.max_dev_bps > 0.0 && self.max_dev_bps <= 4.0,
-            "cexs.storage.decay.max_dev_bps {} in (0, 4], finite",
-            self.max_dev_bps
+            ok(self.k_tau) && self.k_tau > 0.0 && self.k_tau <= 10.0,
+            "cexs.storage.decay.k_tau {} in (0, 10], finite",
+            self.k_tau
+        );
+        anyhow::ensure!(
+            ok(self.tau_max_bps) && self.tau_max_bps > 0.0 && self.tau_max_bps <= 4.0,
+            "cexs.storage.decay.tau_max_bps {} in (0, 4], finite",
+            self.tau_max_bps
+        );
+        anyhow::ensure!(
+            ok(self.err_confirm_s) && self.err_confirm_s > 0.0 && self.err_confirm_s <= self.max_err_s,
+            "cexs.storage.decay.err_confirm_s {} in (0, max_err_s {}], finite",
+            self.err_confirm_s,
+            self.max_err_s
+        );
+        anyhow::ensure!(
+            ok(self.err_ema_s) && self.err_ema_s > 0.0 && self.err_ema_s <= self.max_err_s,
+            "cexs.storage.decay.err_ema_s {} in (0, max_err_s {}], finite",
+            self.err_ema_s,
+            self.max_err_s
         );
         Ok(())
     }
@@ -2608,7 +2626,7 @@ impl StorageYml {
     pub fn decay_checked(&self) -> anyhow::Result<DecayYml> {
         let d = self
             .decay
-            .ok_or_else(|| anyhow::anyhow!("cexs.storage.decay missing (mode: fixed|shadow|adaptive, memory_s, z, hl_max_s, max_err_s, [max_dev_bps])"))?;
+            .ok_or_else(|| anyhow::anyhow!("cexs.storage.decay missing (mode: fixed|shadow|adaptive, memory_s, z, hl_max_s, max_err_s, k_tau, tau_max_bps, err_ema_s, err_confirm_s)"))?;
         d.check()?;
         Ok(d)
     }
@@ -2940,7 +2958,7 @@ mod tests {
     #[test]
     fn storage_decay_is_optional_to_parse_required_to_check() {
         let st = |y: &str| serde_yml::from_str::<StorageYml>(y).unwrap();
-        let ok = "decay: {mode: shadow, memory_s: 4096, z: 6, hl_max_s: 120, max_err_s: 60}";
+        let ok = "decay: {mode: shadow, memory_s: 4096, z: 6, hl_max_s: 120, max_err_s: 60, k_tau: 1.5, tau_max_bps: 0.165, err_ema_s: 7, err_confirm_s: 7}";
         // The forwarder and oracle parse a ConfigMap without the key.
         assert!(st("{}").decay.is_none() && st("{}").decay_checked().is_err());
         let d = st(ok).decay_checked().unwrap();
@@ -2949,6 +2967,8 @@ mod tests {
         assert!(serde_yml::from_str::<StorageYml>(&ok.replace("}", ", zz: 1}")).is_err());
         assert!(serde_yml::from_str::<StorageYml>(&ok.replace(", max_err_s: 60", "")).is_err());
         assert!(serde_yml::from_str::<StorageYml>(&ok.replace(", hl_max_s: 120", "")).is_err());
+        assert!(serde_yml::from_str::<StorageYml>(&ok.replace(", k_tau: 1.5", "")).is_err());
+        assert!(serde_yml::from_str::<StorageYml>(&ok.replace(", err_confirm_s: 7", "")).is_err());
         assert!(serde_yml::from_str::<StorageYml>(&ok.replace("shadow", "slow")).is_err());
         // Out of range, NaN and infinities fail the check, member by member.
         let mut bad: Vec<(&str, String)> = [
@@ -2958,10 +2978,14 @@ mod tests {
             ("hl_max_s: 120", "hl_max_s: 301"),
             ("max_err_s: 60", "max_err_s: 0"),
             ("max_err_s: 60", "max_err_s: 121"),
+            ("k_tau: 1.5", "k_tau: 0"),
+            ("err_ema_s: 7", "err_ema_s: 61"),
+            ("tau_max_bps: 0.165", "tau_max_bps: 0"),
+            ("err_confirm_s: 7", "err_confirm_s: 61"),
         ]
         .map(|(k, v)| (k, v.to_string()))
         .to_vec();
-        for k in ["memory_s: 4096", "z: 6", "hl_max_s: 120", "max_err_s: 60"] {
+        for k in ["memory_s: 4096", "z: 6", "hl_max_s: 120", "max_err_s: 60", "k_tau: 1.5", "tau_max_bps: 0.165", "err_ema_s: 7", "err_confirm_s: 7"] {
             let m = k.split(':').next().unwrap();
             bad.extend([".nan", ".inf", "-.inf"].map(|x| (k, format!("{m}: {x}"))));
         }

@@ -1916,6 +1916,15 @@ pub struct ExchangeYml {
     /// `heartbeat_interval_ms`, or the watchdog will thrash.
     #[serde(default)]
     pub stale_timeout_s: Option<u64>,
+    /// Send throttle for a venue that streams every best-bid/offer change
+    /// (`crypto/src/client.rs`): a changed quote whose mid moved less than
+    /// `min_move_bps` from the last SENT mid is not forwarded while the last send is
+    /// younger than `min_send_interval_ms`, and size-only re-affirms keep that spacing.
+    /// Both absent (the default) = no throttle. Set both or neither.
+    #[serde(default)]
+    pub min_send_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub min_move_bps: Option<f64>,
     /// Hard ceiling on how many markets this venue may be subscribed to at once.
     /// Bounds the weights-driven subscription set (`crypto/src/markets.rs`),
     /// which grows with whatever `nxr-weights` last observed and is therefore

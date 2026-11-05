@@ -1250,8 +1250,6 @@ impl SignedFeedYml {
 /// `nxr-oracle` forwarder.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct OraclesYml {
-    #[serde(default)]
-    pub public_api: PythPublicYml,
     /// Oracle forwarder flush cadence (ms). Default 250 when absent.
     #[serde(default)]
     pub aggregation_interval_ms: Option<u64>,
@@ -1373,65 +1371,6 @@ impl OnchainRosterYml {
             .iter()
             .filter(|p| self.enabled && (p.address.is_some() || p.pool_id.is_some()))
             .map(|p| format!("{}/{}", p.asset, p.quote).to_uppercase())
-    }
-}
-
-/// Anonymous app source; legacy bridge rosters remain registered.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct PythPublicYml {
-    /// App origin, `https://host` (no path). API base = `{origin}/api`.
-    pub origin: String,
-    /// Market-provider name (`mitch/ids/market-providers.csv`) its ticks carry.
-    #[serde(default = "pyth_provider")]
-    pub provider: String,
-    /// Weight policy: the leg never takes a configured survey weight and stays
-    /// in the bounded unmapped bloc (`weights::resolve`).
-    #[serde(default)]
-    pub unmapped: bool,
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "pyth_poll_secs")]
-    pub poll_secs: u64,
-    #[serde(default = "pyth_stale_secs")]
-    pub stale_secs: u64,
-    #[serde(default = "pyth_proxies_env")]
-    pub proxies_env: String,
-    #[serde(default)]
-    pub proxies: Vec<String>,
-    #[serde(default)]
-    pub symbols: Vec<String>,
-    /// Per-symbol override of the frozen window for pegged feeds that legitimately do not move.
-    #[serde(default)]
-    pub frozen_secs: std::collections::BTreeMap<String, u64>,
-    /// A CDN catalog snapshot this old proves nothing.
-    pub live_window_secs: u64,
-    /// A point this far from the (minutes-old) catalog price is counted, never held.
-    pub point_catalog_max_frac: f64,
-}
-impl std::fmt::Debug for PythPublicYml {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PythPublicYml").field("origin", &self.origin).field("enabled", &self.enabled)
-            .field("poll_secs", &self.poll_secs).field("stale_secs", &self.stale_secs)
-            .field("proxy_count", &self.proxies.len()).field("symbols", &self.symbols).finish()
-    }
-}
-impl PythPublicYml {
-    /// Validated host of `origin`: https only, bare `https://host[:port]`.
-    pub fn origin_host(&self) -> anyhow::Result<&str> {
-        let host = self.origin.strip_prefix("https://").unwrap_or_default();
-        anyhow::ensure!(!host.is_empty() && !host.contains(['/', '@', '?', '#', ' ']),
-            "oracles.public_api.origin must be https://host, got {:?}", self.origin);
-        Ok(host.split(':').next().unwrap_or(host))
-    }
-}
-fn pyth_provider() -> String { "pyth_app".to_owned() }
-fn pyth_poll_secs() -> u64 { 30 }
-fn pyth_stale_secs() -> u64 { 90 }
-fn pyth_proxies_env() -> String { "INSTANTPROXIES_URLS".to_owned() }
-impl Default for PythPublicYml {
-    fn default() -> Self {
-        // Absent section: disabled; the pacing numbers are inert (zero refuses `Scraper::new`).
-        Self { origin: String::new(), provider: pyth_provider(), unmapped: false, enabled: false, poll_secs: 30, stale_secs: 90, proxies_env: pyth_proxies_env(), proxies: Vec::new(), symbols: Vec::new(), frozen_secs: Default::default(), live_window_secs: 0, point_catalog_max_frac: 0.0 }
     }
 }
 
@@ -1747,7 +1686,6 @@ impl PipelineYml {
             .providers
             .values()
             .flat_map(|p| p.symbols.keys())
-            .chain(self.oracles.public_api.symbols.iter().filter(|_| self.oracles.public_api.enabled))
             .chain(self.ctrader.providers.values().flat_map(|p| p.symbols.keys()))
             .map(|s| s.to_uppercase())
             .chain(self.onchain.symbols())
@@ -1782,18 +1720,11 @@ impl PipelineYml {
             .providers
             .keys()
             .map(String::as_str)
-            .chain(self.oracles.public_api.enabled.then_some(self.oracles.public_api.provider.as_str()))
             .chain(self.ctrader.providers.keys().map(String::as_str))
             .chain(self.onchain.symbols().next().map(|_| "onchain"))
             .chain(self.onchain.has_rate_legs().then_some("onchain_rate"))
             .map(str::to_owned)
             .collect()
-    }
-
-    /// Provider names whose legs take the unmapped weight by policy.
-    pub fn unmapped_providers(&self) -> Vec<&str> {
-        let p = &self.oracles.public_api;
-        p.unmapped.then_some(p.provider.as_str()).into_iter().collect()
     }
 
     /// Read and parse a pipeline-yaml file from disk. Single source of truth
@@ -1825,17 +1756,6 @@ impl PipelineYml {
             g.validate(&parsed.ctrader.providers)?;
         }
         parsed.ctrader.validate_priors()?;
-        if parsed.oracles.public_api.enabled {
-            parsed.oracles.public_api.origin_host()?;
-            for symbol in &parsed.oracles.public_api.symbols {
-                anyhow::ensure!(*symbol == symbol.trim().to_ascii_uppercase()
-                    && !symbol.starts_with("CRYPTO.") && symbol.matches('/').count() == 1
-                    && crate::try_resolve_ticker_id(symbol).is_some(), "noncanonical public Pyth symbol");
-            }
-            for proxy in &parsed.oracles.public_api.proxies {
-                anyhow::ensure!(!proxy.contains('@'), "public Pyth proxy credentials must use the secret environment");
-            }
-        }
         if parsed
             .signed_quotes
             .as_ref()
@@ -3695,25 +3615,6 @@ mod tests {
         assert_eq!(minimal.rolling_window_days, 365);
         assert_eq!(minimal.bracket_max_iters, 12);
         assert!((minimal.accept_tol - 0.05).abs() < 1e-12);
-    }
-
-    #[test]
-    fn public_pyth_manifest_preserves_bridge_rosters() {
-        let mut y: PipelineYml = serde_yml::from_str(
-            "series:\n  renko: { min_pct: 0.001 }\n\
-             \x20 vol: { ema_period: 1, winsorize_pct: [0.05, 0.95], winsorize_min_samples: 1 }\n\
-             \x20 calibration: { target_bpd: 300, min_window_days: 30, mult_bounds: [0.05, 4.0] }\n\
-             \x20 pipeline: { bootstrap_days: 1 }\n\
-             oracles:\n  providers:\n    pyth:\n      symbols: { XAU/USD: \"1\" }\n\
-             \x20 public_api: { origin: \"https://app.pyth.com\", symbols: [CBBTC/USD, WBTC/USD], \
-             live_window_secs: 300, point_catalog_max_frac: 0.05 }\n",
-        ).unwrap();
-        assert_eq!(y.oracles.public_api.poll_secs, 30);
-        assert_eq!(y.relay_symbols().into_iter().collect::<Vec<_>>(), vec!["XAU/USD"]);
-        y.oracles.public_api.enabled = true;
-        assert_eq!(y.configured_symbols().into_iter().collect::<Vec<_>>(), vec!["CBBTC/USD", "WBTC/USD", "XAU/USD"]);
-        assert_eq!(y.relay_symbols(), y.configured_symbols());
-        assert_eq!(y.relay_providers(), vec!["pyth", "pyth_app"]);
     }
 
     #[test]

@@ -2557,9 +2557,20 @@ pub struct DecayYml {
     /// Half-life ceiling, s, (0, 300]. Bounds the lag of a move inside the band:
     /// t90 <= log2(10) x hl_max_s.
     pub hl_max_s: f64,
-    /// |published - raw| > band / 2 for longer than this, s: publish raw. (0, hl_max_s]:
+    /// |published - raw EMA| > min(band / 2, max_dev_bps) for longer than this, s: publish raw. (0, hl_max_s]:
     /// past hl_max_s it never fires for a step inside the band.
     pub max_err_s: f64,
+    /// bps: the adaptive mid is clamped to the fixed smoother's mid +- this, and the error
+    /// timer fires past min(band / 2, this). Bounds the spread between replicas that warmed
+    /// differently (vs `cosign_tolerance`) and the staleness of the adaptive smoother.
+    /// Default 0.5 = 1.5 x the stable pool's `minFee / 2` (0.165 bp) and well under the
+    /// measured bands (2.5..3.3 bp).
+    #[serde(default = "default_max_dev_bps")]
+    pub max_dev_bps: f64,
+}
+
+fn default_max_dev_bps() -> f64 {
+    0.5
 }
 
 impl DecayYml {
@@ -2583,6 +2594,11 @@ impl DecayYml {
             self.max_err_s,
             self.hl_max_s
         );
+        anyhow::ensure!(
+            ok(self.max_dev_bps) && self.max_dev_bps > 0.0 && self.max_dev_bps <= 4.0,
+            "cexs.storage.decay.max_dev_bps {} in (0, 4], finite",
+            self.max_dev_bps
+        );
         Ok(())
     }
 }
@@ -2592,7 +2608,7 @@ impl StorageYml {
     pub fn decay_checked(&self) -> anyhow::Result<DecayYml> {
         let d = self
             .decay
-            .ok_or_else(|| anyhow::anyhow!("cexs.storage.decay missing (mode: fixed|shadow|adaptive, memory_s, z, hl_max_s, max_err_s)"))?;
+            .ok_or_else(|| anyhow::anyhow!("cexs.storage.decay missing (mode: fixed|shadow|adaptive, memory_s, z, hl_max_s, max_err_s, [max_dev_bps])"))?;
         d.check()?;
         Ok(d)
     }

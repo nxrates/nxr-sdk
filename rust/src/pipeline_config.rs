@@ -1821,7 +1821,6 @@ impl PipelineYml {
         if let Some(c) = &parsed.cexs.pegged_carry {
             c.validate()?;
         }
-        anyhow::ensure!(parsed.cexs.coalesce_ms != Some(0), "cexs.coalesce_ms must be > 0");
         if let Some(g) = &parsed.ctrader.basis_gate {
             g.validate(&parsed.ctrader.providers)?;
         }
@@ -2227,9 +2226,9 @@ pub struct CexsYml {
     #[serde(default)]
     pub pegged_carry: Option<PeggedCarryYml>,
     /// Per-venue early-flush window of `nxr-crypto` (ms): a changed or re-affirmed ticker is
-    /// sent within it, at most one flush per window per venue. Required by the forwarder (boot
-    /// refuses without it; core and the other binaries never read it), 0 < coalesce_ms <=
-    /// `network.aggregation_interval_ms`. Older images ignore the key (`CexsYml` does not deny
+    /// sent within it, at most one flush per window per venue. Required by the forwarder (boot and
+    /// `--check-config` refuse without it, see `coalesce_ms_checked`; core and the other
+    /// binaries never read it), 0 < coalesce_ms <= `network.aggregation_interval_ms`. Older images ignore the key (`CexsYml` does not deny
     /// unknown fields).
     #[serde(default)]
     pub coalesce_ms: Option<u64>,
@@ -2288,6 +2287,18 @@ pub struct CexsYml {
     /// The one cap on a live leg's final share (`tdwap::Concentration`).
     #[serde(default)]
     pub concentration: crate::tdwap::Concentration,
+}
+
+impl CexsYml {
+    /// `coalesce_ms` for the forwarder: required, `1..=agg` (the floor timer it undercuts).
+    /// Called by `nxr-crypto` boot AND its `--check-config`, so a ConfigMap without the key
+    /// fails the pre-apply check for the new image. Other binaries never call it.
+    pub fn coalesce_ms_checked(&self, agg: u64) -> anyhow::Result<u64> {
+        match self.coalesce_ms {
+            Some(ms) if (1..=agg).contains(&ms) => Ok(ms),
+            other => anyhow::bail!("cexs.coalesce_ms {other:?} missing or outside 1..={agg} (network.aggregation_interval_ms)"),
+        }
+    }
 }
 
 /// `cexs.storage:` block: per-asset market ranking and the published
@@ -2909,6 +2920,16 @@ mod tests {
         assert_eq!(c.coalesce_ms, Some(5));
         assert!(serde_yml::from_str::<CexsYml>("some_future_key: 1").is_ok());
         assert_eq!(serde_yml::from_str::<CexsYml>("{}").unwrap().coalesce_ms, None);
+    }
+
+    #[test]
+    fn coalesce_ms_checked_bounds() {
+        let c = |v: Option<u64>| CexsYml { coalesce_ms: v, ..Default::default() };
+        assert!(c(None).coalesce_ms_checked(200).is_err());
+        assert!(c(Some(0)).coalesce_ms_checked(200).is_err());
+        assert_eq!(c(Some(1)).coalesce_ms_checked(200).unwrap(), 1);
+        assert_eq!(c(Some(200)).coalesce_ms_checked(200).unwrap(), 200);
+        assert!(c(Some(201)).coalesce_ms_checked(200).is_err());
     }
 
     #[test]

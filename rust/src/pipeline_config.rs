@@ -2298,6 +2298,13 @@ pub struct StorageYml {
     /// band, whatever the path. Absent = 3000. >= `peg_confirm_ms`.
     #[serde(default)]
     pub peg_confirm_max_ms: Option<f64>,
+    /// Pegged smoother half-life policy, see [`DecayYml`]. REQUIRED by core (the only
+    /// reader): `decay_checked` fails boot and `--check-config` without it. `Option`
+    /// so the forwarder, signers and oracle that share this struct parse a ConfigMap
+    /// that predates the key, and an older binary ignores it (no `deny_unknown_fields`
+    /// on this struct): roll the ConfigMap first.
+    #[serde(default)]
+    pub decay: Option<DecayYml>,
     /// Weight of a venue's NON-deepest admissible markets in its single leg:
     /// leg weight = deepest + g * sum(others), price = weight-averaged over the
     /// folded markets. Absent or 0 = one market per venue (the deepest), output
@@ -2520,7 +2527,48 @@ fn mult_seed() -> f64 {
     1.0
 }
 
+/// How the pegged smoother picks its half-life.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecayMode {
+    /// Fixed 10 s half-life and the `peg_confirm_bps` band: the output before the estimator.
+    #[default]
+    Fixed,
+    /// Fixed output published; the adaptive value is computed beside it and exported.
+    Shadow,
+    /// The measured half-life and band are published.
+    Adaptive,
+}
+
+/// `cexs.storage.decay`: per-asset adaptive smoother (`core/src/decay.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecayYml {
+    pub mode: DecayMode,
+    /// Estimator memory, s: EWMA weight 1/memory_s per 1 s sample. Also the warm-up:
+    /// an id with less history than this runs the fixed smoother. One hour, as
+    /// replayed in usdat-jitter-adaptive-tdwap-1106 (it leaves N_eff = 14 at the
+    /// longest lag, 256 s). Not swept.
+    pub memory_s: f64,
+    /// Band = `z` x measured noise sd, capped at `peg_confirm_bps`. Fitted
+    /// walk-forward on the 2026-11-04 tape: the largest z that keeps every 5 bp
+    /// step at <= 1 s (z = 3 doubles the jitter, z = 8 uncapped breaks the 5 bp SLA).
+    pub z: f64,
+}
+
 impl StorageYml {
+    /// The required `decay:` block, validated. Core boot and `--check-config` only.
+    pub fn decay_checked(&self) -> anyhow::Result<DecayYml> {
+        let d = self.decay.ok_or_else(|| anyhow::anyhow!("cexs.storage.decay missing (mode: fixed|shadow|adaptive, memory_s, z)"))?;
+        anyhow::ensure!(
+            d.memory_s.is_finite() && d.memory_s >= 1024.0 && d.z.is_finite() && d.z > 0.0,
+            "cexs.storage.decay: memory_s {} >= 1024 (4 x the longest lag, N_eff >= 4 there) and z {} > 0, both finite",
+            d.memory_s,
+            d.z
+        );
+        Ok(d)
+    }
+
     /// `(peg_confirm_bps, peg_confirm_ms, peg_confirm_max_ms)` with their defaults.
     pub fn peg_confirm(&self) -> (f64, f64, f64) {
         (
@@ -2593,6 +2641,9 @@ impl StorageYml {
             bps.is_finite() && bps > 0.0 && ms.is_finite() && ms >= 0.0 && max.is_finite() && max >= ms,
             "peg_confirm: bps {bps} > 0, ms {ms} >= 0 and max_ms {max} >= ms, all finite"
         );
+        if self.decay.is_some() {
+            self.decay_checked()?;
+        }
         let hub = self.hub();
         anyhow::ensure!(
             crate::try_resolve_ticker_id(&format!("BTC/{hub}")).is_some(),
@@ -2840,6 +2891,24 @@ mod tests {
         assert_eq!(c.coalesce_ms, Some(5));
         assert!(serde_yml::from_str::<CexsYml>("some_future_key: 1").is_ok());
         assert_eq!(serde_yml::from_str::<CexsYml>("{}").unwrap().coalesce_ms, None);
+    }
+
+    #[test]
+    fn storage_decay_is_optional_to_parse_required_to_check() {
+        let st = |y: &str| serde_yml::from_str::<StorageYml>(y).unwrap();
+        // The forwarder, signers and oracle parse a ConfigMap without the key.
+        assert!(st("{}").decay.is_none() && st("{}").decay_checked().is_err());
+        let d = st("decay: {mode: shadow, memory_s: 3600, z: 6}").decay_checked().unwrap();
+        assert_eq!((d.mode, d.memory_s, d.z), (DecayMode::Shadow, 3600.0, 6.0));
+        // Typos inside the block, a missing member and out-of-range values are refused.
+        assert!(serde_yml::from_str::<StorageYml>("decay: {mode: fixed, memory_s: 3600, z: 6, zz: 1}").is_err());
+        assert!(serde_yml::from_str::<StorageYml>("decay: {mode: fixed, memory_s: 3600}").is_err());
+        assert!(serde_yml::from_str::<StorageYml>("decay: {mode: slow, memory_s: 3600, z: 6}").is_err());
+        assert!(st("decay: {mode: fixed, memory_s: 512, z: 6}").decay_checked().is_err());
+        assert!(st("decay: {mode: fixed, memory_s: 3600, z: 0}").decay_checked().is_err());
+        // An older binary reads the new struct shape as unknown keys: StorageYml has no deny_unknown_fields.
+        assert!(serde_yml::from_str::<StorageYml>("some_future_key: 1").is_ok());
+        assert!(st("decay: {mode: fixed, memory_s: 3600, z: 6}").validate(&[]).is_ok());
     }
 
     #[test]

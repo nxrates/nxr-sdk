@@ -1821,6 +1821,7 @@ impl PipelineYml {
         if let Some(c) = &parsed.cexs.pegged_carry {
             c.validate()?;
         }
+        anyhow::ensure!(parsed.cexs.coalesce_ms != Some(0), "cexs.coalesce_ms must be > 0");
         if let Some(g) = &parsed.ctrader.basis_gate {
             g.validate(&parsed.ctrader.providers)?;
         }
@@ -2225,6 +2226,13 @@ pub struct CexsYml {
     /// the 5 s short carry everywhere.
     #[serde(default)]
     pub pegged_carry: Option<PeggedCarryYml>,
+    /// Per-venue early-flush window of `nxr-crypto` (ms): a changed or re-affirmed ticker is
+    /// sent within it, at most one flush per window per venue. Required by the forwarder (boot
+    /// refuses without it; core and the other binaries never read it), 0 < coalesce_ms <=
+    /// `network.aggregation_interval_ms`. Older images ignore the key (`CexsYml` does not deny
+    /// unknown fields).
+    #[serde(default)]
+    pub coalesce_ms: Option<u64>,
     /// Tokens pegged to a NON-USD fiat, as `TOKEN: ISO4217`. Deliberately NOT
     /// part of `pegged`, which means USD-pegged specifically and carries an
     /// absolute $1 anchor: EURC trades ~1.14, and its 2026-08-02 membership in
@@ -2892,6 +2900,16 @@ impl Default for BackfillDiskYml {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An old image (no `coalesce_ms` field) must keep booting on a config that carries it:
+    /// `CexsYml` ignores unknown keys, so the key may ship ahead of the image.
+    #[test]
+    fn cexs_coalesce_ms_parses_and_unknown_keys_are_ignored() {
+        let c = serde_yml::from_str::<CexsYml>("coalesce_ms: 5").unwrap();
+        assert_eq!(c.coalesce_ms, Some(5));
+        assert!(serde_yml::from_str::<CexsYml>("some_future_key: 1").is_ok());
+        assert_eq!(serde_yml::from_str::<CexsYml>("{}").unwrap().coalesce_ms, None);
+    }
 
     #[test]
     fn z_gate_defaults_when_absent_and_rejects_typos() {

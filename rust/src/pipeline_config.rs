@@ -421,6 +421,12 @@ pub struct SignedDomainYml {
     /// ```
     #[serde(default)]
     pub lane_map: Option<BTreeMap<u16, LaneYml>>,
+    /// OPTIONAL on-chain signer set of THIS consumer (0x addresses). Peers are pod-wide, but
+    /// each store counts only its own roster: a non-roster signature lands the blob below k.
+    /// Present = only these attesters are asked, counted toward `quorum` and served (own
+    /// signature included only when listed). Absent = every peer counts, as before.
+    #[serde(default)]
+    pub signers: Option<Vec<String>>,
 }
 
 /// `#[serde(default)]` for a bool that must stay on when the YAML is silent.
@@ -879,6 +885,7 @@ impl SignedQuotesYml {
                 // The singleton alias predates per-domain lane maps too: it
                 // takes the per-feed catalog fields, as it always has.
                 lane_map: None,
+                signers: None,
             },
         )])
     }

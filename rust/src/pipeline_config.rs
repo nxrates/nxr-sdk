@@ -421,10 +421,11 @@ pub struct SignedDomainYml {
     /// ```
     #[serde(default)]
     pub lane_map: Option<BTreeMap<u16, LaneYml>>,
-    /// OPTIONAL on-chain signer set of THIS consumer (0x addresses). Peers are pod-wide, but
-    /// each store counts only its own roster: a non-roster signature lands the blob below k.
-    /// Present = only these attesters are asked, counted toward `quorum` and served (own
-    /// signature included only when listed). Absent = every peer counts, as before.
+    /// On-chain signer set of THIS consumer (0x addresses). Peers are pod-wide, but each store
+    /// counts only its own roster: a non-roster signature lands the blob below k. Only these
+    /// attesters are asked, counted toward `quorum` and served (own signature included only when
+    /// listed). REQUIRED on every `domains:` entry (the signer refuses to boot without it); only
+    /// the legacy singleton alias (no `domains:` map) counts self + every peer.
     #[serde(default)]
     pub signers: Option<Vec<String>>,
 }

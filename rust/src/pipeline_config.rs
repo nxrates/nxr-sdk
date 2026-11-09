@@ -622,6 +622,11 @@ pub struct SignedQuotesYml {
     /// normalization has to be identical everywhere it is applied.
     #[serde(default)]
     pub blacklisted_assets: Vec<String>,
+    /// Base assets (canonical symbol, e.g. `AUDF`, `JPYC`, `QCAD`, `KRW1`) whose COMPOSED record may be signed when its
+    /// legs published no uncertainty (`ci == 0`, a single-source broker FX leg): the signer floors the ci instead of
+    /// refusing. Every other composed `ci == 0` record is refused. Empty (default) = refused for all.
+    #[serde(default)]
+    pub composed_ci_floor_assets: Vec<String>,
     /// Operator ALLOWLIST of session-relay addresses (`0x…`, 20 B) this
     /// replica may quorum-sign a `SessionGrant` for (`GET /v1/quote/session`
     /// and its cosign fan-out). Each replica validates a proposed grant's

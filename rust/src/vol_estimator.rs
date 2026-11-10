@@ -261,7 +261,7 @@ impl SigmaEstimator {
 ///
 /// The originals were the 30-min sigma IMPLIED by a guessed typical daily move
 /// over 48 bins. Measured on chain, they bound almost everywhere: every FX feed
-/// on Arc published exactly 2000 pbps and every CR feed exactly 4000, i.e. five
+/// on the retired Arc testnet published exactly 2000 pbps and every CR feed exactly 4000, i.e. five
 /// different currencies shared one volatility. Replaced with percentiles of the
 /// PRODUCER'S OWN sigma over a real tape.
 ///
@@ -301,7 +301,7 @@ impl SigmaEstimator {
 ///
 /// FX: p1 of the 14-pair FX sample EXCLUDING USD-TRY, rounded down (281 -> 250).
 ///
-/// Sample: the 5 tokenized fiat crosses on Arc (EURC/QCAD/AUDF/JPYC/KRW1-USDC)
+/// Sample: the 5 tokenized fiat crosses of the retired Arc catalog (EURC/QCAD/AUDF/JPYC/KRW1-USDC)
 /// plus 9 native majors and EM crosses (EUR-USD, GBP-USD, USD-JPY, USD-CAD,
 /// AUD-USD, USD-CHF, USD-ZAR, USD-MXN, USD-KRW). 250 pbps sits under the p1 of
 /// every one of them; class-wide it binds 6.7%, and 0.4% once USD-TRY is set

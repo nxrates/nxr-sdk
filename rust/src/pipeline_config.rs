@@ -364,8 +364,8 @@ pub struct SignedDomainYml {
     pub wire: Option<u8>,
     /// `packedV2`/`packedV4` ONLY: the oracle's immutable deciseconds clock
     /// origin in SECONDS (`sourceTsDs = (sourceSec - epoch) * 10`). Persisted
-    /// alongside BTR's deploy record; Arc (chainId 5042002) = 1735689600
-    /// (2025-01-01Z). Absent falls back to that Arc default in the signer.
+    /// alongside BTR's deploy record. Absent falls back to the signer default
+    /// 1735689600 (2025-01-01Z).
     ///
     /// `packedV5` has NO epoch — the V4 wire's clock is cyclic
     /// deciseconds-since-midnight, which is the change that removed the 2038
@@ -392,7 +392,7 @@ pub struct SignedDomainYml {
     /// ⚠ KEYED BY [`SignedFeedYml::idx`], **NEVER BY SYMBOL**, and do not
     /// "simplify" it back. A SYMBOL IS A PRICE SOURCE; AN IDX IS A FEED, AND
     /// THE ORACLE HAS MORE FEEDS THAN SOURCES. Symbols are not unique across
-    /// `feeds`: the live arc-primary catalog carries
+    /// `feeds`: the retired Arc primary catalog carried
     ///
     /// ```yaml
     /// - { idx: 10, symbol: BTC-USDC, global_index: 21, exp_bias: 47 }  # WBTC
@@ -484,8 +484,8 @@ pub struct SignedQuotesYml {
     /// The grid must be a fixed fraction of the asset's own move, not a flat
     /// number, because `grid_mask_bits` is RELATIVE: one flat 0.5 bps masks 2
     /// mantissa bits at an 18-bit mantissa and 9 at 25, so it eats every bit a
-    /// wider lane adds. Measured on a 26-minute tape (1905 snapshots, all 26 Arc
-    /// feeds): entries-per-push was 19.01 at EVERY mantissa width.
+    /// wider lane adds. Measured on a 26-minute tape (1905 snapshots, all 26 feeds
+    /// of the retired Arc catalog): entries-per-push was 19.01 at EVERY mantissa width.
     ///
     /// K = 100 puts the grid two orders of magnitude under a 30-minute move,
     /// i.e. far inside the noise the diff exists to elide and far outside
@@ -648,7 +648,7 @@ pub struct SignedQuotesYml {
     ///
     /// ```yaml
     /// rpc_urls:
-    ///   arc-v4: https://rpc.arc.network
+    ///   monad-v4: https://rpc.example.org
     /// ```
     #[serde(default)]
     pub rpc_urls: BTreeMap<String, String>,
@@ -1205,7 +1205,7 @@ pub struct SignedFeedYml {
     pub publish: Option<String>,
     /// V2 (`packedV2`) ONLY: this feed's global lane index on `ExternalOracleV2`
     /// (`slotId = global_index / 8`, `laneIdx = global_index % 8`). Mirror of
-    /// BTR's `deployments/arc-oracle-v2-lanes.json` `feeds.<SYM>.globalIndex`,
+    /// BTR's oracle V2 lanes deploy record `feeds.<SYM>.globalIndex`,
     /// hand-synced into the signer ConfigMap exactly like [`Self::idx`]. A feed
     /// under a `packedV2` domain that lacks this is NOT expressible (a wrong or
     /// unregistered index reverts the whole batch on-chain), so signing refuses
@@ -1213,7 +1213,7 @@ pub struct SignedFeedYml {
     #[serde(default)]
     pub global_index: Option<u16>,
     /// V2 (`packedV2`) ONLY: this feed's per-feed signed `expBias` (int8 on
-    /// chain). Mirror of `arc-oracle-v2-lanes.json` `feeds.<SYM>.expBias`. Sets
+    /// chain). Mirror of that record's `feeds.<SYM>.expBias`. Sets
     /// the lane's decode scale: `mark1e18 = mantissa << (exp + expBias)`.
     #[serde(default)]
     pub exp_bias: Option<i16>,
@@ -3054,7 +3054,7 @@ mod tests {
     fn signed_yml(sigma_keys: &str) -> SignedQuotesYml {
         let y = format!(
             "oracle: \"0x0000000000000000000000000000000000000000\"\n\
-             chain_id: 5042002\n\
+             chain_id: 143\n\
              min_interval_ms: 5\n\
              mark_max_age_ms: 500\n\
              min_accepted_providers: 2\n\
@@ -3112,7 +3112,7 @@ mod tests {
         let parse = |feeds: &str| -> SignedQuotesYml {
             let y = format!(
                 "oracle: \"0x0000000000000000000000000000000000000000\"\n\
-                 chain_id: 5042002\n\
+                 chain_id: 143\n\
                  min_interval_ms: 5\n\
                  mark_max_age_ms: 500\n\
                  min_accepted_providers: 2\n\
@@ -3403,7 +3403,7 @@ mod tests {
     fn sign_only_defaults_false_and_signed_symbols_covers_bridge_legs() {
         let sq: SignedQuotesYml = serde_yml::from_str(
             "oracle: '0x1111111111111111111111111111111111111111'\n\
-             chain_id: 5042002\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
+             chain_id: 143\nmin_interval_ms: 5\nmark_max_age_ms: 500\nmin_accepted_providers: 1\n\
              min_composite_freshness_bps: 500\nquorum: 2\npeers:\n\
                - { url: 'http://s.internal:80', signer: '0x2222222222222222222222222222222222222222' }\n\
              feeds:\n\
@@ -3750,7 +3750,7 @@ mod tests {
             "ticker22 needs no ordinal"
         );
 
-        // A live legacy row DOES carry one, and it must parse. The deployed arc
+        // A live legacy row DOES carry one, and it must parse. The legacy
         // maps are 0-BASED, so slot 0 is a real feed and the "no slot" sentinel
         // is the field's ABSENCE, never a literal 0.
         let legacy: Vec<SignedFeedYml> = serde_yml::from_str(
@@ -3763,7 +3763,7 @@ mod tests {
         assert_eq!(
             legacy[0].idx,
             Some(0),
-            "0 is a real arc slot, not a sentinel"
+            "0 is a real slot, not a sentinel"
         );
         assert_eq!(legacy[1].idx, Some(17));
 
@@ -3788,7 +3788,7 @@ mod tests {
         let d: SignedDomainYml = serde_yml::from_str(
             r#"
 name: "BTR ExternalOracleV4"
-chain_id: 5042002
+chain_id: 143
 oracle: "0x842c2736F072A8A7b523D23bd3Ef21F21AC24d5C"
 record_format: packedV5
 lane_map:

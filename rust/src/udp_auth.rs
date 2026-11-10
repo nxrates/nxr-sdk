@@ -951,7 +951,7 @@ mod tests {
         let full = vec![0u8; MAX_PACKED_FRAMES * INDEX_LEN];
         sender.seal_into(&full, 1_000, &mut out).unwrap();
         assert_eq!(out.len(), MAX_DATAGRAM_LEN);
-        assert!(MAX_DATAGRAM_LEN <= 1200);
+        const { assert!(MAX_DATAGRAM_LEN <= 1200) };
         assert!(v.verify(&out, PEER, 1_001).is_ok());
         for bad in [INDEX_LEN + 1, 2 * INDEX_LEN + 8, (MAX_PACKED_FRAMES + 1) * INDEX_LEN, 2 * HEARTBEAT_LEN] {
             assert!(sender.seal_into(&vec![0u8; bad], 1_000, &mut out).is_err(), "sealed {bad} B");

@@ -2286,6 +2286,11 @@ pub struct StorageYml {
     /// leg, as a pegged asset with a parity row does: Pyth alone is no price.
     #[serde(default)]
     pub no_fallback: Vec<String>,
+    /// Serve a pegged non-USD cross (USDT/USDC) composed from its two stored USD legs instead of its own
+    /// venue book (which freezes on the venue tick lattice). Absent = on; `false` restores the book.
+    /// Boot-frozen: read [`Self::compose_pegged_crosses`].
+    #[serde(default)]
+    pub compose_pegged_crosses: Option<bool>,
     /// Weight multiplier on a tokenised WRAPPER book (an EQ asset's surveyed
     /// markets), on top of its survey weight. The ladder for an ETF is cash
     /// relay (1.0) > index-derived leg (`ParityLegYml::weight`) > perp-derived
@@ -2543,6 +2548,11 @@ fn mult_seed() -> f64 {
 }
 
 impl StorageYml {
+    /// `compose_pegged_crosses`, default on.
+    pub fn compose_pegged_crosses(&self) -> bool {
+        self.compose_pegged_crosses.unwrap_or(true)
+    }
+
     /// `(peg_confirm_bps, peg_confirm_ms, peg_confirm_max_ms)` with their defaults.
     pub fn peg_confirm(&self) -> (f64, f64, f64) {
         (

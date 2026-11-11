@@ -396,3 +396,24 @@ async fn ids_and_explicit_detail_list() {
     );
     assert_eq!(c.tickers_detail_for(&[]).await.unwrap().count, 0);
 }
+
+#[tokio::test]
+async fn last_chunks_at_the_server_cap_and_merges() {
+    let server = MockServer::start().await;
+    let row = |id: u64| serde_json::json!({ "ticker": id, "mid": 1.0, "bid": 1.0, "ask": 1.0, "ci": 0, "confidence": 0, "flags": 0, "age_ms": 0, "status": "fresh" });
+    Mock::given(method("GET"))
+        .and(path("/v1/last"))
+        .respond_with(move |req: &wiremock::Request| {
+            let n = req.url.query_pairs().find(|(k, _)| k == "symbols").map_or(0, |(_, v)| v.split(',').count());
+            assert!(n <= nxr_sdk::client::LAST_MAX_SYMBOLS, "one request named {n} symbols");
+            ResponseTemplate::new(200).set_body_json(vec![row(n as u64)])
+        })
+        .expect(3)
+        .mount(&server)
+        .await;
+    let client = NxrClient::new(server.uri());
+    let syms: Vec<String> = (0..250).map(|i| format!("{i}-USDT")).collect();
+    let refs: Vec<&str> = syms.iter().map(String::as_str).collect();
+    let rows = client.last(&refs, None).await.unwrap();
+    assert_eq!(rows.iter().map(|r| r.ticker).collect::<Vec<_>>(), [100, 100, 50]);
+}

@@ -198,6 +198,9 @@ export interface StreamIndexRecord {
 }
 
 /** HTTP + WebSocket client for the NXR v1 API. */
+/** Server-side cap on `/v1/last?symbols=` entries per request. */
+export const LAST_MAX_SYMBOLS = 100;
+
 export class NxrClient {
   private readonly baseUrl: string;
   private readonly _fetch: typeof fetch;
@@ -438,10 +441,15 @@ export class NxrClient {
    */
   async last(tickerIds: Array<bigint | number>): Promise<SnapshotResponse[]> {
     if (tickerIds.length === 0) return [];
-    const csv = tickerIds.map((x) => x.toString()).join(',');
     type Raw = Array<Omit<SnapshotResponse, 'ticker'> & { ticker: number | string }>;
-    const data = await this.json<Raw>(`/v1/last?symbols=${encodeURIComponent(csv)}`);
-    return data.map((d) => ({ ...d, ticker: BigInt(d.ticker) }));
+    const out: SnapshotResponse[] = [];
+    // The server caps one request at LAST_MAX_SYMBOLS entries (400 over).
+    for (let i = 0; i < tickerIds.length; i += LAST_MAX_SYMBOLS) {
+      const csv = tickerIds.slice(i, i + LAST_MAX_SYMBOLS).map((x) => x.toString()).join(',');
+      const data = await this.json<Raw>(`/v1/last?symbols=${encodeURIComponent(csv)}`);
+      for (const d of data) out.push({ ...d, ticker: BigInt(d.ticker) });
+    }
+    return out;
   }
 
   /**

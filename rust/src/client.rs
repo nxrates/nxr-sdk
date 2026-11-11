@@ -309,6 +309,9 @@ pub enum HistoryData {
 // ── Client ───────────────────────────────────────────────────────────────
 
 /// REST + WebSocket consumer client for the NXR v1 API.
+/// Server-side cap on `/v1/last?symbols=` entries per request.
+pub const LAST_MAX_SYMBOLS: usize = 100;
+
 #[derive(Clone)]
 pub struct NxrClient {
     base_url: String,
@@ -508,20 +511,18 @@ impl NxrClient {
         syms: &[&str],
         max_age_ms: Option<i64>,
     ) -> Result<Vec<SnapshotResponse>> {
-        if syms.is_empty() {
-            return Ok(vec![]);
+        let mut out = Vec::with_capacity(syms.len());
+        // The server caps one request at `LAST_MAX_SYMBOLS` entries (400 over).
+        for chunk in syms.chunks(LAST_MAX_SYMBOLS) {
+            let csv = chunk.iter().map(|s| url_sym(s)).collect::<Vec<_>>().join(",");
+            let path = format!(
+                "/v1/last?symbols={}{}",
+                urlencoding(&csv),
+                max_age(max_age_ms, false)
+            );
+            out.extend(self.json_get::<Vec<SnapshotResponse>>(&path).await?);
         }
-        let csv = syms
-            .iter()
-            .map(|s| url_sym(s))
-            .collect::<Vec<_>>()
-            .join(",");
-        let path = format!(
-            "/v1/last?symbols={}{}",
-            urlencoding(&csv),
-            max_age(max_age_ms, false)
-        );
-        self.json_get(&path).await
+        Ok(out)
     }
 
     /// `GET /v1/freshness/{ticker}` — per-ticker liveness. `provider_lag_ms`

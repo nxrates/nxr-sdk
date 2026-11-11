@@ -286,6 +286,20 @@ describe('NxrClient REST', () => {
     expect(await client.last([10n, 20n, 30n])).toEqual([]);
   });
 
+  it('last() chunks at the server cap and merges', async () => {
+    const seen: string[] = [];
+    const fetchMock = makeFetch(async (url) => {
+      seen.push(url);
+      const n = decodeURIComponent(url.split('symbols=')[1]).split(',').length;
+      return new Response(JSON.stringify([{ ticker: String(n), mid: 1 }]), { status: 200 });
+    });
+    const client = new NxrClient({ baseUrl: 'http://nxr', fetch: fetchMock });
+    const ids = Array.from({ length: 250 }, (_, i) => i + 1);
+    const rows = await client.last(ids);
+    expect(seen).toHaveLength(3);
+    expect(rows.map((r) => r.ticker)).toEqual([100n, 100n, 50n]);
+  });
+
   it('builds the right /v1/ohlc query (tf in seconds)', async () => {
     const fetchMock = makeFetch(async (url) => {
       expect(url).toBe(

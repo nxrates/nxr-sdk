@@ -1762,6 +1762,7 @@ impl PipelineYml {
             "cexs.assets {clashes:?} resolve outside CR: add them to sdk/rust/data/class-pins.csv"
         );
         parsed.oracles.z_gate.validate()?;
+        parsed.cexs.validate_trust()?;
         if let Some(c) = &parsed.cexs.pegged_carry {
             c.validate()?;
         }
@@ -1855,6 +1856,10 @@ pub struct ExchangeYml {
     pub cmc_slug: Option<String>,
     #[serde(default)]
     pub weight: Option<f64>,
+    /// Venue trust, 0..=1: multiplies every weight of this venue's books in the
+    /// live blend. Required on a surveyed venue (`cmc_slug`), like `onchain.venues[].trust`.
+    #[serde(default)]
+    pub trust: Option<f64>,
     /// WebSocket endpoint (audit-frozen URL — preserved from prior hardcode).
     #[serde(default)]
     pub ws_url: Option<String>,
@@ -2232,6 +2237,19 @@ pub struct CexsYml {
 }
 
 impl CexsYml {
+    /// Every surveyed venue (`cmc_slug`) carries a `trust` in 0..=1: an absent one would weigh at
+    /// full trust, the opposite of what a missing score means.
+    pub fn validate_trust(&self) -> anyhow::Result<()> {
+        for (name, e) in &self.exchanges {
+            let ok = match e.trust {
+                Some(t) => (0.0..=1.0).contains(&t),
+                None => e.cmc_slug.is_none(),
+            };
+            anyhow::ensure!(ok, "cexs.exchanges.{name}.trust {:?} missing or outside 0..=1", e.trust);
+        }
+        Ok(())
+    }
+
     /// `coalesce_ms` for the forwarder: required, `1..=agg` (the floor timer it undercuts).
     /// Called by `nxr-crypto` boot AND its `--check-config`, so a ConfigMap without the key
     /// fails the pre-apply check for the new image. Other binaries never call it.
@@ -3201,6 +3219,20 @@ mod tests {
         assert_eq!(c.target_for_pair_classed("BTC/USDT", "crypto_major"), 300.0);
         // unclassified bucket also falls back to flat default.
         assert_eq!(c.target_for_pair_classed("FOO/BAR", "default"), 300.0);
+    }
+
+    /// A surveyed venue without a `trust`, or one outside 0..=1, fails the load; a futures row
+    /// (no `cmc_slug`) needs none.
+    #[test]
+    fn a_surveyed_venue_needs_a_trust_in_range() {
+        let cexs = |row: &str| serde_yml::from_str::<CexsYml>(&format!("exchanges:\n  x: {{{row}}}\n")).unwrap().validate_trust();
+        assert!(cexs("mitch_id: 1, cmc_slug: x, trust: 0.3").is_ok());
+        assert!(cexs("mitch_id: 1, cmc_slug: x, trust: 0").is_ok());
+        assert!(cexs("mitch_id: 1").is_ok(), "not surveyed");
+        assert!(cexs("mitch_id: 1, cmc_slug: x").is_err(), "absent");
+        assert!(cexs("mitch_id: 1, cmc_slug: x, trust: 1.5").is_err());
+        assert!(cexs("mitch_id: 1, cmc_slug: x, trust: -0.1").is_err());
+        assert!(cexs("mitch_id: 1, trust: .nan").is_err());
     }
 
     /// EURC/USDC (2026-07-21): classify_ticker (asset_class.rs) wrongly buckets

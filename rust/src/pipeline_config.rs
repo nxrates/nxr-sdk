@@ -1857,7 +1857,7 @@ pub struct ExchangeYml {
     #[serde(default)]
     pub weight: Option<f64>,
     /// Venue trust, 0..=1: multiplies every weight of this venue's books in the
-    /// live blend. Required on a surveyed venue (`cmc_slug`), like `onchain.venues[].trust`.
+    /// live blend. Absent = 1.0 (a config written before the key boots this image).
     #[serde(default)]
     pub trust: Option<f64>,
     /// WebSocket endpoint (audit-frozen URL — preserved from prior hardcode).
@@ -2237,15 +2237,15 @@ pub struct CexsYml {
 }
 
 impl CexsYml {
-    /// Every surveyed venue (`cmc_slug`) carries a `trust` in 0..=1: an absent one would weigh at
-    /// full trust, the opposite of what a missing score means.
+    /// A `trust` that is set is in 0..=1; an absent one is 1.0 (the depth cap alone bounds the venue).
     pub fn validate_trust(&self) -> anyhow::Result<()> {
         for (name, e) in &self.exchanges {
-            let ok = match e.trust {
-                Some(t) => (0.0..=1.0).contains(&t),
-                None => e.cmc_slug.is_none(),
-            };
-            anyhow::ensure!(ok, "cexs.exchanges.{name}.trust {:?} missing or outside 0..=1", e.trust);
+            let ok = e.trust.is_none_or(|t| (0.0..=1.0).contains(&t));
+            anyhow::ensure!(
+                ok,
+                "cexs.exchanges.{name}.trust {:?} outside 0..=1",
+                e.trust
+            );
         }
         Ok(())
     }
@@ -3221,15 +3221,24 @@ mod tests {
         assert_eq!(c.target_for_pair_classed("FOO/BAR", "default"), 300.0);
     }
 
-    /// A surveyed venue without a `trust`, or one outside 0..=1, fails the load; a futures row
-    /// (no `cmc_slug`) needs none.
+    /// A `trust` outside 0..=1 fails the load; a row without one loads (1.0), so a config written
+    /// before the key boots this image, and a row with a key this struct does not know still parses
+    /// (no `deny_unknown_fields` on the row: an image older than `trust` reads a config that carries it).
     #[test]
-    fn a_surveyed_venue_needs_a_trust_in_range() {
-        let cexs = |row: &str| serde_yml::from_str::<CexsYml>(&format!("exchanges:\n  x: {{{row}}}\n")).unwrap().validate_trust();
+    fn a_venue_trust_is_optional_and_in_range() {
+        let cexs = |row: &str| {
+            serde_yml::from_str::<CexsYml>(&format!("exchanges:\n  x: {{{row}}}\n"))
+                .unwrap()
+                .validate_trust()
+        };
         assert!(cexs("mitch_id: 1, cmc_slug: x, trust: 0.3").is_ok());
         assert!(cexs("mitch_id: 1, cmc_slug: x, trust: 0").is_ok());
         assert!(cexs("mitch_id: 1").is_ok(), "not surveyed");
-        assert!(cexs("mitch_id: 1, cmc_slug: x").is_err(), "absent");
+        assert!(cexs("mitch_id: 1, cmc_slug: x").is_ok(), "absent: 1.0");
+        assert!(
+            cexs("mitch_id: 1, cmc_slug: x, not_a_field_yet: 0.3").is_ok(),
+            "unknown row key"
+        );
         assert!(cexs("mitch_id: 1, cmc_slug: x, trust: 1.5").is_err());
         assert!(cexs("mitch_id: 1, cmc_slug: x, trust: -0.1").is_err());
         assert!(cexs("mitch_id: 1, trust: .nan").is_err());

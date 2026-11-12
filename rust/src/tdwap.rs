@@ -607,6 +607,9 @@ pub struct ProviderEntry {
     /// Last LIVENESS proof: `last_update`, or a later frameless carry
     /// (`shard::FLAG_CARRY`). Never read as an age of the price.
     pub live_at: Instant,
+    /// Last frame the VENUE originated (a new quote or book update): neither a forwarder re-affirm
+    /// (`FLAG_REAFFIRM`) nor a carry. The venue's own liveness, for coverage.
+    pub venue_at: Instant,
     /// Carry policy (all zero = this leg is never carried). Set by the caller from
     /// `cexs.pegged_carry`.
     pub carry: CarryCfg,
@@ -666,6 +669,7 @@ impl ProviderEntry {
             base_weight,
             last_update: now,
             live_at: now,
+            venue_at: now,
             carry: CarryCfg::NONE,
             ema_ipi_secs: 5.0,
             injected: false,
@@ -708,6 +712,9 @@ impl ProviderEntry {
         self.confirm(gap);
         self.last_update = now;
         self.live_at = now;
+        if index.flags & crate::shard::FLAG_REAFFIRM == 0 {
+            self.venue_at = now;
+        }
         self.index = index;
         // A real provider frame supersedes any earlier injected value.
         self.injected = false;

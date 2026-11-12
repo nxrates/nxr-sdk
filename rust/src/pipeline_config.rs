@@ -2301,6 +2301,12 @@ pub struct StorageYml {
     /// leg, as a pegged asset with a parity row does: Pyth alone is no price.
     #[serde(default)]
     pub no_fallback: Vec<String>,
+    /// Coverage backstop: an asset whose live depth on venues this node ingests is under this share of ALL its
+    /// surveyed depth (un-ingested venues included, dark ones out) reports that share as its live share, so the
+    /// signer's coverage gate refuses it. Above it, venues this node does not ingest leave the denominator.
+    /// Default 0.25, in (0, 1].
+    #[serde(default)]
+    pub min_ingested_share: Option<f64>,
     /// Serve a pegged non-USD cross (USDT/USDC) composed from its two stored USD legs instead of its own
     /// venue book (which freezes on the venue tick lattice). Absent = on; `false` restores the book.
     /// Boot-frozen: read [`Self::compose_pegged_crosses`].

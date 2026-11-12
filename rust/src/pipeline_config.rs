@@ -595,6 +595,11 @@ pub struct SignedQuotesYml {
     /// observation (ms). Default 250, hard-capped at 500.
     #[serde(default)]
     pub provenance_tolerance_ms: Option<i64>,
+    /// Least share of a feed's composite weight its on-chain pool legs must carry for the feed to take its derived
+    /// polled cadence on the co-sign timestamp gate (on-chain-depth feeds wider, CEX-deep feeds tight). Default 0.5,
+    /// in (0, 1]. A row's own `source_cadence_ms` is not subject to it.
+    #[serde(default)]
+    pub pool_cadence_min_share: Option<f64>,
     /// Signable catalog (per-feed policy; signing itself is universal). A row is
     /// identified by its `symbol`, which resolves to the MITCH ticker id the
     /// wire carries: a ticker22 record is tickerId||priceB64||sigma||conf and

@@ -1141,6 +1141,16 @@ pub struct SignedFeedYml {
     /// at boot (signed.rs); absent = global default.
     #[serde(default)]
     pub sigma_tol_pbps: Option<u32>,
+    /// Re-emit cadence (ms) of this feed's slowest POLLED source (an on-chain
+    /// pool composite: `onchain.poll_ms`). Each seat polls on its own phase, so
+    /// two healthy seats observe the same state up to one cadence apart: at
+    /// co-sign the proposed sourceTs may lead this seat's own observation by
+    /// `provenance_tolerance_ms` + this. Timestamp only: the price must still
+    /// sit inside `cosign_tolerance_bps` of this seat's own mark. Absent = 0
+    /// (push-stream feeds: CEX books). Bounds 250..=2000 and below the feed's
+    /// `max_age_ms`, enforced at boot (signed.rs).
+    #[serde(default)]
+    pub source_cadence_ms: Option<u64>,
     /// Per-feed DISK-SCAN horizon for the σ window, in 30 m units. `None` = the
     /// longest configured σ leg (`sigma_windows_min`, 336 bars = 7 d), which is
     /// a CRYPTO shape: it assumes the tape never stops, so 7 d always holds 336

@@ -628,21 +628,10 @@ pub fn unpinned_clashes<'a>(class: AssetClass, symbols: impl IntoIterator<Item =
 
 /// Major quote currency symbols used by `detect_quote_currency` (lowercase
 /// for direct comparison against `to_lowercase()` input). Single SDK source
-/// of truth — superset of [`DEFAULT_QUOTE_SUFFIXES`] (the crypto-CEX side
-/// uses a tighter subset to avoid mis-splitting non-crypto-quoted pairs).
-/// Phase 59.R2D — was duplicated in `sdk::resolve::MAJOR_QUOTE_SYMBOLS`
-/// (private) + `crypto::exchange::DEFAULT_QUOTE_SUFFIXES` (also private).
+/// of truth.
 pub const MAJOR_QUOTE_SYMBOLS_LC: &[&str] = &[
     "usdt", "usdc", "usd", "eur", "gbp", "jpy", "cad", "aud", "chf", "btc", "eth",
 ];
-
-/// Uppercase quote suffix list used by CEX symbol parsers
-/// (`normalize_suffix("BTCUSDT", DEFAULT_QUOTE_SUFFIXES)` → "BTC/USDT").
-/// Order is load-bearing: longer / more-specific suffixes first so
-/// `USDT` matches before `USD`. Audit-frozen 2026-05-29 — adding new
-/// quote bases requires a CEX adapter audit.
-/// Phase 59.R2D moved this from `crypto::exchange::mod::DEFAULT_QUOTE_SUFFIXES`.
-pub const DEFAULT_QUOTE_SUFFIXES: &[&str] = &["USDT", "USDC", "BTC", "ETH", "USD"];
 
 /// Marks a perpetual-swap market in a canonical symbol: `XAU/USDT:PERP`.
 /// The resolver mints the PERP instrument nibble for it, so the id never

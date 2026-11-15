@@ -1871,18 +1871,6 @@ pub struct ExchangeYml {
     /// REST markets / exchangeInfo endpoint (audit-frozen).
     #[serde(default)]
     pub rest_url: Option<String>,
-    /// Per-exchange quote-asset suffix list used by `normalize_symbol`
-    /// (suffix-split mode). Was hardcoded in 13 adapters
-    /// (`crypto/src/exchange/{binance,bybit,bitget,...}.rs::quote_suffixes`).
-    /// Empty ⇒ fall back to `nxr_sdk::resolve::DEFAULT_QUOTE_SUFFIXES`.
-    /// Phase 59.R3.H1 (2026-05-30).
-    #[serde(default)]
-    pub quote_suffixes: Vec<String>,
-    /// Extra quotes that SPLIT a listing symbol (`XRPUSD1` is `XRP/USD1`, not an
-    /// unsplittable native) but admit it only via the survey tier: the static
-    /// tier's "base/USD is static" rule never applies to these quotes.
-    #[serde(default)]
-    pub survey_quote_suffixes: Vec<String>,
     /// Fallback ticker list used by `parse_markets_response` when REST returns
     /// a malformed / geo-blocked response. Was hardcoded in
     /// `crypto/src/exchange/{bullish,bitunix,weex}.rs` (phase 59.R3.C2.O2,

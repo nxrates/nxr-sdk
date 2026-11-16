@@ -555,6 +555,12 @@ pub struct SignedQuotesYml {
     /// Gates peer acceptance only; what is signed is unchanged. Expires on its own.
     #[serde(default)]
     pub cosign_compat: Option<CosignCompatYml>,
+    /// Confidence horizon in seconds (conf ∝ σ·sqrt(horizon)); absent = 30. A feed's own
+    /// [`SignedFeedYml::conf_horizon_s`] wins. Finite, in (0, 300], validated at boot (signed.rs).
+    /// NOT a cosign commitment: no hash covers it, but a seat running another value can be
+    /// refused by `Refusal::Conf`, so roll it fleet-wide.
+    #[serde(default)]
+    pub conf_horizon_s: Option<f64>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
     /// cosign peers, in the same fan-out. Operator config only, never a peer's
     /// or a request's claim, and never a mark source: a cold FLEET has no warm
@@ -1151,6 +1157,9 @@ pub struct SignedFeedYml {
     /// `max_age_ms`, enforced at boot (signed.rs).
     #[serde(default)]
     pub source_cadence_ms: Option<u64>,
+    /// Per-feed confidence horizon in seconds; absent = [`SignedQuotesYml::conf_horizon_s`].
+    #[serde(default)]
+    pub conf_horizon_s: Option<f64>,
     /// Per-feed DISK-SCAN horizon for the σ window, in 30 m units. `None` = the
     /// longest configured σ leg (`sigma_windows_min`, 336 bars = 7 d), which is
     /// a CRYPTO shape: it assumes the tape never stops, so 7 d always holds 336

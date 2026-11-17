@@ -555,6 +555,12 @@ pub struct SignedQuotesYml {
     /// Gates peer acceptance only; what is signed is unchanged. Expires on its own.
     #[serde(default)]
     pub cosign_compat: Option<CosignCompatYml>,
+    /// Confidence horizon in seconds per feed class (conf ∝ σ·sqrt(horizon)); a class absent here keeps
+    /// 30. Only `volatile` (non-pegged crypto-wire pairs, `metal_backed` bases excluded) is a known key;
+    /// any other key, or a value outside (0, 300], is refused at boot (signed.rs). Cosign does not
+    /// hash it, but a seat on another value can be refused by `Refusal::Conf`: roll fleet-wide.
+    #[serde(default)]
+    pub conf_horizon_class_s: BTreeMap<String, f64>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
     /// cosign peers, in the same fan-out. Operator config only, never a peer's
     /// or a request's claim, and never a mark source: a cold FLEET has no warm

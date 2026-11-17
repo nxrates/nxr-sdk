@@ -566,6 +566,11 @@ pub struct SignedQuotesYml {
     /// is refused at boot (signed.rs). Raises a conf, never lowers one. Roll fleet-wide with the horizon.
     #[serde(default)]
     pub conf_floor_bps_class: BTreeMap<String, f64>,
+    /// Extra base assets of the `volatile` conf class beyond `cexs.crypto_majors` (e.g. `MON`): the class is a
+    /// positive membership, so a volatile asset no list names stays on the 30 s horizon until it is listed here.
+    /// Only matters with a shortened `conf_horizon_class_s.volatile`; roll fleet-wide with it.
+    #[serde(default)]
+    pub conf_volatile_bases: Vec<String>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
     /// cosign peers, in the same fan-out. Operator config only, never a peer's
     /// or a request's claim, and never a mark source: a cold FLEET has no warm

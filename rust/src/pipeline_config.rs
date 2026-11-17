@@ -561,6 +561,11 @@ pub struct SignedQuotesYml {
     /// hash it, but a seat on another value can be refused by `Refusal::Conf`: roll fleet-wide.
     #[serde(default)]
     pub conf_horizon_class_s: BTreeMap<String, f64>,
+    /// Minimum signed confidence in bp per feed class, applied only to a class whose horizon is shortened
+    /// by `conf_horizon_class_s`; absent keeps the 1 bp base floor. Only `volatile`; a value outside [1, 100]
+    /// is refused at boot (signed.rs). Raises a conf, never lowers one. Roll fleet-wide with the horizon.
+    #[serde(default)]
+    pub conf_floor_bps_class: BTreeMap<String, f64>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
     /// cosign peers, in the same fan-out. Operator config only, never a peer's
     /// or a request's claim, and never a mark source: a cold FLEET has no warm

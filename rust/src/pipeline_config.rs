@@ -571,6 +571,14 @@ pub struct SignedQuotesYml {
     /// Only matters with a shortened `conf_horizon_class_s.volatile`; roll fleet-wide with it.
     #[serde(default)]
     pub conf_volatile_bases: Vec<String>,
+    /// Multiplier on the signed σ per feed class (the σ the on-chain stale term, vega term and curve dispersion
+    /// read); a class absent here signs 1.0. Only `volatile`; a value outside [0.5, 1] is refused at boot
+    /// (signed.rs): it may only shrink the wire σ. Conf, the mark grid and the cosign price tolerance read the
+    /// unscaled σ. A cosigner refuses a proposer whose σ understates its own, so roll every COSIGNER seat first,
+    /// proposer-eligible seats last, one config fleet-wide (any change of the value is the same roll, and
+    /// `conf_volatile_bases` decides which lanes the class holds, so it rolls with it).
+    #[serde(default)]
+    pub sigma_wire_scale_class: BTreeMap<String, f64>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
     /// cosign peers, in the same fan-out. Operator config only, never a peer's
     /// or a request's claim, and never a mark source: a cold FLEET has no warm

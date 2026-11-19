@@ -325,7 +325,7 @@ pub struct CosignCompatYml {
     /// Highest feed `idx` the previous catalog carried: its lane-map commitment is recomputed
     /// over this replica's own feeds up to it.
     pub legacy_max_idx: u16,
-    /// Domain labels the bridge spans; each must be a wire-2 domain of this config.
+    /// Domain labels the bridge spans; each must be a packed-layout domain of this config (any wire).
     pub domains: Vec<String>,
 }
 

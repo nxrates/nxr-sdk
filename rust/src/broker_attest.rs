@@ -1084,6 +1084,17 @@ mod tests {
     }
 
     #[test]
+    fn a_lagging_guard_accepts_an_honest_signed_answer() {
+        let b = [served(&beat(), 0, T0), served(&Beat { collector_id: 77, ..beat() }, 1, T0)];
+        let sig = sign_seat_answer(&key(8), "nx-a", 2, T0, &b, &[]).unwrap();
+        assert_eq!(verify_seat_answer(&roster(), "nx-a", "nx-a", 2, T0, &b, &[], &sig, T0), Ok(()));
+        assert_eq!(
+            verify_attest(&b[1].frame, &roster(), T0, None, Mode::Guard).0,
+            Verdict::Rejected(Reject::UnknownCollector)
+        );
+    }
+
+    #[test]
     fn verifier_clock_stepped_back_does_not_block() {
         // `last` was stored when the verifier's clock read T0 + 1 h; it now reads T0. A fresh frame is accepted.
         let ahead = Some(Last {

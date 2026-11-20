@@ -3,7 +3,8 @@
 //! Spec: btr scratch `broker-attest-spec-1120.md` rev 3.1. Shared by nx-rates (collector, relay, seat) and keepers
 //! (guard). Everything here is pure: no I/O, no clock reads, no logging. Golden vectors pin the bytes on both sides.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer};
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -25,6 +26,30 @@ pub const BROKER_SESSION_TIMEOUT_MS: i64 = 20_000;
 pub const MAX_SKEW_MS: i64 = 5_000;
 /// Collectors emit at least this often (timeout / 4).
 pub const MAX_CADENCE_MS: i64 = BROKER_SESSION_TIMEOUT_MS / 4;
+
+/// MITCH wire type code of `BROKER_ATTEST` (low nibble of header bytes 0..2). mitch's own codes are 1..=7, so 8 never
+/// collides; `MitchHeader::unpack` refuses it, which is why routing reads the raw bytes ([`routing`]).
+pub const MITCH_CODE: u8 = 8;
+
+/// The 16 B routing header of a frame: type code, `provider_id` (12 bits) and `mts` (mitch 16 µs ticks), count 1.
+pub fn header(provider_id: u16, mts: u64) -> [u8; 16] {
+    let mut h = [0u8; 16];
+    h[..2].copy_from_slice(&(u16::from(MITCH_CODE) | (provider_id << 4)).to_le_bytes());
+    h[2..8].copy_from_slice(&mts.to_le_bytes()[..6]);
+    h[8] = 1;
+    h
+}
+
+/// Routing view `(provider, header mts)` of an exactly [`FRAME_LEN`] datagram carrying [`MITCH_CODE`]. Unsigned: relay
+/// filtering and freshness only, never a verdict.
+pub fn routing(frame: &[u8]) -> Option<(u16, u64)> {
+    if frame.len() != FRAME_LEN || frame[0] & 0x0F != MITCH_CODE {
+        return None;
+    }
+    let mut ts = [0u8; 8];
+    ts[..6].copy_from_slice(&frame[2..8]);
+    Some((u16_at(frame, 0) >> 4, u64::from_le_bytes(ts)))
+}
 
 /// The signed fields of one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,6 +715,18 @@ mod tests {
             boot_id: 0x8000_0000_0000_0001,
             ..beat()
         }
+    }
+
+    #[test]
+    fn routing_header_round_trips_and_never_parses_as_mitch() {
+        let h = header(961, 0x0000_1234_5678_9abc);
+        let f = sign_frame(&key(7), h, &beat());
+        assert_eq!(routing(&f), Some((961, 0x0000_1234_5678_9abc)));
+        assert_eq!(routing(&f[..127]), None);
+        assert!(mitch::header::MitchHeader::unpack(&h).is_err(), "code 8 must stay outside mitch's 1..=7");
+        let mut other = f;
+        other[0] = (other[0] & 0xF0) | 7;
+        assert_eq!(routing(&other), None);
     }
 
     #[test]

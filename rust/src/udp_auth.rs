@@ -5,7 +5,7 @@
 //! entire header and payload. Inner MITCH bytes are not decoded until the tag
 //! has verified.
 //!
-//! Version 1 carries one 56 B Index or 32 B heartbeat. Version 2 carries 2 to
+//! Version 1 carries one 56 B Index, 32 B heartbeat or 128 B broker attest frame. Version 2 carries 2 to
 //! [`MAX_PACKED_FRAMES`] whole 56 B Index frames back to back, each with its own
 //! MITCH header; `source_ms` is the OLDEST frame's, so the freshness gate covers
 //! all of them. A v1-only verifier refuses v2 as an unsupported version, so a
@@ -35,6 +35,8 @@ pub const MAX_PACKED_FRAMES: usize = 20;
 pub const MAX_DATAGRAM_LEN: usize = HEADER_LEN + MAX_PACKED_FRAMES * INDEX_LEN + TAG_LEN;
 const KEY_LEN: usize = 32;
 const HEARTBEAT_LEN: usize = 32;
+/// One collector-signed `BROKER_ATTEST` frame (128 B, `broker_attest::FRAME_LEN`); carried as version 1.
+const ATTEST_LEN: usize = 128;
 /// Replay bitmap capacity. The window must exceed `max_age_ms` x peak frame
 /// rate, otherwise a duplicate that is still fresh enough to pass the
 /// freshness gate falls off the map and is re-accepted. 1024 covers the live
@@ -561,7 +563,7 @@ impl UdpAuthVerifier {
 /// Envelope version a payload length seals as; `None` = not a valid payload.
 fn payload_version(len: usize) -> Option<u8> {
     match len {
-        INDEX_LEN | HEARTBEAT_LEN => Some(VERSION),
+        INDEX_LEN | HEARTBEAT_LEN | ATTEST_LEN => Some(VERSION),
         n if n % INDEX_LEN == 0 && (2..=MAX_PACKED_FRAMES).contains(&(n / INDEX_LEN)) => Some(VERSION_PACKED),
         _ => None,
     }
@@ -952,6 +954,9 @@ mod tests {
         sender.seal_into(&full, 1_000, &mut out).unwrap();
         assert_eq!(out.len(), MAX_DATAGRAM_LEN);
         const { assert!(MAX_DATAGRAM_LEN <= 1200) };
+        assert!(v.verify(&out, PEER, 1_001).is_ok());
+        sender.seal_into(&[0u8; ATTEST_LEN], 1_000, &mut out).unwrap();
+        assert_eq!(out[4], VERSION, "an attest frame is v1");
         assert!(v.verify(&out, PEER, 1_001).is_ok());
         for bad in [INDEX_LEN + 1, 2 * INDEX_LEN + 8, (MAX_PACKED_FRAMES + 1) * INDEX_LEN, 2 * HEARTBEAT_LEN] {
             assert!(sender.seal_into(&vec![0u8; bad], 1_000, &mut out).is_err(), "sealed {bad} B");

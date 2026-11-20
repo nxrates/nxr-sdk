@@ -29,6 +29,7 @@ pub mod hot_reload;
 pub mod ipc;
 pub mod lag;
 pub mod logging;
+pub mod market_hours;
 pub mod memory;
 #[cfg(feature = "server-metrics")]
 pub mod metrics;

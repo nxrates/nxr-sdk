@@ -1460,6 +1460,10 @@ pub struct CtraderYml {
     /// the non-CEX default; see core `weights::resolve`.
     #[serde(default)]
     pub prior_weight: Option<f64>,
+    /// Broker-attest roster TOML (`deploy/broker-attest-roster.toml`; relative = to the config file's directory).
+    /// Absent = the seat neither ingests nor serves `/v1/broker/attest`.
+    #[serde(default)]
+    pub attest_roster: Option<String>,
 }
 
 /// Ceiling on a configured `prior_weight`; core `weights` clamps runtime weights to the same.

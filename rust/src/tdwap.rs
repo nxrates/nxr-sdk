@@ -541,7 +541,7 @@ pub fn coarse_now() -> Instant {
 #[inline]
 pub fn coarse_now_backdated(lateness_ms: u64) -> Instant {
     // Saturates at the clock's origin: a node up for less than `lateness_ms` must not panic.
-    coarse_now().checked_sub(Duration::from_millis(lateness_ms)).unwrap_or_default()
+    coarse_now().checked_sub(Duration::from_millis(lateness_ms)).unwrap_or(Instant::from_u64(0))
 }
 
 /// Policy of a carried leg (`shard::FLAG_CARRY`, module header **Carried legs**).
@@ -1628,6 +1628,19 @@ fn n_of(bs: &[f64]) -> f64 {
         .map(|b| b.min(n_clip()))
         .fold((0.0, 0.0), |(a, q), x| (a + x, q + x * x));
     crate::stats::n_eff_from_sums(a, q)
+}
+
+#[cfg(test)]
+mod backdate_tests {
+    use super::*;
+
+    /// Past node uptime the stamp saturates at the clock origin: older than now, never fresher.
+    #[test]
+    fn backdating_past_uptime_saturates_old_not_fresh() {
+        let t = coarse_now_backdated(u64::MAX / 4);
+        assert_eq!(t, Instant::from_u64(0));
+        assert!(coarse_now().duration_since(t).as_f64() > 0.0);
+    }
 }
 
 #[cfg(test)]

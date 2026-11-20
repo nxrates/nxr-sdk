@@ -19,6 +19,8 @@ server-metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", 
 # forwarder, the cTrader forwarder and the consumer WS client. Kept separate from
 # `client` so a forwarder gets the config without sdk's REST client.
 ws-config = ["dep:tokio-tungstenite"]
+# Collector-signed broker session beats (`broker_attest`): nx-rates collector/relay/seat and the keepers guard.
+broker-attest = ["dep:ed25519-dalek"]
 
 [dependencies]
 mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }
@@ -50,6 +52,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
+ed25519-dalek = { version = "2.2", optional = true }
 
 socket2 = { version = "0.5", features = ["all"], optional = true }
 libc = "0.2"
@@ -61,6 +64,7 @@ metrics-exporter-prometheus = { version = "0.17", default-features = false, opti
 axum = { version = "0.8", optional = true }
 
 [dev-dependencies]
+toml = "0.8"
 ureq = { version = "2.10", features = ["json"] }
 wiremock = "0.6"
 metrics-exporter-prometheus = { version = "0.17", default-features = false }

@@ -14,6 +14,8 @@
 
 pub mod agg;
 pub mod asset_class;
+#[cfg(feature = "broker-attest")]
+pub mod broker_attest;
 pub mod bar_builder;
 pub mod bar_reader;
 #[cfg(feature = "client")]

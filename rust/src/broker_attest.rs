@@ -914,11 +914,11 @@ mod tests {
         Roster::load(&rf).unwrap();
         assert!(toml::from_str::<RosterFile>(&ok.replace("providers", "provider")).is_err());
         assert!(toml::from_str::<RosterFile>(&format!("{ok}extra = 1\n")).is_err());
-        // The shipped roster parses (keys PENDING: load refuses it until keygen fills them).
+        // Inside nx-rates, the shipped roster must parse and load.
         let shipped = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/broker-attest-roster.toml"));
         if let Ok(t) = shipped {
             let rf: RosterFile = toml::from_str(&t).unwrap();
-            assert!(Roster::load(&rf).is_err(), "PENDING roster must not load");
+            Roster::load(&rf).expect("deploy/broker-attest-roster.toml must load");
         }
     }
 

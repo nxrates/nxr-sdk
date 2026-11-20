@@ -314,6 +314,13 @@ impl Roster {
                 return Err(format!("deny entry {d:?}: names no rostered key"));
             }
         }
+        if r.beats_cap() > MAX_ENTRIES || r.unverified_total_cap() > MAX_ENTRIES {
+            return Err(format!(
+                "roster too large for one answer: {} beats, {} unverified (max {MAX_ENTRIES})",
+                r.beats_cap(),
+                r.unverified_total_cap()
+            ));
+        }
         Ok(r)
     }
 
@@ -408,6 +415,9 @@ pub fn verify_attest(frame: &[u8], roster: &Roster, now_ms: i64, last: Option<La
         seq: b.seq,
         ts_ms: b.ts_ms,
     };
+    // A `last` ahead of the verifier's own clock (its clock stepped back) would block every fresh frame until the clock
+    // catches up: treat it as absent.
+    let last = last.filter(|l| l.ts_ms <= now_ms.saturating_add(MAX_SKEW_MS));
     match last {
         Some(l) if l.boot_id == b.boot_id && l.seq == b.seq => match mode {
             Mode::Ingest => (Verdict::Dup, Some(l)),
@@ -506,7 +516,9 @@ pub fn verify_seat_answer(
     if (now_ms - guard_now_ms).abs() > MAX_SKEW_MS {
         return Err(SeatReject::Skew);
     }
-    if beats.len() > roster.beats_cap() || unverified.len() > roster.unverified_total_cap() {
+    // Absolute bounds only: a guard whose roster lags the seat's must not reject an honest answer (entries it does not
+    // know are ignored per frame by verify_attest). Seats keep the roster-derived caps on their side.
+    if beats.len() > MAX_ENTRIES || unverified.len() > MAX_ENTRIES {
         return Err(SeatReject::Caps);
     }
     let mut seen: Vec<(u16, u16)> = beats.iter().map(|s| (u16_at(&s.frame, 16), u16_at(&s.frame, 20))).collect();
@@ -518,14 +530,6 @@ pub fn verify_seat_answer(
     seen.sort_unstable();
     if seen.windows(2).any(|w| w[0] == w[1]) {
         return Err(SeatReject::Duplicate);
-    }
-    for s in unverified {
-        let (c, p) = (u16_at(&s.frame, 16), u16_at(&s.frame, 20));
-        if !roster.collector(c).is_some_and(|x| x.providers.contains(&p))
-            || seen.iter().filter(|k| (k.0, k.1) == (c, p)).count() > roster.unverified_cap(c)
-        {
-            return Err(SeatReject::Caps);
-        }
     }
     let msg = seat_message(seat, key_id, now_ms, beats, unverified).map_err(|_| SeatReject::Caps)?;
     k.pk.verify_strict(&msg, &Signature::from_bytes(sig)).map_err(|_| SeatReject::Signature)
@@ -583,8 +587,10 @@ pub fn frame_from_hex(h: &str) -> Option<[u8; FRAME_LEN]> {
     hex::decode(h).ok()?.try_into().ok()
 }
 
-/// Guards refuse a `/v1/broker/attest` body above this before parsing.
-pub const MAX_ANSWER_BYTES: usize = 64 * 1024;
+/// Absolute cap on `beats` and on `unverified` entries in one answer, whatever either side's roster says.
+pub const MAX_ENTRIES: usize = 512;
+/// Guards refuse a `/v1/broker/attest` body above this before parsing: 2 × [`MAX_ENTRIES`] entries of ≤ 320 B JSON each.
+pub const MAX_ANSWER_BYTES: usize = 2 * MAX_ENTRIES * 320 + 4096;
 
 #[cfg(test)]
 mod tests {
@@ -1047,8 +1053,7 @@ mod tests {
         let chk = |b: &[Served], u: &[Served]| verify_seat_answer(&r, "nx-a", "nx-a", 2, T0, b, u, &[0; 64], T0);
         let a = served(&beat(), 0, T0);
         assert_eq!(chk(&[a.clone(), a.clone()], &[]), Err(SeatReject::Duplicate));
-        let c = served(&Beat { provider_id: 42, ..beat() }, 0, T0);
-        assert_eq!(chk(&[a.clone(), c.clone(), a.clone()], &[]), Err(SeatReject::Caps));
+        assert_eq!(chk(&vec![a.clone(); MAX_ENTRIES + 1], &[]), Err(SeatReject::Caps), "absolute bound");
         let unk = |kid: u16, p: u16| Served {
             frame: sign_frame(
                 &key(9),
@@ -1063,19 +1068,37 @@ mod tests {
             rx_ms: T0,
         };
         assert_eq!(chk(&[], &[unk(2, 41), unk(2, 41)]), Err(SeatReject::Duplicate));
-        assert_eq!(
-            chk(&[], &[unk(2, 41), unk(3, 41), unk(4, 41)]),
-            Err(SeatReject::Caps),
-            "per-slot cap keys+1"
-        );
+        // A guard whose roster lags the seat's (unknown collector, extra entries) still verifies the answer: only the
+        // zero signature fails here, never Caps. Unknown frames are then ignored per frame by verify_attest.
         let stranger = Served {
             frame: sign_frame(&key(9), [0; 16], &Beat { collector_id: 77, ..beat() }),
             path: 1,
             rx_ms: T0,
         };
-        assert_eq!(chk(&[], &[stranger]), Err(SeatReject::Caps), "unrostered collector");
-        // An honest mid-rotation answer (2 unknown keys per slot = keys + 1) is within caps: only the signature fails here.
-        assert_eq!(chk(&[], &[unk(2, 41), unk(3, 41), unk(2, 42), unk(3, 42)]), Err(SeatReject::Signature));
+        let c = served(&Beat { provider_id: 42, ..beat() }, 0, T0);
+        let lagging = served(&Beat { collector_id: 77, ..beat() }, 0, T0);
+        assert_eq!(
+            chk(&[a.clone(), c, lagging], &[stranger, unk(2, 41), unk(3, 41), unk(4, 41)]),
+            Err(SeatReject::Signature)
+        );
+    }
+
+    #[test]
+    fn verifier_clock_stepped_back_does_not_block() {
+        // `last` was stored when the verifier's clock read T0 + 1 h; it now reads T0. A fresh frame is accepted.
+        let ahead = Some(Last {
+            boot_id: 0x2222,
+            seq: 9,
+            ts_ms: T0 + 3_600_000,
+        });
+        assert!(matches!(v(&frame(&beat()), T0, ahead, Mode::Guard).0, Verdict::Valid(_)));
+    }
+
+    #[test]
+    fn roster_refuses_more_than_one_answer_holds() {
+        let mut rf = roster_file();
+        rf.collector[0].providers = (1..=300).collect();
+        assert!(Roster::load(&rf).unwrap_err().contains("too large"));
     }
 
     #[test]

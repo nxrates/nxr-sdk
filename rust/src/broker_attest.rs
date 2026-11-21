@@ -40,10 +40,11 @@ pub fn header(provider_id: u16, mts: u64) -> [u8; 16] {
     h
 }
 
-/// Routing view `(provider, header mts)` of an exactly [`FRAME_LEN`] datagram carrying [`MITCH_CODE`]. Unsigned: relay
-/// filtering and freshness only, never a verdict.
+/// Routing view `(provider, header mts)` of an exactly [`FRAME_LEN`] datagram carrying [`MITCH_CODE`] whose header
+/// provider equals the signed `provider_id` (so a relay or ingress filters on what the verifier judges). Unsigned:
+/// relay filtering and freshness only, never a verdict.
 pub fn routing(frame: &[u8]) -> Option<(u16, u64)> {
-    if frame.len() != FRAME_LEN || frame[0] & 0x0F != MITCH_CODE {
+    if frame.len() != FRAME_LEN || frame[0] & 0x0F != MITCH_CODE || u16_at(frame, 0) >> 4 != u16_at(frame, 20) {
         return None;
     }
     let mut ts = [0u8; 8];
@@ -435,6 +436,12 @@ pub fn verify_attest(frame: &[u8], roster: &Roster, now_ms: i64, last: Option<La
     if b.ts_ms > now_ms.saturating_add(MAX_SKEW_MS) {
         return rej(Reject::Future);
     }
+    advance(&b, last, now_ms, mode)
+}
+
+/// The monotonic step of [`verify_attest`] alone, for a frame that already passed every static rule and the signature.
+/// Lets a seat verify outside its state lock and re-check order under it.
+pub fn advance(b: &Beat, last: Option<Last>, now_ms: i64, mode: Mode) -> (Verdict, Option<Last>) {
     let next = Last {
         boot_id: b.boot_id,
         seq: b.seq,
@@ -446,11 +453,11 @@ pub fn verify_attest(frame: &[u8], roster: &Roster, now_ms: i64, last: Option<La
     match last {
         Some(l) if l.boot_id == b.boot_id && l.seq == b.seq => match mode {
             Mode::Ingest => (Verdict::Dup, Some(l)),
-            Mode::Guard => (Verdict::Valid(b), Some(l)),
+            Mode::Guard => (Verdict::Valid(*b), Some(l)),
         },
         Some(l) if l.boot_id == b.boot_id && (b.seq < l.seq || b.ts_ms < l.ts_ms) => (Verdict::Rejected(Reject::Regression), Some(l)),
         Some(l) if l.boot_id != b.boot_id && b.ts_ms <= l.ts_ms => (Verdict::Rejected(Reject::Regression), Some(l)),
-        _ => (Verdict::Valid(b), Some(next)),
+        _ => (Verdict::Valid(*b), Some(next)),
     }
 }
 
@@ -720,7 +727,8 @@ mod tests {
     #[test]
     fn routing_header_round_trips_and_never_parses_as_mitch() {
         let h = header(961, 0x0000_1234_5678_9abc);
-        let f = sign_frame(&key(7), h, &beat());
+        let f = sign_frame(&key(7), h, &Beat { provider_id: 961, ..beat() });
+        assert_eq!(routing(&sign_frame(&key(7), h, &beat())), None, "header provider != signed provider");
         assert_eq!(routing(&f), Some((961, 0x0000_1234_5678_9abc)));
         assert_eq!(routing(&f[..127]), None);
         assert!(mitch::header::MitchHeader::unpack(&h).is_err(), "code 8 must stay outside mitch's 1..=7");

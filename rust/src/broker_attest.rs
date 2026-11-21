@@ -519,9 +519,17 @@ pub enum SeatReject {
     Signature,
 }
 
-/// Guard-side check of one seat answer. `expected_seat` = the name this URL maps to (never the answer's own claim).
-/// Checks caps and duplicates, key binding to THAT seat, skew against the guard clock, and the signature.
-/// Frame validity is judged separately, per frame, with [`verify_attest`] in [`Mode::Guard`].
+/// What a seat/guard clock skew beyond [`MAX_SKEW_MS`] does ([`verify_seat_answer_with`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkewMode {
+    /// Refuse the answer ([`SeatReject::Skew`]): the guard's enforce mode.
+    Enforce,
+    /// Accept an otherwise valid answer and report the skew (`Ok(true)`) for a page: the guard's page-only mode, where a
+    /// skewed seat must not lose its beats.
+    PageOnly,
+}
+
+/// Guard-side check of one seat answer, skew refused ([`SkewMode::Enforce`]). See [`verify_seat_answer_with`].
 #[allow(clippy::too_many_arguments)]
 pub fn verify_seat_answer(
     roster: &Roster,
@@ -534,6 +542,38 @@ pub fn verify_seat_answer(
     sig: &[u8; 64],
     guard_now_ms: i64,
 ) -> Result<(), SeatReject> {
+    verify_seat_answer_with(
+        roster,
+        expected_seat,
+        seat,
+        key_id,
+        now_ms,
+        beats,
+        unverified,
+        sig,
+        guard_now_ms,
+        SkewMode::Enforce,
+    )
+    .map(|_| ())
+}
+
+/// Guard-side check of one seat answer. `expected_seat` = the name this URL maps to (never the answer's own claim).
+/// Checks caps and duplicates, key binding to THAT seat, skew against the guard clock (per `skew`), and the signature.
+/// `Ok(skewed)`: `true` only under [`SkewMode::PageOnly`], for an answer past [`MAX_SKEW_MS`] that passed everything else.
+/// Frame validity is judged separately, per frame, with [`verify_attest`] in [`Mode::Guard`].
+#[allow(clippy::too_many_arguments)]
+pub fn verify_seat_answer_with(
+    roster: &Roster,
+    expected_seat: &str,
+    seat: &str,
+    key_id: u16,
+    now_ms: i64,
+    beats: &[Served],
+    unverified: &[Served],
+    sig: &[u8; 64],
+    guard_now_ms: i64,
+    skew: SkewMode,
+) -> Result<bool, SeatReject> {
     if seat != expected_seat {
         return Err(SeatReject::WrongSeat);
     }
@@ -545,7 +585,8 @@ pub fn verify_seat_answer(
     if now_ms < k.not_before_ms || now_ms >= k.not_after_ms {
         return Err(SeatReject::KeyWindow);
     }
-    if (now_ms - guard_now_ms).abs() > MAX_SKEW_MS {
+    let skewed = (now_ms - guard_now_ms).abs() > MAX_SKEW_MS;
+    if skewed && skew == SkewMode::Enforce {
         return Err(SeatReject::Skew);
     }
     // Absolute bounds only: a guard whose roster lags the seat's must not reject an honest answer (entries it does not
@@ -564,7 +605,8 @@ pub fn verify_seat_answer(
         return Err(SeatReject::Duplicate);
     }
     let msg = seat_message(seat, key_id, now_ms, beats, unverified).map_err(|_| SeatReject::Caps)?;
-    k.pk.verify_strict(&msg, &Signature::from_bytes(sig)).map_err(|_| SeatReject::Signature)
+    k.pk.verify_strict(&msg, &Signature::from_bytes(sig)).map_err(|_| SeatReject::Signature)?;
+    Ok(skewed)
 }
 
 /// Sign a seat answer (seat side, once per second, served from cache).
@@ -1063,6 +1105,14 @@ mod tests {
         assert_eq!(chk("nx-a", T0), Ok(()));
         assert_eq!(chk("nx-c", T0), Err(SeatReject::WrongSeat), "nx-a's answer served at nx-c's URL");
         assert_eq!(chk("nx-a", T0 + 5_001), Err(SeatReject::Skew));
+        // page-only: the skewed answer is kept (no beat loss) and flagged; a bad signature still refuses
+        let po = |sig: &[u8; 64], now: i64| {
+            verify_seat_answer_with(&r, "nx-a", "nx-a", 2, T0, std::slice::from_ref(&s), &[], sig, now, SkewMode::PageOnly)
+        };
+        assert_eq!(po(&sig, T0 + 5_001), Ok(true));
+        assert_eq!(po(&sig, T0 - 60_000), Ok(true));
+        assert_eq!(po(&sig, T0 + 5_000), Ok(false));
+        assert_eq!(po(&[0; 64], T0 + 5_001), Err(SeatReject::Signature));
         assert_eq!(
             verify_seat_answer(&r, "nx-b", "nx-b", 2, T0, &[], &[], &sig, T0),
             Err(SeatReject::UnknownKey)

@@ -1521,6 +1521,23 @@ impl Drop for IdxShardWriter {
 // BarShardWriter — live, self-rotating .s10 / .renko writer
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Last bar of `ticker_id`'s most-recent `ext` shard without opening a writer: no lock, no create.
+/// Restart seeds read through this so a standby core never takes a live writer's flock.
+pub fn read_last_bar(data_root: &Path, ticker_id: u64, ext: &str) -> Result<Option<crate::mitch::bar::Bar>> {
+    let dir = bars_dir(data_root, ticker_id);
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    last_bar_in(&dir, ext)
+}
+
+fn last_bar_in(dir: &Path, ext: &str) -> Result<Option<crate::mitch::bar::Bar>> {
+    match list_shards(dir, ext)?.last() {
+        Some((_date, path)) => Ok(read_shard_tail::<crate::mitch::bar::Bar>(path, TAIL_SEED_RECORDS)?.last().copied()),
+        None => Ok(None),
+    }
+}
+
 /// Append-only writer for the canonical `bars/<id>/<date>.<ext>` layout,
 /// where `ext` is `"s10"` (10s time-bucketed klines) or `"renko"` (price
 /// movement bricks). 96 B records (`mitch::Bar`), ts-ascending.
@@ -1663,12 +1680,7 @@ impl BarShardWriter {
     /// the prior shard's `realized_var` on restart, eliminating cold-start
     /// brick storms (Sprint M2 — audit point #5(v), 2026-05-26).
     pub fn last_bar(&self) -> Result<Option<crate::mitch::bar::Bar>> {
-        let shards = list_shards(&self.dir, self.ext)?;
-        if let Some((_date, path)) = shards.last() {
-            let recs = read_shard_tail::<crate::mitch::bar::Bar>(path, TAIL_SEED_RECORDS)?;
-            return Ok(recs.last().copied());
-        }
-        Ok(None)
+        last_bar_in(&self.dir, self.ext)
     }
 
     /// Ensure the open log targets `date`'s shard, rotating (and finalizing

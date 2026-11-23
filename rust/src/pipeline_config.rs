@@ -314,6 +314,23 @@ pub struct LaneYml {
     pub exp_bias: i16,
 }
 
+/// [`SignedQuotesYml::leader_proposes`]. `enabled: false` (and the key absent) = today: every seat
+/// proposes, no relay, no persisted high-water mark.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LeaderProposesYml {
+    #[serde(default)]
+    pub enabled: bool,
+    /// A peer's relayed quorum blob defers this seat's own proposal only while its sourceTs is at
+    /// most this old (and inside its own `blobMaxAgeMs`); past it this seat proposes itself.
+    #[serde(default = "default_leader_fresh_ms")]
+    pub fresh_ms: u64,
+}
+
+fn default_leader_fresh_ms() -> u64 {
+    400
+}
+
 /// [`SignedQuotesYml::cosign_compat`]: the previous image's commitments, accepted until `until_ms`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -555,6 +572,10 @@ pub struct SignedQuotesYml {
     /// Gates peer acceptance only; what is signed is unchanged. Expires on its own.
     #[serde(default)]
     pub cosign_compat: Option<CosignCompatYml>,
+    /// One proposer per subscription ([`LeaderProposesYml`]). Absent = every seat proposes on
+    /// every cache miss, exactly as before.
+    #[serde(default)]
+    pub leader_proposes: Option<LeaderProposesYml>,
     /// Confidence horizon in seconds per feed class (conf ∝ σ·sqrt(horizon)); a class absent here keeps
     /// 30. Only `volatile` (non-pegged crypto-wire pairs, `metal_backed` bases excluded) is a known key;
     /// any other key, or a value outside (0, 300], is refused at boot (signed.rs). Cosign does not

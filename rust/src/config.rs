@@ -197,7 +197,7 @@ impl NxrConfig {
                  AXL/USDT,AERO/USDT,GNO/USDT,SYRUP/USDT,H/USDT,W/USDT,\
                  ZRX/USDT,1INCH/USDT,\
                  USDT/USD,USDC/USD,USDC/USDT,FDUSD/USDT,USDS/USDT,USD1/USDT,USD1/USDC,\
-                 CRVUSD/USDT,BUIDL/USDC,USDF/USDT,RLUSD/USDT,USDY/USDT,\
+                 CRVUSD/USDT,USDF/USDT,RLUSD/USDT,USDY/USDT,\
                  AUSD/USDT,USDG/USDT,USDD/USDT,PYUSD/USDT,\
                  USDE/USDT,USDE/USDC,\
                  USDT/USDC,RLUSD/USDC,USDG/USDC,DAI/USDT,TUSD/USDT,FDUSD/USDC,\
@@ -362,6 +362,13 @@ fn env_opt<T: std::str::FromStr>(key: &str) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A registered symbol with no MITCH id mints only a phantom id the ingest gate refuses: a feed that is dark from boot.
+    #[test]
+    fn every_default_symbol_has_a_mitch_id() {
+        let dark: Vec<String> = NxrConfig::from_env().symbol_list().into_iter().filter(|s| crate::try_resolve_ticker_id(s).is_none()).collect();
+        assert!(dark.is_empty(), "registered symbols without a MITCH id (dark): {dark:?}");
+    }
 
     #[test]
     fn aggregation_yaml_is_single_source_of_truth() {

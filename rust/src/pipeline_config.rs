@@ -2292,6 +2292,10 @@ pub struct StorageYml {
     /// such rows are not resolved at all.
     #[serde(default)]
     pub perp_reference: PerpReferenceYml,
+    /// GENERIC perp legs: virtual parity rows derived from the weights file's `perp_markets`
+    /// for every volatile asset with an eligible perp. Absent = off.
+    #[serde(default)]
+    pub perp_legs: PerpLegsYml,
     /// Non-pegged assets that publish a mark only with >= 1 own (volume-mapped)
     /// leg, as a pegged asset with a parity row does: Pyth alone is no price.
     #[serde(default)]
@@ -2397,6 +2401,216 @@ fn perp_ref_max_primary_age_h() -> f64 {
 impl Default for PerpReferenceYml {
     fn default() -> Self {
         Self { enabled: false, dwell_s: perp_ref_dwell_s(), max_primary_age_h: perp_ref_max_primary_age_h() }
+    }
+}
+
+/// `cexs.storage.perp_legs`: one class rule, no per-asset rows. Each eligible
+/// `perp_markets` row becomes a derived `ParityLegYml` (`pair: <A>/<Q>:PERP`,
+/// `weight: base_factor`, `multiplier: basis`, `max_dev_bps`).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct PerpLegsYml {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Perp venues (`cexs.exchanges` keys) whose listings may become legs.
+    #[serde(default)]
+    pub venues: Vec<String>,
+    /// Multiplier on the perp's volume weight (owner ladder: CEX perp ~0.3).
+    #[serde(default = "perp_base_factor")]
+    pub base_factor: f64,
+    /// All perp legs of one asset together, fraction of the vector weight.
+    #[serde(default = "perp_max_share")]
+    pub max_share: f64,
+    /// One operator family (an exchange's spot + perp legs) together, fraction of the vector weight.
+    #[serde(default = "perp_family_max_share")]
+    pub family_max_share: f64,
+    #[serde(default)]
+    pub eligibility: PerpEligibilityYml,
+    #[serde(default)]
+    pub basis: PerpBasisYml,
+    /// The leg's deviation band (residual after the basis), bps.
+    #[serde(default = "perp_max_dev_bps")]
+    pub max_dev_bps: f64,
+    /// Basis learning holds this many seconds either side of each funding print.
+    #[serde(default = "perp_funding_freeze_s")]
+    pub funding_freeze_s: f64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+pub struct PerpEligibilityYml {
+    #[serde(default = "perp_min_vol")]
+    pub min_vol_usd: f64,
+    #[serde(default = "perp_min_oi")]
+    pub min_oi_usd: f64,
+    #[serde(default = "perp_min_age")]
+    pub min_age_days: f64,
+    #[serde(default = "perp_min_ratio")]
+    pub min_vol_ratio_to_spot_median: f64,
+    #[serde(default = "perp_max_spread")]
+    pub max_spread_bps: f64,
+}
+
+/// The derived leg's `MultiplierYml` (seed 1, `ref: survey`).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+pub struct PerpBasisYml {
+    #[serde(default = "perp_learn")]
+    pub learn: LearnWindow,
+    #[serde(default = "perp_window_h")]
+    pub window_h: f64,
+    #[serde(default = "mult_min_overlap")]
+    pub min_overlap_min: usize,
+    #[serde(default = "perp_cap_bps")]
+    pub cap_bps: f64,
+    /// Never below `max_dev_bps` (boot refusal): a step inside the band must not re-seed.
+    #[serde(default = "perp_reset_bps")]
+    pub reset_bps: f64,
+    #[serde(default = "mult_max_stale_h")]
+    pub max_stale_h: f64,
+}
+
+fn perp_base_factor() -> f64 {
+    0.3
+}
+fn perp_max_share() -> f64 {
+    0.35
+}
+fn perp_family_max_share() -> f64 {
+    0.5
+}
+fn perp_max_dev_bps() -> f64 {
+    60.0
+}
+fn perp_funding_freeze_s() -> f64 {
+    120.0
+}
+fn perp_min_vol() -> f64 {
+    5.0e6
+}
+fn perp_min_oi() -> f64 {
+    2.0e6
+}
+fn perp_min_age() -> f64 {
+    14.0
+}
+fn perp_min_ratio() -> f64 {
+    1.0
+}
+fn perp_max_spread() -> f64 {
+    10.0
+}
+fn perp_learn() -> LearnWindow {
+    LearnWindow::RollingCommon
+}
+fn perp_window_h() -> f64 {
+    24.0
+}
+fn perp_cap_bps() -> f64 {
+    150.0
+}
+fn perp_reset_bps() -> f64 {
+    60.0
+}
+
+impl Default for PerpEligibilityYml {
+    fn default() -> Self {
+        Self {
+            min_vol_usd: perp_min_vol(),
+            min_oi_usd: perp_min_oi(),
+            min_age_days: perp_min_age(),
+            min_vol_ratio_to_spot_median: perp_min_ratio(),
+            max_spread_bps: perp_max_spread(),
+        }
+    }
+}
+
+impl Default for PerpBasisYml {
+    fn default() -> Self {
+        Self {
+            learn: perp_learn(),
+            window_h: perp_window_h(),
+            min_overlap_min: mult_min_overlap(),
+            cap_bps: perp_cap_bps(),
+            reset_bps: perp_reset_bps(),
+            max_stale_h: mult_max_stale_h(),
+        }
+    }
+}
+
+impl Default for PerpLegsYml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            venues: Vec::new(),
+            base_factor: perp_base_factor(),
+            max_share: perp_max_share(),
+            family_max_share: perp_family_max_share(),
+            eligibility: PerpEligibilityYml::default(),
+            basis: PerpBasisYml::default(),
+            max_dev_bps: perp_max_dev_bps(),
+            funding_freeze_s: perp_funding_freeze_s(),
+        }
+    }
+}
+
+impl PerpLegsYml {
+    /// Boot refusal on an unusable rule (checked even while off, so enabling never meets a new error).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let b = &self.basis;
+        let fin = |x: f64| x.is_finite();
+        anyhow::ensure!(fin(self.base_factor) && self.base_factor > 0.0 && self.base_factor <= 1.0, "perp_legs.base_factor {} outside (0, 1]", self.base_factor);
+        anyhow::ensure!(fin(self.max_share) && self.max_share > 0.0 && self.max_share < 1.0, "perp_legs.max_share {} outside (0, 1)", self.max_share);
+        anyhow::ensure!(fin(self.family_max_share) && self.family_max_share > 0.0 && self.family_max_share < 1.0, "perp_legs.family_max_share {} outside (0, 1)", self.family_max_share);
+        anyhow::ensure!(fin(self.max_dev_bps) && self.max_dev_bps > 0.0, "perp_legs.max_dev_bps must be > 0");
+        anyhow::ensure!(
+            fin(b.reset_bps) && b.reset_bps >= self.max_dev_bps,
+            "perp_legs.basis.reset_bps {} < max_dev_bps {}: a basis step inside the deviation band would re-seed the leg",
+            b.reset_bps,
+            self.max_dev_bps
+        );
+        anyhow::ensure!(fin(b.cap_bps) && b.cap_bps >= b.reset_bps, "perp_legs.basis.cap_bps {} < reset_bps {}", b.cap_bps, b.reset_bps);
+        anyhow::ensure!(b.window_h > 0.0 && b.window_h <= 168.0, "perp_legs.basis.window_h outside (0, 168]");
+        anyhow::ensure!(fin(b.max_stale_h) && b.max_stale_h > 0.0, "perp_legs.basis.max_stale_h must be > 0");
+        anyhow::ensure!(fin(self.funding_freeze_s) && self.funding_freeze_s >= 0.0, "perp_legs.funding_freeze_s must be >= 0");
+        anyhow::ensure!(!self.enabled || !self.venues.is_empty(), "perp_legs.enabled with no venues");
+        Ok(())
+    }
+
+    /// A listed perp becomes a leg: a configured venue, and every floor met. An unknown fact
+    /// (no OI, no listing date, no spread, no spot median) is never eligible.
+    pub fn eligible(&self, row: &crate::weights_schema::PerpMarket, spot_median_usd: Option<f64>, now_s: u64) -> bool {
+        let e = &self.eligibility;
+        let ok = |x: Option<f64>, pass: &dyn Fn(f64) -> bool| x.is_some_and(|x| x.is_finite() && pass(x));
+        self.venues.iter().any(|v| v == &row.provider)
+            && row.vol_usd.is_finite()
+            && row.vol_usd >= e.min_vol_usd
+            && ok(row.oi_usd, &|x| x >= e.min_oi_usd)
+            && ok(row.spread_bps, &|x| (0.0..=e.max_spread_bps).contains(&x))
+            && row.listed_at.is_some_and(|t| t <= now_s && (now_s - t) as f64 >= e.min_age_days * 86_400.0)
+            && ok(spot_median_usd, &|m| m > 0.0 && row.vol_usd >= e.min_vol_ratio_to_spot_median * m)
+    }
+
+    /// The derived row for an eligible `row`: what a hand-written `parity_legs` entry would say.
+    pub fn leg_row(&self, row: &crate::weights_schema::PerpMarket) -> ParityLegYml {
+        let b = &self.basis;
+        ParityLegYml {
+            pair: row.leg_symbol(),
+            provider: Some(row.provider.clone()),
+            weight: self.base_factor,
+            share: None,
+            max_dev_bps: Some(self.max_dev_bps),
+            multiplier: Some(MultiplierYml {
+                learn: b.learn,
+                window_h: b.window_h,
+                min_overlap_min: b.min_overlap_min,
+                cap_bps: b.cap_bps,
+                reset_bps: b.reset_bps,
+                max_stale_h: b.max_stale_h,
+                seed: 1.0,
+                reference: BasisRef::Survey,
+            }),
+            fallback_ci_bps: None,
+            role: LegRole::Blend,
+            fallback_band_bps: None,
+        }
     }
 }
 

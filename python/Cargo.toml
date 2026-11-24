@@ -10,7 +10,7 @@ keywords = ["finance", "market-data", "mitch", "hft", "python"]
 # pyo3 produces a C extension (cdylib). `lib` retained so `cargo check`
 # can also exercise the Rust internals without going through maturin.
 [lib]
-name = "nxr_sdk"
+name = "nxr_sdk_py"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

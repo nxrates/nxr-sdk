@@ -23,7 +23,7 @@ mitch = { path = "../../mitch/impl/rust", features = ["bytemuck"] }
 
 # pyo3 0.22 — modern Bound<PyType> API. abi3-py39 produces a single wheel
 # that runs on every CPython >= 3.9.
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.22", features = ["abi3-py39"] }
 pyo3-async-runtimes = { version = "0.22", features = ["tokio-runtime"] }
 
 # NumPy buffer protocol (structured arrays + zero-copy borrows).

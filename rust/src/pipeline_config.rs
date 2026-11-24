@@ -1304,6 +1304,12 @@ pub struct SignedFeedYml {
     /// Absent or `0.0` = off. Producer-only: cosign checks the raw mark.
     #[serde(default)]
     pub deadband_bps: Option<f64>,
+    /// `packedP8` wire 3 ONLY: sign this lane's confidence in tenths of a bp (code `64 + t`, up
+    /// to 6.3 bp; plain codes past it). Set only where the store's `laneCls` bit 192 + lane is
+    /// set: lane data, never a symbol list. Off = plain codes, byte for byte. A wire-2 P8
+    /// domain with any fine lane is a boot error (signed.rs `check_fine_conf_wire`).
+    #[serde(default)]
+    pub fine_conf: bool,
 }
 
 impl SignedFeedYml {
@@ -4138,6 +4144,11 @@ mod tests {
         )
         .expect("per-feed min_accepted_providers parses");
         assert_eq!(f.min_accepted_providers, Some(4));
+        assert!(!f.fine_conf, "fine_conf defaults off");
+        let f: SignedFeedYml =
+            serde_yml::from_str("{ symbol: ETH-USDC, cosign_tolerance_bps: 5.0, fine_conf: true }")
+                .expect("per-feed fine_conf parses");
+        assert!(f.fine_conf);
         assert_eq!(
             feeds.iter().map(|f| f.symbol.as_str()).collect::<Vec<_>>(),
             vec![

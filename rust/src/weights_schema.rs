@@ -89,6 +89,10 @@ pub struct WeightsFile {
     /// `pair_volumes`/`asset_markets` (CEX only) until a pool has its own provider id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pool_volumes: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Optional (old cores ignore it): cmc_slug -> { "BTC/USDT": depth_inband_usd }, the p25 over the scrape's
+    /// L2 snapshots of the notional within +-band of mid, both sides. A venue/market with no reading is absent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub market_depth: BTreeMap<String, BTreeMap<String, f64>>,
     /// Per-CR-asset market ranking derived from `pair_volumes`. FACTS only: the
     /// conversion belongs to core, which has the bridges and the liveness view.
     #[serde(default)]

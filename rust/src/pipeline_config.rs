@@ -2341,6 +2341,9 @@ pub struct StorageYml {
     /// such rows are not resolved at all.
     #[serde(default)]
     pub perp_reference: PerpReferenceYml,
+    /// CEX depth cap: a market's volume counts only up to `k x` its in-band depth. Default OFF.
+    #[serde(default)]
+    pub depth_cap: DepthCapYml,
     /// Non-pegged assets that publish a mark only with >= 1 own (volume-mapped)
     /// leg, as a pegged asset with a parity row does: Pyth alone is no price.
     #[serde(default)]
@@ -2418,6 +2421,35 @@ pub struct StorageYml {
     /// venue's deepest market. Absent = 0.1.
     #[serde(default)]
     pub multi_market_min_ratio: Option<f64>,
+}
+
+/// `cexs.storage.depth_cap`: the weights cron samples each CEX market's public L2 book `snapshots`
+/// times per scrape (randomised offsets) and records the p25 notional within +-`band_bps` of mid; core
+/// caps `vol` at `k x depth`, `k` = the asset's median turnover (needs >= 5 markets with depth), `k >= k_floor`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DepthCapYml {
+    pub enabled: bool,
+    pub band_bps: f64,
+    pub k_floor: f64,
+    pub snapshots: usize,
+}
+
+impl Default for DepthCapYml {
+    fn default() -> Self {
+        Self { enabled: false, band_bps: 50.0, k_floor: 20.0, snapshots: 8 }
+    }
+}
+
+impl DepthCapYml {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.band_bps.is_finite() && self.band_bps > 0.0 && self.k_floor.is_finite() && self.k_floor > 0.0 && self.snapshots >= 1,
+            "depth_cap: band_bps {} > 0, k_floor {} > 0, snapshots {} >= 1",
+            self.band_bps, self.k_floor, self.snapshots
+        );
+        Ok(())
+    }
 }
 
 /// `cexs.storage.perp_reference`.
@@ -2679,6 +2711,7 @@ impl StorageYml {
     /// override pair resolve, keys are upper-case asset symbols, and no crypto
     /// asset (`cexs.assets`) is overridden off the hub.
     pub fn validate(&self, assets: &[String]) -> anyhow::Result<()> {
+        self.depth_cap.validate()?;
         let (bps, ms, max) = self.peg_confirm();
         anyhow::ensure!(
             bps.is_finite() && bps > 0.0 && ms.is_finite() && ms >= 0.0 && max.is_finite() && max >= ms,

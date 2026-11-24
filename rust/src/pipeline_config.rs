@@ -2419,6 +2419,12 @@ pub struct PerpLegsYml {
     /// `max_share` / `family_max_share` caps. Absent = 1.
     #[serde(default)]
     pub lead: BTreeMap<String, f64>,
+    /// LEAD/LAG blend (`enabled` only; 0 = off): the perp legs leave the vector, the spot legs + the
+    /// learned basis set the LEVEL, and the perp group's rebased deviation from that mark moves it by
+    /// `lead_lag` x the deviation in the same pass (the MOVE). A deviation past `max_dev_bps` moves
+    /// nothing (the band still drops the leg). In [0, 1]; fit per class from lead-lag data.
+    #[serde(default)]
+    pub lead_lag: f64,
     /// All perp legs of one asset together, fraction of the vector weight.
     #[serde(default = "perp_max_share")]
     pub max_share: f64,
@@ -2548,6 +2554,7 @@ impl Default for PerpLegsYml {
             venues: Vec::new(),
             base_factor: perp_base_factor(),
             lead: BTreeMap::new(),
+            lead_lag: 0.0,
             max_share: perp_max_share(),
             family_max_share: perp_family_max_share(),
             eligibility: PerpEligibilityYml::default(),
@@ -2581,6 +2588,7 @@ impl PerpLegsYml {
             anyhow::ensure!(self.venues.contains(v), "perp_legs.lead.{v}: not a perp_legs venue");
             anyhow::ensure!(fin(*f) && (0.5..=1.5).contains(f), "perp_legs.lead.{v} {f} outside [0.5, 1.5]");
         }
+        anyhow::ensure!(fin(self.lead_lag) && (0.0..=1.0).contains(&self.lead_lag), "perp_legs.lead_lag {} outside [0, 1]", self.lead_lag);
         anyhow::ensure!(!self.active() || !self.venues.is_empty(), "perp_legs enabled or shadow with no venues");
         Ok(())
     }

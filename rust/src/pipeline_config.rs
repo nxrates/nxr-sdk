@@ -2433,18 +2433,24 @@ pub struct DepthCapYml {
     pub band_bps: f64,
     pub k_floor: f64,
     pub snapshots: usize,
+    /// One constant K for every class (PROPOSAL 1: fitted on tier-1 turnover, ~50-75). Set = `min(vol, K x depth)`
+    /// with this K; absent = K is the asset's median turnover (>= 5 markets with depth, else cap off), floored at `k_floor`.
+    pub k: Option<f64>,
+    /// Hourly depth readings kept per market; the depth used is their median (24 = a rolling 24 h median,
+    /// never a single snapshot).
+    pub history: usize,
 }
 
 impl Default for DepthCapYml {
     fn default() -> Self {
-        Self { enabled: false, band_bps: 50.0, k_floor: 20.0, snapshots: 8 }
+        Self { enabled: false, band_bps: 50.0, k_floor: 20.0, snapshots: 8, k: None, history: 24 }
     }
 }
 
 impl DepthCapYml {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.band_bps.is_finite() && self.band_bps > 0.0 && self.k_floor.is_finite() && self.k_floor > 0.0 && self.snapshots >= 1,
+            self.band_bps.is_finite() && self.band_bps > 0.0 && self.k_floor.is_finite() && self.k_floor > 0.0 && self.snapshots >= 1 && self.history >= 1 && self.k.is_none_or(|k| k.is_finite() && k > 0.0),
             "depth_cap: band_bps {} > 0, k_floor {} > 0, snapshots {} >= 1",
             self.band_bps, self.k_floor, self.snapshots
         );

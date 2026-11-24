@@ -194,7 +194,7 @@ impl WeightsFile {
     /// `<pair>:PERP` of every row `cfg` admits at `now_s`, deduplicated and sorted: the forwarder's
     /// generated perp entries. Empty with the flag off.
     pub fn perp_leg_symbols(&self, cfg: &crate::pipeline_config::PerpLegsYml, now_s: u64) -> Vec<String> {
-        if !cfg.enabled {
+        if !cfg.active() {
             return Vec::new();
         }
         let mut out: Vec<String> = self

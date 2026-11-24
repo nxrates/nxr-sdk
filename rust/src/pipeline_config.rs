@@ -2404,6 +2404,8 @@ impl Default for PerpReferenceYml {
     }
 }
 
+/// Defaults follow the feed-quality rule (feedq-1124 §1/§4): linear perps only, perp group <= 30%,
+/// one exchange (spot + perp) <= 30%, basis = 5-15 min median of perp - spot.
 /// `cexs.storage.perp_legs`: one class rule, no per-asset rows. Each eligible
 /// `perp_markets` row becomes a derived `ParityLegYml` (`pair: <A>/<Q>:PERP`,
 /// `weight: base_factor`, `multiplier: basis`, `max_dev_bps`).
@@ -2411,12 +2413,22 @@ impl Default for PerpReferenceYml {
 pub struct PerpLegsYml {
     #[serde(default)]
     pub enabled: bool,
+    /// SHADOW (non-signing canary): with `enabled: false`, the legs are derived and their basis
+    /// learned, but they never enter a mark; the would-be index offset is exported
+    /// (`nxr_perp_shadow_dev_bps`, `nxr_perp_shadow_leg_dev_bps`). Ignored while `enabled`.
+    #[serde(default)]
+    pub shadow: bool,
     /// Perp venues (`cexs.exchanges` keys) whose listings may become legs.
     #[serde(default)]
     pub venues: Vec<String>,
     /// Multiplier on the perp's volume weight (owner ladder: CEX perp ~0.3).
     #[serde(default = "perp_base_factor")]
     pub base_factor: f64,
+    /// Lead-venue factor per perp venue (`venues` key -> multiplier on `base_factor`), in
+    /// [0.5, 1.5] (feedq-1124 §1.4). A venue that leads spot weighs more, inside the
+    /// `max_share` / `family_max_share` caps. Absent = 1.
+    #[serde(default)]
+    pub lead: BTreeMap<String, f64>,
     /// All perp legs of one asset together, fraction of the vector weight.
     #[serde(default = "perp_max_share")]
     pub max_share: f64,
@@ -2456,7 +2468,7 @@ pub struct PerpBasisYml {
     pub learn: LearnWindow,
     #[serde(default = "perp_window_h")]
     pub window_h: f64,
-    #[serde(default = "mult_min_overlap")]
+    #[serde(default = "perp_min_overlap")]
     pub min_overlap_min: usize,
     #[serde(default = "perp_cap_bps")]
     pub cap_bps: f64,
@@ -2468,16 +2480,16 @@ pub struct PerpBasisYml {
 }
 
 fn perp_base_factor() -> f64 {
-    0.3
+    0.15
 }
 fn perp_max_share() -> f64 {
-    0.35
+    0.30
 }
 fn perp_family_max_share() -> f64 {
-    0.5
+    0.30
 }
 fn perp_max_dev_bps() -> f64 {
-    60.0
+    30.0
 }
 fn perp_funding_freeze_s() -> f64 {
     120.0
@@ -2501,7 +2513,10 @@ fn perp_learn() -> LearnWindow {
     LearnWindow::RollingCommon
 }
 fn perp_window_h() -> f64 {
-    24.0
+    0.25
+}
+fn perp_min_overlap() -> usize {
+    5
 }
 fn perp_cap_bps() -> f64 {
     150.0
@@ -2527,7 +2542,7 @@ impl Default for PerpBasisYml {
         Self {
             learn: perp_learn(),
             window_h: perp_window_h(),
-            min_overlap_min: mult_min_overlap(),
+            min_overlap_min: perp_min_overlap(),
             cap_bps: perp_cap_bps(),
             reset_bps: perp_reset_bps(),
             max_stale_h: mult_max_stale_h(),
@@ -2539,8 +2554,10 @@ impl Default for PerpLegsYml {
     fn default() -> Self {
         Self {
             enabled: false,
+            shadow: false,
             venues: Vec::new(),
             base_factor: perp_base_factor(),
+            lead: BTreeMap::new(),
             max_share: perp_max_share(),
             family_max_share: perp_family_max_share(),
             eligibility: PerpEligibilityYml::default(),
@@ -2570,8 +2587,22 @@ impl PerpLegsYml {
         anyhow::ensure!(b.window_h > 0.0 && b.window_h <= 168.0, "perp_legs.basis.window_h outside (0, 168]");
         anyhow::ensure!(fin(b.max_stale_h) && b.max_stale_h > 0.0, "perp_legs.basis.max_stale_h must be > 0");
         anyhow::ensure!(fin(self.funding_freeze_s) && self.funding_freeze_s >= 0.0, "perp_legs.funding_freeze_s must be >= 0");
-        anyhow::ensure!(!self.enabled || !self.venues.is_empty(), "perp_legs.enabled with no venues");
+        for (v, f) in &self.lead {
+            anyhow::ensure!(self.venues.contains(v), "perp_legs.lead.{v}: not a perp_legs venue");
+            anyhow::ensure!(fin(*f) && (0.5..=1.5).contains(f), "perp_legs.lead.{v} {f} outside [0.5, 1.5]");
+        }
+        anyhow::ensure!(!self.active() || !self.venues.is_empty(), "perp_legs enabled or shadow with no venues");
         Ok(())
+    }
+
+    /// The venue's lead factor (1 when unset).
+    pub fn lead_factor(&self, venue: &str) -> f64 {
+        self.lead.get(venue).copied().unwrap_or(1.0)
+    }
+
+    /// Legs are derived (live or shadow).
+    pub fn active(&self) -> bool {
+        self.enabled || self.shadow
     }
 
     /// A listed perp becomes a leg: a configured venue, and every floor met. An unknown fact
@@ -2594,7 +2625,7 @@ impl PerpLegsYml {
         ParityLegYml {
             pair: row.leg_symbol(),
             provider: Some(row.provider.clone()),
-            weight: self.base_factor,
+            weight: self.base_factor * self.lead_factor(&row.provider),
             share: None,
             max_dev_bps: Some(self.max_dev_bps),
             multiplier: Some(MultiplierYml {

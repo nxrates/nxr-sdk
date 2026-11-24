@@ -133,6 +133,82 @@ pub struct WeightsFile {
     /// completed for cycles was invisible.
     #[serde(default)]
     pub last_run: Option<CalibrateRun>,
+    /// Perp listing pass (`nxr-weights`, `cexs.storage.perp_legs` venues): base asset -> one row per
+    /// listed USDT-margined perpetual. FACTS only; eligibility and the legs are core's
+    /// (`PerpLegsYml::eligible`). Optional: absent = no perp pass ran, older cores ignore it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub perp_markets: BTreeMap<String, Vec<PerpMarket>>,
+}
+
+/// One perpetual a perp venue lists, as the listing pass read it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PerpMarket {
+    /// Venue name (`cexs.exchanges` key, e.g. the perp venue's own entry).
+    pub provider: String,
+    /// Canonical spot spelling `BASE/QUOTE`; the leg's id is `<pair>:PERP`.
+    pub pair: String,
+    /// 24 h quote turnover, USD.
+    pub vol_usd: f64,
+    /// Open interest, USD. `None` = not read (never eligible).
+    #[serde(default)]
+    pub oi_usd: Option<f64>,
+    /// Listing time, unix seconds. `None` = unknown (never eligible).
+    #[serde(default)]
+    pub listed_at: Option<u64>,
+    /// Top-of-book spread at the read, bps.
+    #[serde(default)]
+    pub spread_bps: Option<f64>,
+    /// Funding period, hours. `None` = unknown (the learner freezes around every hour).
+    #[serde(default)]
+    pub funding_interval_h: Option<f64>,
+    /// Next funding print, unix ms (the phase of the period).
+    #[serde(default)]
+    pub next_funding_ms: Option<i64>,
+}
+
+impl PerpMarket {
+    /// The state-only id's symbol: `<pair>:PERP`.
+    pub fn leg_symbol(&self) -> String {
+        format!("{}:PERP", self.pair)
+    }
+
+    /// The base asset of `pair`.
+    pub fn base(&self) -> &str {
+        self.pair.split_once('/').map_or(self.pair.as_str(), |(b, _)| b)
+    }
+}
+
+impl WeightsFile {
+    /// Median surveyed 24 h volume of `asset`'s spot markets (the unit of a perp's base weight).
+    pub fn spot_median_usd(&self, asset: &str) -> Option<f64> {
+        let v: Vec<f64> = self
+            .asset_markets
+            .iter()
+            .filter(|(a, _)| a.eq_ignore_ascii_case(asset))
+            .flat_map(|(_, m)| m.iter().map(|m| m.volume_usd))
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .collect();
+        (!v.is_empty()).then(|| crate::stats::median(&v))
+    }
+
+    /// `<pair>:PERP` of every row `cfg` admits at `now_s`, deduplicated and sorted: the forwarder's
+    /// generated perp entries. Empty with the flag off.
+    pub fn perp_leg_symbols(&self, cfg: &crate::pipeline_config::PerpLegsYml, now_s: u64) -> Vec<String> {
+        if !cfg.enabled {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = self
+            .perp_markets
+            .iter()
+            .flat_map(|(a, rows)| {
+                let med = self.spot_median_usd(a);
+                rows.iter().filter(move |r| cfg.eligible(r, med, now_s)).map(PerpMarket::leg_symbol)
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 /// Per-ticker calibration health (unix seconds).

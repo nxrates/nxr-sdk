@@ -86,6 +86,14 @@ pub const FLAG_REAFFIRM: u8 = 0b0000_0100;
 /// composite, where bit 4 is [`FLAG_IDX_HEALED`].
 pub const FLAG_CARRY: u8 = 0b0001_0000;
 
+/// `Index.flags` bit 3 (INDEX flag space, FORWARDER -> CORE WIRE ONLY, never stored): the
+/// forwarder refused this leg's latest venue change as older than its source-age bound
+/// (`cexs.source_age`), so the price it last forwarded is superseded at the venue. Core drops
+/// the leg at once instead of serving it until the kernel stale window; the next fresh frame
+/// re-admits it. Carries no price. Bit 3 is the legacy composite [`FLAG_CONF_FRESHNESS`],
+/// which never travels forwarder -> core.
+pub const FLAG_LEG_STALE: u8 = 0b0000_1000;
+
 /// `Index.flags` bit 3: LEGACY (pre-2026-07-25 cutover) — this INDEX record's
 /// `confidence` byte (Index body offset 36) carries a continuous freshness
 /// FRACTION (`f = byte / 255 ∈ [0,1]`, ~1 when all providers fresh) rather than

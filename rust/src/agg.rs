@@ -162,6 +162,9 @@ pub struct TickAccumulator {
     /// Every tick this window was a [`Self::carry`]: flushed with
     /// [`crate::shard::FLAG_CARRY`] too.
     acc_carry_only: bool,
+    /// The leg's latest venue change was refused as stale and nothing fresh followed in this
+    /// window: flushed as [`crate::shard::FLAG_LEG_STALE`].
+    acc_stale: bool,
 }
 
 impl TickAccumulator {
@@ -176,6 +179,7 @@ impl TickAccumulator {
             acc_rejected: 0,
             acc_reaffirm_only: true,
             acc_carry_only: true,
+            acc_stale: false,
         }
     }
 
@@ -205,6 +209,19 @@ impl TickAccumulator {
         self.acc_count += 1;
         self.acc_reaffirm_only = false;
         self.acc_carry_only = false;
+        self.acc_stale = false;
+    }
+
+    /// The leg's latest venue change was refused as stale: drop the window's pending quotes
+    /// (superseded at the venue) and flush a [`crate::shard::FLAG_LEG_STALE`] signal instead.
+    /// A fresh tick later in the window cancels it.
+    pub fn stale(&mut self) {
+        self.acc_bid_vol = 0;
+        self.acc_ask_vol = 0;
+        self.acc_count = 0;
+        self.acc_reaffirm_only = true;
+        self.acc_carry_only = true;
+        self.acc_stale = true;
     }
 
     /// Buffer an unchanged quote the caller has PROVEN live (venue sequence
@@ -242,6 +259,23 @@ impl TickAccumulator {
     /// Rejected-count also resets each cycle, so `Index.rejected` reflects
     /// outliers rejected in the window ending at this flush.
     pub fn flush(&mut self) -> Option<Index> {
+        if std::mem::take(&mut self.acc_stale) {
+            let rejected = self.acc_rejected.min(u8::MAX as u32) as u8;
+            self.acc_rejected = 0;
+            return Some(Index {
+                ticker: self.ticker,
+                bid: self.last_bid,
+                ask: self.last_ask,
+                vbid: 0,
+                vask: 0,
+                ci: 0,
+                tick_count: 0,
+                confidence: 1,
+                accepted: 0,
+                rejected,
+                flags: crate::shard::FLAG_LEG_STALE,
+            });
+        }
         if self.acc_count == 0 {
             // Also reset rejected so a silent window does not carry stale counts.
             self.acc_rejected = 0;

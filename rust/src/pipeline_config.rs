@@ -450,6 +450,10 @@ pub struct RvFloorYml {
     /// Canary: only these signed symbols take the floor; empty = every lane of the class.
     #[serde(default)]
     pub only: Vec<String>,
+    /// Path to the DEPLOYED pool manifest (dex-evm `deployments/<chain>.manifest.json`). Required: boot and
+    /// `--check-config` refuse a `min_fee_bps` / `vega` that differs from what it records for the class's lanes.
+    #[serde(default)]
+    pub manifest: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -599,8 +603,9 @@ pub struct SignedQuotesYml {
     /// Realised-vol floor on the charged half-spread per feed class: half-spread >= `k` x rv1s, rv1s = the seat's
     /// own 1 s realised vol over its last 5 min of marks (bp). Only the SHORTFALL rides the signed conf, as
     /// 2 x (target - current half), since the fee charges spread/2 and the pool already charges minFee/2 + the
-    /// σ·vega term. Only `volatile`; absent = off. Validated at boot (signed.rs). A cosigner refuses a proposer whose
-    /// conf understates its own by > 20 bp: roll cosigner seats first, proposer-eligible seats last.
+    /// σ·vega term. Only `volatile`; absent = off. Validated at boot (signed.rs). PROPOSER-only: cosigners judge the
+    /// unfloored conf, so seats roll in any order; enable it (and the same `only[]`) on every proposer-eligible seat
+    /// of a lane at once, or the lane's fee depends on which seat proposes.
     #[serde(default)]
     pub rv_floor_class: BTreeMap<String, RvFloorYml>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the

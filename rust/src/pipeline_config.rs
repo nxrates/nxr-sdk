@@ -445,6 +445,14 @@ pub struct SignedDomainYml {
     /// the legacy singleton alias (no `domains:` map) counts self + every peer.
     #[serde(default)]
     pub signers: Option<Vec<String>>,
+    /// `packedP8` wire 3 ONLY: the deployed `MarkStoreP8`'s `LANE_CLS` constructor immutable,
+    /// 0x-hex uint256, copied from a read of the store (never computed). Bit `192 + lane` set =
+    /// the store reads that lane's fine codes as tenths of a bp. Absent = unknown: a
+    /// `fine_conf` lane keeps the 1 bp floor (codes >= 74), and nothing below it is signed.
+    /// Present: a lane whose bit is clear signs plain codes; a lane whose bit is set may sign down
+    /// to its [`SignedQuotesYml::conf_floor_pbps_lane`]. Cosigners hold the same value.
+    #[serde(default)]
+    pub lane_cls: Option<String>,
 }
 
 /// `#[serde(default)]` for a bool that must stay on when the YAML is silent.
@@ -593,13 +601,21 @@ pub struct SignedQuotesYml {
     #[serde(default)]
     pub conf_volatile_bases: Vec<String>,
     /// Multiplier on the signed σ per feed class (the σ the on-chain stale term, vega term and curve dispersion
-    /// read); a class absent here signs 1.0. Only `volatile`; a value outside [0.5, 1] is refused at boot
-    /// (signed.rs): it may only shrink the wire σ. Conf, the mark grid and the cosign price tolerance read the
+    /// read); a class absent here signs 1.0. `volatile` or `pegged`; a value outside [0.5, 1] is refused at boot
+    /// (signed.rs): it may only shrink the wire σ. `pegged` (stable pairs, the agreement-ceiling peg class) scales
+    /// within the same bounds and never below the class σ prior floor. Conf, the mark grid and the cosign price tolerance read the
     /// unscaled σ. A cosigner refuses a proposer whose σ understates its own, so roll every COSIGNER seat first,
     /// proposer-eligible seats last, one config fleet-wide (any change of the value is the same roll, and
     /// `conf_volatile_bases` decides which lanes the class holds, so it rolls with it).
     #[serde(default)]
     pub sigma_wire_scale_class: BTreeMap<String, f64>,
+    /// Least signed conf per fine lane, pbps (1/100 bp), keyed by feed `symbol`: the 1 bp floor is lowered to this
+    /// value ONLY on a `fine_conf` feed of the `pegged` class, and ONLY under a domain whose `lane_cls` has the
+    /// lane's bit 192 + lane set; everywhere else the lane keeps 1 bp. A multiple of 10 (the wire is tenths) in
+    /// [10, 90]; anything else is refused at boot (signed.rs). A cosigner refuses a fine code below its own floor
+    /// for that lane, so roll every COSIGNER seat first, proposer-eligible seats last.
+    #[serde(default)]
+    pub conf_floor_pbps_lane: BTreeMap<String, u16>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
     /// cosign peers, in the same fan-out. Operator config only, never a peer's
     /// or a request's claim, and never a mark source: a cold FLEET has no warm
@@ -937,6 +953,7 @@ impl SignedQuotesYml {
                 // takes the per-feed catalog fields, as it always has.
                 lane_map: None,
                 signers: None,
+                lane_cls: None,
             },
         )])
     }

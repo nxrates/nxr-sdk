@@ -90,7 +90,9 @@ pub const FLAG_CARRY: u8 = 0b0001_0000;
 /// forwarder refused this leg's latest venue change as older than its source-age bound
 /// (`cexs.source_age`), so the price it last forwarded is superseded at the venue. Core drops
 /// the leg at once instead of serving it until the kernel stale window; the next fresh frame
-/// re-admits it. Carries no price. Bit 3 is the legacy composite [`FLAG_CONF_FRESHNESS`],
+/// re-admits it. Carries no price: `bid = ask = 0`, which a core predating this flag rejects
+/// (`non_positive`), so the signal fails closed there. Roll every core before any forwarder
+/// enables `cexs.source_age`. Bit 3 is the legacy composite [`FLAG_CONF_FRESHNESS`],
 /// which never travels forwarder -> core.
 pub const FLAG_LEG_STALE: u8 = 0b0000_1000;
 

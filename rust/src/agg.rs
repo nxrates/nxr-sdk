@@ -264,8 +264,11 @@ impl TickAccumulator {
             self.acc_rejected = 0;
             return Some(Index {
                 ticker: self.ticker,
-                bid: self.last_bid,
-                ask: self.last_ask,
+                // No price, and one no core can mistake for one: a core predating the flag
+                // drops a zero book as `non_positive` (fail closed, the leg ages out as before)
+                // instead of re-stamping the superseded price as a fresh observation.
+                bid: 0.0,
+                ask: 0.0,
                 vbid: 0,
                 vask: 0,
                 ci: 0,
@@ -321,6 +324,24 @@ mod tests {
         assert!(!is_valid_book(1.0, 1.0), "locked");
         assert!(!is_valid_book(1.0, 0.9), "crossed");
         assert!(is_valid_tick(1.0, 1.0), "a trades-only tick stays valid");
+    }
+
+    /// The leg-stale signal carries a zero book (old cores reject it), and a fresh tick in the
+    /// same window cancels it.
+    #[test]
+    fn a_stale_window_flushes_a_zero_book_signal() {
+        use crate::shard::FLAG_LEG_STALE;
+        let mut acc = TickAccumulator::new(7);
+        acc.ingest(1.0, 1.0001, 5, 5);
+        acc.stale();
+        let i = acc.flush().unwrap();
+        let (bid, ask, flags) = (i.bid, i.ask, i.flags);
+        assert_eq!((bid, ask, flags), (0.0, 0.0, FLAG_LEG_STALE));
+        assert_eq!(i.reject_reason(), Some("non_positive"), "a core predating the flag drops it");
+        assert!(acc.flush().is_none(), "one signal per refusal");
+        acc.stale();
+        acc.ingest(1.0, 1.0002, 5, 5);
+        assert_eq!(acc.flush().unwrap().flags, 0, "a fresh tick cancels it");
     }
 
     #[test]

@@ -435,6 +435,23 @@ fn default_true() -> bool {
     true
 }
 
+/// One class row of `signed_quotes.rv_floor_class`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RvFloorYml {
+    /// Multiple of rv1s the total half-spread must reach.
+    pub k: f64,
+    /// The pool's per-leg minFee for the class, bp (lowest across pools: an understated half only widens).
+    #[serde(default)]
+    pub min_fee_bps: f64,
+    /// The pool's vega (PricingLib PBPS scale: 10000 = 1% of σ).
+    #[serde(default)]
+    pub vega: f64,
+    /// Canary: only these signed symbols take the floor; empty = every lane of the class.
+    #[serde(default)]
+    pub only: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedQuotesYml {
@@ -579,6 +596,13 @@ pub struct SignedQuotesYml {
     /// `conf_volatile_bases` decides which lanes the class holds, so it rolls with it).
     #[serde(default)]
     pub sigma_wire_scale_class: BTreeMap<String, f64>,
+    /// Realised-vol floor on the charged half-spread per feed class: half-spread >= `k` x rv1s, rv1s = the seat's
+    /// own 1 s realised vol over its last 5 min of marks (bp). Only the SHORTFALL rides the signed conf, as
+    /// 2 x (target - current half), since the fee charges spread/2 and the pool already charges minFee/2 + the
+    /// σ·vega term. Only `volatile`; absent = off. Validated at boot (signed.rs). A cosigner refuses a proposer whose
+    /// conf understates its own by > 20 bp: roll cosigner seats first, proposer-eligible seats last.
+    #[serde(default)]
+    pub rv_floor_class: BTreeMap<String, RvFloorYml>,
     /// ARCHIVE nodes (full history) queried for the σ HISTORY seed beside the
     /// cosign peers, in the same fan-out. Operator config only, never a peer's
     /// or a request's claim, and never a mark source: a cold FLEET has no warm

@@ -2484,12 +2484,16 @@ pub struct PerpLegsYml {
     /// `max_share` / `family_max_share` caps. Absent = 1.
     #[serde(default)]
     pub lead: BTreeMap<String, f64>,
-    /// LEAD/LAG blend (`enabled` only; 0 = off): the perp legs leave the vector, the spot legs + the
-    /// learned basis set the LEVEL, and the perp group's rebased deviation from that mark moves it by
-    /// `lead_lag` x the deviation in the same pass (the MOVE). A deviation past `max_dev_bps` moves
-    /// nothing (the band still drops the leg). In [0, 1]; fit per class from lead-lag data.
+    /// LEAD/LAG blend per asset (`enabled` only), keyed by UPPERCASE asset; an unlisted asset is 0
+    /// (off). On (`lambda > 0`): that asset's perp legs leave the vector, the spot legs + the learned
+    /// basis set the LEVEL, and the perp group's rebased deviation from that mark moves it by
+    /// `lambda` x the deviation in the same pass (the MOVE), only while the [`PerpAgreeYml`] gate
+    /// holds. A deviation past the asset's `max_dev_bps` moves nothing.
     #[serde(default)]
-    pub lead_lag: f64,
+    pub lead_lag: BTreeMap<String, PerpLeadYml>,
+    /// Venue agreement gate for every lead/lag move.
+    #[serde(default)]
+    pub agree: PerpAgreeYml,
     /// All perp legs of one asset together, fraction of the vector weight.
     #[serde(default = "perp_max_share")]
     pub max_share: f64,
@@ -2506,6 +2510,42 @@ pub struct PerpLegsYml {
     /// Basis learning holds this many seconds either side of each funding print.
     #[serde(default = "perp_funding_freeze_s")]
     pub funding_freeze_s: f64,
+}
+
+/// One asset's lead/lag row (`perp_legs.lead_lag.<ASSET>`). Unset fields take the class value.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Default)]
+pub struct PerpLeadYml {
+    /// In [0, 1]; 0 = off. Fit from a non-circular lead-lag test (perp vs perp-free spot).
+    #[serde(default)]
+    pub lambda: f64,
+    /// The asset's perp group cap (vector caps + shadow gauge); else `perp_legs.max_share`.
+    #[serde(default)]
+    pub max_share: Option<f64>,
+    /// The lead move's deviation band, bps; else `perp_legs.max_dev_bps`. Never above `basis.reset_bps`.
+    #[serde(default)]
+    pub max_dev_bps: Option<f64>,
+}
+
+/// LEAD gate: every `venues` perp group must be fresh (quoted inside the leg horizon), its deviation
+/// from the mark of the same sign as the others, and all within `max_gap_bps` of each other. Else the
+/// move is 0 for that pass; it comes back by itself on the first pass that agrees. >= 2 venues while
+/// any `lambda > 0`, so one venue alone never moves a mark.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct PerpAgreeYml {
+    #[serde(default)]
+    pub venues: Vec<String>,
+    #[serde(default = "perp_agree_gap_bps")]
+    pub max_gap_bps: f64,
+}
+
+impl Default for PerpAgreeYml {
+    fn default() -> Self {
+        Self { venues: Vec::new(), max_gap_bps: perp_agree_gap_bps() }
+    }
+}
+
+fn perp_agree_gap_bps() -> f64 {
+    3.0
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
@@ -2619,7 +2659,8 @@ impl Default for PerpLegsYml {
             venues: Vec::new(),
             base_factor: perp_base_factor(),
             lead: BTreeMap::new(),
-            lead_lag: 0.0,
+            lead_lag: BTreeMap::new(),
+            agree: PerpAgreeYml::default(),
             max_share: perp_max_share(),
             family_max_share: perp_family_max_share(),
             eligibility: PerpEligibilityYml::default(),
@@ -2653,9 +2694,36 @@ impl PerpLegsYml {
             anyhow::ensure!(self.venues.contains(v), "perp_legs.lead.{v}: not a perp_legs venue");
             anyhow::ensure!(fin(*f) && (0.5..=1.5).contains(f), "perp_legs.lead.{v} {f} outside [0.5, 1.5]");
         }
-        anyhow::ensure!(fin(self.lead_lag) && (0.0..=1.0).contains(&self.lead_lag), "perp_legs.lead_lag {} outside [0, 1]", self.lead_lag);
+        for (a, r) in &self.lead_lag {
+            anyhow::ensure!(!a.is_empty() && *a == a.to_ascii_uppercase(), "perp_legs.lead_lag.{a}: key must be an UPPERCASE asset");
+            anyhow::ensure!(fin(r.lambda) && (0.0..=1.0).contains(&r.lambda), "perp_legs.lead_lag.{a}.lambda {} outside [0, 1]", r.lambda);
+            if let Some(m) = r.max_share {
+                anyhow::ensure!(fin(m) && m > 0.0 && m < 1.0, "perp_legs.lead_lag.{a}.max_share {m} outside (0, 1)");
+            }
+            if let Some(d) = r.max_dev_bps {
+                anyhow::ensure!(fin(d) && d > 0.0 && d <= b.reset_bps, "perp_legs.lead_lag.{a}.max_dev_bps {d} outside (0, reset_bps {}]", b.reset_bps);
+            }
+        }
+        let g = &self.agree;
+        anyhow::ensure!(fin(g.max_gap_bps) && g.max_gap_bps > 0.0, "perp_legs.agree.max_gap_bps must be > 0");
+        for v in &g.venues {
+            anyhow::ensure!(self.venues.contains(v), "perp_legs.agree.venues: {v} is not a perp_legs venue");
+        }
+        let mut uniq = g.venues.clone();
+        uniq.sort();
+        uniq.dedup();
+        anyhow::ensure!(
+            !self.lead_lag.values().any(|r| r.lambda > 0.0) || uniq.len() >= 2,
+            "perp_legs.lead_lag on with < 2 distinct agree.venues: one venue alone would move the mark"
+        );
         anyhow::ensure!(!self.active() || !self.venues.is_empty(), "perp_legs enabled or shadow with no venues");
         Ok(())
+    }
+
+    /// The asset's lead row resolved: `(lambda, max_share, max_dev_bps)`; unlisted = `(0, class, class)`.
+    pub fn lead_of(&self, asset: &str) -> (f64, f64, f64) {
+        let r = self.lead_lag.get(&asset.to_ascii_uppercase()).copied().unwrap_or_default();
+        (r.lambda, r.max_share.unwrap_or(self.max_share), r.max_dev_bps.unwrap_or(self.max_dev_bps))
     }
 
     /// The venue's lead factor (1 when unset).
@@ -3181,6 +3249,35 @@ impl Default for BackfillDiskYml {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Per-asset lead/lag: unlisted = 0; overrides resolve; the agree gate needs 2 distinct venues once on.
+    #[test]
+    fn perp_lead_lag_table_and_agree_gate() {
+        let y = "enabled: false\nshadow: true\nvenues: [va, vb]\nlead_lag: {AAA: {lambda: 0.3, max_share: 0.3, max_dev_bps: 30}, BBB: {lambda: 0}}\nagree: {venues: [va, vb], max_gap_bps: 3}\n";
+        let c: PerpLegsYml = serde_yml::from_str(y).unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.lead_of("aaa"), (0.3, 0.3, 30.0));
+        assert_eq!(c.lead_of("BBB").0, 0.0);
+        assert_eq!(c.lead_of("ZZZ"), (0.0, c.max_share, c.max_dev_bps), "unlisted = off, class values");
+        let mut one = c.clone();
+        one.agree.venues = vec!["va".into(), "va".into()];
+        assert!(one.validate().is_err(), "one venue alone may never move a mark");
+        let mut off = one.clone();
+        off.lead_lag.clear();
+        off.validate().unwrap();
+        let mut bad = c.clone();
+        bad.agree.venues.push("vc".into());
+        assert!(bad.validate().is_err(), "agree venue outside venues");
+        let mut lower = c.clone();
+        lower.lead_lag.insert("aaa".into(), PerpLeadYml::default());
+        assert!(lower.validate().is_err());
+        let mut wide = c.clone();
+        wide.lead_lag.get_mut("AAA").unwrap().max_dev_bps = Some(c.basis.reset_bps + 1.0);
+        assert!(wide.validate().is_err(), "band above reset_bps");
+        let mut lam = c;
+        lam.lead_lag.get_mut("AAA").unwrap().lambda = 1.5;
+        assert!(lam.validate().is_err());
+    }
 
     /// An old image (no `coalesce_ms` field) must keep booting on a config that carries it:
     /// `CexsYml` ignores unknown keys, so the key may ship ahead of the image.

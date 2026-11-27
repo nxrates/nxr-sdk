@@ -2239,6 +2239,15 @@ pub struct CexsYml {
     /// unknown fields).
     #[serde(default)]
     pub coalesce_ms: Option<u64>,
+    /// Re-affirm grid of a proven-live flat book (ms), read by BOTH the forwarder and core:
+    /// the forwarder re-sends its last quote when the wall clock enters a later `reaffirm_ms`
+    /// cell, so forwarders on different nodes accept the SAME venue message and stamp it with
+    /// that message's own time. A quiet leg's `sourceTs` then advances on a fleet-wide grid
+    /// instead of a per-forwarder timer, which is what the co-sign gate compares.
+    /// `network.aggregation_interval_ms ..= DEFAULT_REAFFIRM_MS`; absent = the default
+    /// (`reaffirm_ms_checked`, called at boot and by `--check-config` of both binaries).
+    #[serde(default)]
+    pub reaffirm_ms: Option<u64>,
     /// Tokens pegged to a NON-USD fiat, as `TOKEN: ISO4217`. Deliberately NOT
     /// part of `pegged`, which means USD-pegged specifically and carries an
     /// absolute $1 anchor: EURC trades ~1.14, and its 2026-08-02 membership in
@@ -2296,6 +2305,10 @@ pub struct CexsYml {
     pub concentration: crate::tdwap::Concentration,
 }
 
+/// Flat-book re-affirm cadence (ms) the forwarders ran before the `cexs.reaffirm_ms` key existed:
+/// the largest a grid may be, since a slower one is never better than the timer it replaces.
+pub const DEFAULT_REAFFIRM_MS: u64 = 500;
+
 impl CexsYml {
     /// `coalesce_ms` for the forwarder: required, `1..=agg` (the floor timer it undercuts).
     /// Called by `nxr-crypto` boot AND its `--check-config`, so a ConfigMap without the key
@@ -2304,6 +2317,20 @@ impl CexsYml {
         match self.coalesce_ms {
             Some(ms) if (1..=agg).contains(&ms) => Ok(ms),
             other => anyhow::bail!("cexs.coalesce_ms {other:?} missing or outside 1..={agg} (network.aggregation_interval_ms)"),
+        }
+    }
+
+    /// `reaffirm_ms` grid of the forwarder AND of core's frame stamp: absent = the default.
+    /// Below `agg` the forwarder cannot resolve a cell (its flush window is `<= agg`), and above
+    /// [`DEFAULT_REAFFIRM_MS`] the grid is worse than the per-forwarder timer it replaces.
+    pub fn reaffirm_ms_checked(&self, agg: u64) -> anyhow::Result<u64> {
+        let ceiling = DEFAULT_REAFFIRM_MS.max(agg);
+        match self.reaffirm_ms {
+            None => Ok(ceiling),
+            Some(ms) if (agg..=ceiling).contains(&ms) => Ok(ms),
+            other => anyhow::bail!(
+                "cexs.reaffirm_ms {other:?} outside {agg}..={ceiling} (network.aggregation_interval_ms .. DEFAULT_REAFFIRM_MS)"
+            ),
         }
     }
 }
@@ -3297,6 +3324,22 @@ mod tests {
         assert_eq!(c(Some(1)).coalesce_ms_checked(200).unwrap(), 1);
         assert_eq!(c(Some(200)).coalesce_ms_checked(200).unwrap(), 200);
         assert!(c(Some(201)).coalesce_ms_checked(200).is_err());
+    }
+
+    /// The grid may not be finer than the aggregation cycle (the forwarder cannot resolve it) nor
+    /// coarser than the timer it replaces; absent = that timer, so an old ConfigMap keeps today's
+    /// cadence instead of failing to boot.
+    #[test]
+    fn reaffirm_ms_checked_bounds_and_default() {
+        let c = |v: Option<u64>| CexsYml { reaffirm_ms: v, ..Default::default() };
+        assert_eq!(c(None).reaffirm_ms_checked(200).unwrap(), DEFAULT_REAFFIRM_MS);
+        assert!(c(Some(199)).reaffirm_ms_checked(200).is_err());
+        assert_eq!(c(Some(200)).reaffirm_ms_checked(200).unwrap(), 200);
+        assert_eq!(c(Some(DEFAULT_REAFFIRM_MS)).reaffirm_ms_checked(200).unwrap(), DEFAULT_REAFFIRM_MS);
+        assert!(c(Some(DEFAULT_REAFFIRM_MS + 1)).reaffirm_ms_checked(200).is_err());
+        // A cycle at or above the old timer: the default follows the cycle, never below its floor.
+        assert_eq!(c(None).reaffirm_ms_checked(1_000).unwrap(), 1_000);
+        assert_eq!(c(Some(1_000)).reaffirm_ms_checked(1_000).unwrap(), 1_000);
     }
 
     #[test]
